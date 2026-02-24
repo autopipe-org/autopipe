@@ -1,0 +1,27 @@
+[package]
+name = "desktop"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+gui = ["eframe", "tray-icon", "ssh2"]
+
+[dependencies]
+common = { path = "../common" }
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
+schemars = "1"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+reqwest = { version = "0.12", features = ["json"] }
+
+# GUI dependencies (optional, requires GTK on Linux)
+eframe = { version = "0.31", optional = true }
+tray-icon = { version = "0.19", optional = true }
+
+# SSH (optional)
+ssh2 = { version = "0.9", optional = true }
