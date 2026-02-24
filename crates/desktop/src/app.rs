@@ -137,107 +137,62 @@ impl AutoPipeApp {
 
 impl AutoPipeApp {
     fn draw_setup_tab(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("AutoPipe Setup Guide");
-            ui.add_space(15.0);
+        ui.heading("AutoPipe Setup Guide");
+        ui.add_space(15.0);
 
-            // Step 1
-            ui.heading("Step 1: Install Claude Desktop");
-            ui.add_space(5.0);
-            ui.label("Download and install the Claude Desktop app:");
-            ui.hyperlink_to(
-                "https://claude.ai/download",
-                "https://claude.ai/download",
-            );
-            ui.add_space(5.0);
-            let installed = claude_config::is_claude_desktop_installed();
-            ui.horizontal(|ui| {
-                ui.label("Claude Desktop:");
-                if installed {
-                    ui.colored_label(egui::Color32::GREEN, "Detected");
-                } else {
-                    ui.colored_label(egui::Color32::YELLOW, "Not detected (install and launch it first)");
-                }
-            });
-
-            ui.add_space(15.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // Step 2
-            ui.heading("Step 2: Install SSHFS");
-            ui.add_space(5.0);
-            ui.label("SSHFS is required to access remote files locally.");
-            ui.label("Install it for your operating system:");
-            ui.add_space(5.0);
-
-            #[cfg(target_os = "macos")]
-            {
-                ui.label("macOS:");
-                ui.label("  1. Install macFUSE: https://osxfuse.github.io/");
-                ui.label("  2. Approve the kernel extension in System Settings > Privacy & Security");
-                ui.label("  3. Install sshfs: brew install sshfs");
+        // Step 1
+        ui.heading("Step 1: Install Claude Desktop");
+        ui.add_space(5.0);
+        ui.label("Download and install the Claude Desktop app:");
+        ui.hyperlink_to(
+            "https://claude.ai/download",
+            "https://claude.ai/download",
+        );
+        ui.add_space(5.0);
+        let installed = claude_config::is_claude_desktop_installed();
+        ui.horizontal(|ui| {
+            ui.label("Claude Desktop:");
+            if installed {
+                ui.colored_label(egui::Color32::GREEN, "Detected");
+            } else {
+                ui.colored_label(egui::Color32::YELLOW, "Not detected (install and launch it first)");
             }
-            #[cfg(target_os = "windows")]
-            {
-                ui.label("Windows:");
-                ui.label("  1. Install WinFsp: https://winfsp.dev/rel/");
-                ui.label("  2. Install SSHFS-Win: https://github.com/winfsp/sshfs-win/releases");
-            }
-            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-            {
-                ui.label("Linux:");
-                ui.label("  Ubuntu/Debian: sudo apt install sshfs");
-                ui.label("  Fedora/RHEL: sudo dnf install fuse-sshfs");
-                ui.label("  Arch: sudo pacman -S sshfs");
-            }
-
-            ui.add_space(5.0);
-            let sshfs_available = crate::ssh::check_sshfs_available();
-            ui.horizontal(|ui| {
-                ui.label("SSHFS:");
-                if sshfs_available {
-                    ui.colored_label(egui::Color32::GREEN, "Installed");
-                } else {
-                    ui.colored_label(egui::Color32::RED, "Not detected (install SSHFS first)");
-                }
-            });
-
-            ui.add_space(15.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // Step 3
-            ui.heading("Step 3: Configure Settings");
-            ui.add_space(5.0);
-            ui.label("Go to the Connection tab to set the registry server URL.");
-            ui.label("Go to the SSH tab to configure the remote server and SSHFS mount.");
-
-            ui.add_space(15.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // Step 4
-            ui.heading("Step 4: Register MCP Tools");
-            ui.add_space(5.0);
-            ui.label("Click 'Register & Minimize to Tray' at the bottom.");
-            ui.label("This registers autopipe tools in Claude Desktop.");
-            ui.label("After registration, restart Claude Desktop to load the tools.");
-
-            ui.add_space(15.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // Step 5
-            ui.heading("Step 5: Use Claude Desktop");
-            ui.add_space(5.0);
-            ui.label("Open Claude Desktop and start a conversation.");
-            ui.label("You can ask Claude to:");
-            ui.label("  - Search for existing workflows");
-            ui.label("  - Create new bioinformatics pipelines");
-            ui.label("  - Build, run, and monitor pipelines");
-            ui.label("  - Upload workflows to the registry for sharing");
         });
+
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // Step 2
+        ui.heading("Step 2: Configure Settings");
+        ui.add_space(5.0);
+        ui.label("Go to the Connection tab to set the registry server URL.");
+        ui.label("Go to the SSH tab to configure the remote server connection.");
+
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // Step 3
+        ui.heading("Step 3: Register MCP Tools");
+        ui.add_space(5.0);
+        ui.label("Click 'Register & Minimize to Tray' at the bottom.");
+        ui.label("This registers autopipe tools in Claude Desktop.");
+        ui.label("After registration, restart Claude Desktop to load the tools.");
+
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // Step 4
+        ui.heading("Step 4: Use Claude Desktop");
+        ui.add_space(5.0);
+        ui.label("Open Claude Desktop and start a conversation.");
+        ui.label("You can ask Claude to:");
+        ui.label("  - Search for existing workflows");
+        ui.label("  - Create new bioinformatics pipelines");
+        ui.label("  - Build, run, and monitor pipelines");
+        ui.label("  - Upload workflows to the registry for sharing");
     }
 
     fn draw_connection_tab(&mut self, ui: &mut egui::Ui) {
@@ -321,72 +276,6 @@ impl AutoPipeApp {
                 Err(e) => self.status_message = format!("SSH Failed: {}", e),
             }
         }
-
-        ui.add_space(15.0);
-        ui.separator();
-        ui.add_space(10.0);
-
-        // SSHFS mount settings
-        ui.heading("SSHFS Mount");
-        ui.add_space(5.0);
-        ui.label("Mount a remote directory locally so Claude Desktop can read/write files directly.");
-        ui.add_space(5.0);
-
-        ui.horizontal(|ui| {
-            ui.label("Remote Root:");
-            ui.text_edit_singleline(&mut self.config.remote_mount_root);
-        });
-        ui.label("The remote directory to mount (e.g. /home/user/data)");
-
-        ui.add_space(3.0);
-        ui.horizontal(|ui| {
-            ui.label("Local Mount:");
-            ui.text_edit_singleline(&mut self.config.local_mount_path);
-        });
-        #[cfg(target_os = "windows")]
-        ui.label("Drive letter to mount to (e.g. S:)");
-        #[cfg(not(target_os = "windows"))]
-        ui.label("Local directory to mount to (e.g. ~/autopipe-remote)");
-
-        ui.add_space(5.0);
-
-        // Status indicators
-        let sshfs_available = crate::ssh::check_sshfs_available();
-        let mounted = crate::ssh::is_mounted(&self.config);
-
-        ui.horizontal(|ui| {
-            ui.label("SSHFS:");
-            if sshfs_available {
-                ui.colored_label(egui::Color32::GREEN, "Installed");
-            } else {
-                ui.colored_label(egui::Color32::RED, "Not installed");
-            }
-            ui.label("  Mount:");
-            if mounted {
-                ui.colored_label(egui::Color32::GREEN, "Mounted");
-            } else {
-                ui.colored_label(egui::Color32::GRAY, "Not mounted");
-            }
-        });
-
-        ui.add_space(5.0);
-        ui.horizontal(|ui| {
-            if mounted {
-                if ui.button("Unmount").clicked() {
-                    self.save_config();
-                    match crate::ssh::sshfs_unmount(&self.config) {
-                        Ok(()) => self.status_message = "SSHFS unmounted.".into(),
-                        Err(e) => self.status_message = format!("Unmount failed: {}", e),
-                    }
-                }
-            } else if ui.button("Mount").clicked() {
-                self.save_config();
-                match crate::ssh::sshfs_mount(&self.config) {
-                    Ok(msg) => self.status_message = msg,
-                    Err(e) => self.status_message = format!("Mount failed: {}", e),
-                }
-            }
-        });
     }
 
     fn draw_status_tab(&mut self, ui: &mut egui::Ui) {
