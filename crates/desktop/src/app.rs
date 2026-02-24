@@ -19,6 +19,7 @@ pub struct AutoPipeApp {
     ssh_auth_type: usize, // 0=Agent, 1=Key, 2=Password
     status_message: String,
     should_minimize: bool,
+    minimized_to_tray: bool,
 }
 
 impl AutoPipeApp {
@@ -38,6 +39,7 @@ impl AutoPipeApp {
             ssh_auth_type,
             status_message: String::new(),
             should_minimize: false,
+            minimized_to_tray: false,
         }
     }
 
@@ -110,6 +112,26 @@ impl eframe::App for AutoPipeApp {
                 }
             });
         });
+
+        // Minimize to tray: hide the window
+        if self.should_minimize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.should_minimize = false;
+            self.minimized_to_tray = true;
+        }
+    }
+}
+
+impl AutoPipeApp {
+    /// Called from main loop to check if tray "Settings" was clicked.
+    pub fn restore_from_tray(&mut self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        self.minimized_to_tray = false;
+    }
+
+    pub fn is_minimized_to_tray(&self) -> bool {
+        self.minimized_to_tray
     }
 }
 
