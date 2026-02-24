@@ -33,8 +33,7 @@ fn create_session(config: &AppConfig) -> Result<Session, String> {
     Ok(sess)
 }
 
-/// Execute a command on the remote server via SSH.
-pub fn ssh_exec(config: &AppConfig, command: &str) -> Result<(String, i32), String> {
+fn ssh_exec_once(config: &AppConfig, command: &str) -> Result<(String, i32), String> {
     let sess = create_session(config)?;
 
     let mut channel = sess
@@ -45,15 +44,60 @@ pub fn ssh_exec(config: &AppConfig, command: &str) -> Result<(String, i32), Stri
         .exec(command)
         .map_err(|e| format!("Exec error: {}", e))?;
 
-    let mut output = String::new();
+    let mut stdout = String::new();
     channel
-        .read_to_string(&mut output)
-        .map_err(|e| format!("Read error: {}", e))?;
+        .read_to_string(&mut stdout)
+        .map_err(|e| format!("Read stdout error: {}", e))?;
+
+    let mut stderr = String::new();
+    channel
+        .stderr()
+        .read_to_string(&mut stderr)
+        .map_err(|e| format!("Read stderr error: {}", e))?;
 
     channel.wait_close().ok();
     let exit_status = channel.exit_status().unwrap_or(-1);
 
+    // Combine stdout and stderr
+    let output = if stderr.is_empty() {
+        stdout
+    } else if stdout.is_empty() {
+        stderr
+    } else {
+        format!("{}\n{}", stdout, stderr)
+    };
+
     Ok((output, exit_status))
+}
+
+/// Execute a command on the remote server via SSH.
+/// Retries up to 3 times on connection/auth failures.
+pub fn ssh_exec(config: &AppConfig, command: &str) -> Result<(String, i32), String> {
+    let max_retries = 3;
+    let mut last_err = String::new();
+
+    for attempt in 0..max_retries {
+        match ssh_exec_once(config, command) {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_err = e;
+                // Only retry on connection/auth errors, not exec errors
+                if last_err.contains("auth failed")
+                    || last_err.contains("TCP connect")
+                    || last_err.contains("handshake")
+                {
+                    if attempt < max_retries - 1 {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        continue;
+                    }
+                } else {
+                    return Err(last_err);
+                }
+            }
+        }
+    }
+
+    Err(format!("{} (after {} retries)", last_err, max_retries))
 }
 
 /// Test SSH connection.

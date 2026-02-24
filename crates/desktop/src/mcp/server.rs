@@ -57,8 +57,8 @@ struct DryRunParams {
 struct ExecuteParams {
     /// Docker image name
     image_name: String,
-    /// tmux session name
-    session_name: String,
+    /// Run name (used for log file and container naming)
+    run_name: String,
     /// Remote input data directory (mounted as read-only in Docker)
     input_dir: String,
     /// Remote output directory
@@ -69,8 +69,10 @@ struct ExecuteParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct StatusParams {
-    /// tmux session name or container name prefix
-    session_name: String,
+    /// Run name (matches the run_name used in execute_pipeline)
+    run_name: String,
+    /// Remote output directory (where pipeline.log is located)
+    output_dir: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -471,12 +473,14 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in a tmux session on the remote server via SSH")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Logs are written to {output_dir}/pipeline.log.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
+        let container_name = format!("{}-run", params.run_name);
+        let log_path = format!("{}/pipeline.log", params.output_dir.trim_end_matches('/'));
 
         // Find the pipeline directory to mount
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
@@ -484,65 +488,61 @@ impl AutoPipeServer {
             None => String::new(),
         };
 
+        // Remove old container with same name if exists
+        let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", container_name)).await;
+
+        // Create output directory
+        let _ = self.ssh_run(&format!("mkdir -p '{}'", params.output_dir)).await;
+
+        // Run with nohup in background, redirect all output to log file
         let cmd = format!(
-            "tmux new-session -d -s '{}' \"docker run --rm --entrypoint snakemake --name '{}-run' {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml\"",
-            params.session_name, params.session_name, pipeline_mount, params.input_dir, params.output_dir, params.image_name, cores
+            "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            container_name, pipeline_mount, params.input_dir, params.output_dir, params.image_name, cores, log_path
         );
 
         match self.ssh_run(&cmd).await {
-            Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Pipeline started in tmux session '{}' on remote server.\nMonitor: ssh then `tmux attach -t {}`",
-                params.session_name, params.session_name
-            ))])),
+            Ok((output, 0)) => {
+                let pid = output.trim().lines().last().unwrap_or("unknown");
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Pipeline started in background (PID: {}, container: '{}').\nLog file: {}\nUse check_status with run_name='{}' and output_dir='{}' to monitor progress.",
+                    pid, container_name, log_path, params.run_name, params.output_dir
+                ))]))
+            }
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to start tmux session:\n{}",
+                "Failed to start pipeline:\n{}",
                 output
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
 
-    #[tool(description = "Check pipeline execution status on the remote server via SSH")]
+    #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running")]
     async fn check_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config.clone();
-        let session_name = params.session_name.clone();
+        let container_name = format!("{}-run", params.run_name);
+        let log_path = format!("{}/pipeline.log", params.output_dir.trim_end_matches('/'));
 
-        let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            let tmux_cmd = format!(
-                "tmux capture-pane -t '{}' -p -l 30 2>/dev/null",
-                session_name
-            );
-            if let Ok((output, 0)) = ssh::ssh_exec(&config, &tmux_cmd) {
-                if !output.trim().is_empty() {
-                    return Ok(format!(
-                        "tmux session '{}' output:\n{}",
-                        session_name, output
-                    ));
-                }
-            }
+        // Check if container is still running
+        let running = match self.ssh_run(&format!("docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", container_name)).await {
+            Ok((output, 0)) => output.trim() == "true",
+            _ => false,
+        };
 
-            let container_name = format!("{}-run", session_name);
-            let docker_cmd = format!("docker logs --tail 30 '{}' 2>&1", container_name);
-            if let Ok((output, _)) = ssh::ssh_exec(&config, &docker_cmd) {
-                return Ok(format!("Docker logs for '{}':\n{}", container_name, output));
-            }
+        // Read last 50 lines of log
+        let log_output = match self.ssh_run(&format!("tail -50 '{}' 2>/dev/null", log_path)).await {
+            Ok((output, 0)) => output,
+            Ok((output, _)) => format!("(log not available: {})", output.trim()),
+            Err(e) => format!("(cannot read log: {})", e),
+        };
 
-            Ok(format!(
-                "No active session or container found for '{}'",
-                session_name
-            ))
-        })
-        .await
-        .map_err(|e| format!("Task error: {}", e));
+        let status_str = if running { "RUNNING" } else { "FINISHED" };
 
-        match result {
-            Ok(Ok(text)) => Ok(CallToolResult::success(vec![Content::text(text)])),
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Status: {}\nContainer: {}\nLog ({}):\n{}",
+            status_str, container_name, log_path, log_output
+        ))]))
     }
 
     // ── Remote file tools ───────────────────────────────────────
