@@ -147,6 +147,37 @@ impl AutoPipeServer {
             Err(e) => Err(e),
         }
     }
+
+    /// Find the pipeline directory for a given Docker image name.
+    /// Searches the configured output_dir for a matching pipeline directory.
+    async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
+        // The image name follows the pattern "autopipe-<pipeline-name>"
+        // The pipeline directory is at <output_dir>/<pipeline-name>/<pipeline-name>/
+        let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
+        let candidate = format!(
+            "{}/{}/{}",
+            self.config.output_dir.trim_end_matches('/'),
+            pipeline_name,
+            pipeline_name
+        );
+        // Check if the directory exists
+        if let Ok((output, 0)) = self.ssh_run(&format!("test -d '{}' && echo 'exists'", candidate)).await {
+            if output.trim().contains("exists") {
+                return Some(candidate);
+            }
+        }
+        // Also try under the user's home projects path
+        let home_candidate = format!(
+            "/home/{}/projects/autopipe/pipelines_output/{}/{}",
+            self.config.ssh_user, pipeline_name, pipeline_name
+        );
+        if let Ok((output, 0)) = self.ssh_run(&format!("test -d '{}' && echo 'exists'", home_candidate)).await {
+            if output.trim().contains("exists") {
+                return Some(home_candidate);
+            }
+        }
+        None
+    }
 }
 
 #[tool_router]
@@ -421,9 +452,16 @@ impl AutoPipeServer {
         Parameters(params): Parameters<DryRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
+
+        // Find the pipeline directory to mount
+        let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
+            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", dir),
+            None => String::new(),
+        };
+
         let cmd = format!(
-            "docker run --rm -v '{}:/input:ro' -v '{}:/output' '{}' snakemake --cores {} -n -p",
-            params.input_dir, params.output_dir, params.image_name, cores
+            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            pipeline_mount, params.input_dir, params.output_dir, params.image_name, cores
         );
 
         match self.ssh_run(&cmd).await {
@@ -439,9 +477,16 @@ impl AutoPipeServer {
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
+
+        // Find the pipeline directory to mount
+        let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
+            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", dir),
+            None => String::new(),
+        };
+
         let cmd = format!(
-            "tmux new-session -d -s '{}' \"docker run --rm --name '{}-run' -v '{}:/input:ro' -v '{}:/output' '{}' snakemake --cores {}\"",
-            params.session_name, params.session_name, params.input_dir, params.output_dir, params.image_name, cores
+            "tmux new-session -d -s '{}' \"docker run --rm --entrypoint snakemake --name '{}-run' {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml\"",
+            params.session_name, params.session_name, pipeline_mount, params.input_dir, params.output_dir, params.image_name, cores
         );
 
         match self.ssh_run(&cmd).await {
@@ -673,3 +718,4 @@ pub async fn run_mcp_server() -> Result<(), Box<dyn std::error::Error>> {
     service.waiting().await?;
     Ok(())
 }
+
