@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub pipelines_dir: String,
     pub output_dir: String,
     pub mcp_registered: bool,
+    pub local_mount_path: String,
+    pub remote_mount_root: String,
 }
 
 impl Default for AppConfig {
@@ -45,6 +47,15 @@ impl Default for AppConfig {
             pipelines_dir: "pipelines".into(),
             output_dir: "pipelines_output".into(),
             mcp_registered: false,
+            #[cfg(target_os = "windows")]
+            local_mount_path: "S:".into(),
+            #[cfg(not(target_os = "windows"))]
+            local_mount_path: dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("autopipe-remote")
+                .to_string_lossy()
+                .to_string(),
+            remote_mount_root: String::new(),
         }
     }
 }

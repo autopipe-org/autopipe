@@ -23,19 +23,19 @@ struct SearchParams {
 struct DownloadParams {
     /// Pipeline ID to download
     pipeline_id: i32,
-    /// Remote directory path where the pipeline will be saved
+    /// Local directory path where the pipeline will be saved (SSHFS mount path)
     output_dir: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PipelineDirParams {
-    /// Remote path to the pipeline directory
+    /// Local path to the pipeline directory (SSHFS mount path)
     pipeline_dir: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct BuildParams {
-    /// Remote path to the pipeline directory
+    /// Remote path to the pipeline directory (on the SSH server)
     pipeline_dir: String,
     /// Docker image name/tag
     image_name: String,
@@ -45,7 +45,7 @@ struct BuildParams {
 struct DryRunParams {
     /// Docker image name
     image_name: String,
-    /// Remote input data directory (mounted as read-only)
+    /// Remote input data directory (mounted as read-only in Docker)
     input_dir: String,
     /// Remote output directory
     output_dir: String,
@@ -59,7 +59,7 @@ struct ExecuteParams {
     image_name: String,
     /// tmux session name
     session_name: String,
-    /// Remote input data directory (mounted as read-only)
+    /// Remote input data directory (mounted as read-only in Docker)
     input_dir: String,
     /// Remote output directory
     output_dir: String,
@@ -71,26 +71,6 @@ struct ExecuteParams {
 struct StatusParams {
     /// tmux session name or container name prefix
     session_name: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ReadFileParams {
-    /// Remote file path to read
-    file_path: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct WriteFileParams {
-    /// Remote file path to write
-    file_path: String,
-    /// Content to write
-    content: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ListFilesParams {
-    /// Remote directory path to list
-    dir_path: String,
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -146,7 +126,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Download a pipeline by ID and save it to a remote directory via SSH")]
+    #[tool(description = "Download a pipeline by ID and save it to a local directory (SSHFS mounted)")]
     async fn download_pipeline(
         &self,
         Parameters(params): Parameters<DownloadParams>,
@@ -161,68 +141,70 @@ impl AutoPipeServer {
             }
         };
 
-        let dir = format!("{}/{}", params.output_dir.trim_end_matches('/'), pipeline.name);
-        let meta_str = serde_json::to_string_pretty(&pipeline.metadata_json).unwrap_or_default();
+        let dir = format!(
+            "{}/{}",
+            params.output_dir.trim_end_matches('/'),
+            pipeline.name
+        );
+        let meta_str =
+            serde_json::to_string_pretty(&pipeline.metadata_json).unwrap_or_default();
 
-        // Clone to owned Strings for 'static requirement of spawn_blocking
-        let files: Vec<(String, String)> = vec![
-            ("Snakefile".into(), pipeline.snakefile.clone()),
-            ("Dockerfile".into(), pipeline.dockerfile.clone()),
-            ("config.yaml".into(), pipeline.config_yaml.clone()),
-            ("metadata.json".into(), meta_str),
-            ("README.md".into(), pipeline.readme.clone()),
+        let files: Vec<(&str, &str)> = vec![
+            ("Snakefile", &pipeline.snakefile),
+            ("Dockerfile", &pipeline.dockerfile),
+            ("config.yaml", &pipeline.config_yaml),
+            ("metadata.json", &meta_str),
+            ("README.md", &pipeline.readme),
         ];
 
-        let config = self.config.clone();
-        let pipeline_name = pipeline.name.clone();
-        let dir_clone = dir.clone();
-
-        let result = tokio::task::spawn_blocking(move || {
-            for (name, content) in &files {
-                let remote_path = format!("{}/{}", dir_clone, name);
-                if let Err(e) = ssh::sftp_write(&config, &remote_path, content) {
-                    return Err(format!("Failed to write {}: {}", name, e));
-                }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|e| format!("Task error: {}", e));
-
-        match result {
-            Ok(Ok(())) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Downloaded pipeline '{}' to remote:{}",
-                pipeline_name, dir
-            ))])),
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot create directory '{}': {}",
+                dir, e
+            ))]));
         }
+
+        for (name, content) in &files {
+            let path = format!("{}/{}", dir, name);
+            if let Err(e) = std::fs::write(&path, content) {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to write {}: {}",
+                    name, e
+                ))]));
+            }
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Downloaded pipeline '{}' to {}",
+            pipeline.name, dir
+        ))]))
     }
 
-    #[tool(description = "Upload a pipeline from a remote directory to the registry")]
+    #[tool(description = "Upload a pipeline from a local directory (SSHFS mounted) to the registry")]
     async fn upload_pipeline(
         &self,
         Parameters(params): Parameters<PipelineDirParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config.clone();
-        let dir = params.pipeline_dir.clone();
+        let dir = &params.pipeline_dir;
 
-        let read_result = tokio::task::spawn_blocking(move || {
-            let meta_content = ssh::sftp_read(&config, &format!("{}/metadata.json", dir))?;
-            let snakefile = ssh::sftp_read(&config, &format!("{}/Snakefile", dir)).unwrap_or_default();
-            let dockerfile = ssh::sftp_read(&config, &format!("{}/Dockerfile", dir)).unwrap_or_default();
-            let config_yaml = ssh::sftp_read(&config, &format!("{}/config.yaml", dir)).unwrap_or_default();
-            let readme = ssh::sftp_read(&config, &format!("{}/README.md", dir)).unwrap_or_default();
-            Ok::<_, String>((meta_content, snakefile, dockerfile, config_yaml, readme))
-        })
-        .await
-        .map_err(|e| format!("Task error: {}", e));
-
-        let (meta_content, snakefile, dockerfile, config_yaml, readme) = match read_result {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => return Ok(CallToolResult::error(vec![Content::text(e)])),
-            Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+        let meta_content = match std::fs::read_to_string(format!("{}/metadata.json", dir)) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot read metadata.json: {}",
+                    e
+                ))]));
+            }
         };
+
+        let snakefile =
+            std::fs::read_to_string(format!("{}/Snakefile", dir)).unwrap_or_default();
+        let dockerfile =
+            std::fs::read_to_string(format!("{}/Dockerfile", dir)).unwrap_or_default();
+        let config_yaml =
+            std::fs::read_to_string(format!("{}/config.yaml", dir)).unwrap_or_default();
+        let readme =
+            std::fs::read_to_string(format!("{}/README.md", dir)).unwrap_or_default();
 
         let metadata: PipelineMetadata = match serde_json::from_str(&meta_content) {
             Ok(m) => m,
@@ -266,63 +248,64 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Validate a pipeline directory structure on the remote server")]
+    #[tool(description = "Validate a pipeline directory structure (local SSHFS mounted path)")]
     async fn validate_pipeline(
         &self,
         Parameters(params): Parameters<PipelineDirParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config.clone();
-        let dir = params.pipeline_dir.clone();
+        let dir = &params.pipeline_dir;
+        let mut errors: Vec<String> = Vec::new();
+        let required = [
+            "Snakefile",
+            "Dockerfile",
+            "config.yaml",
+            "metadata.json",
+            "README.md",
+        ];
 
-        let result = tokio::task::spawn_blocking(move || {
-            let mut errors: Vec<String> = Vec::new();
-            let required = ["Snakefile", "Dockerfile", "config.yaml", "metadata.json", "README.md"];
-
-            for f in &required {
-                let path = format!("{}/{}", dir, f);
-                match ssh::sftp_read(&config, &path) {
-                    Ok(content) if content.is_empty() => errors.push(format!("Empty: {}", f)),
-                    Err(_) => errors.push(format!("Missing: {}", f)),
-                    Ok(content) => {
-                        if *f == "Snakefile" && !content.contains("rule all") {
-                            errors.push("Snakefile: missing 'rule all'".into());
-                        }
-                        if *f == "metadata.json" {
-                            match serde_json::from_str::<PipelineMetadata>(&content) {
-                                Ok(m) => {
-                                    if m.name.is_empty() {
-                                        errors.push("metadata.json: 'name' is empty".into());
-                                    }
-                                    if m.tools.is_empty() {
-                                        errors.push("metadata.json: 'tools' is empty".into());
-                                    }
+        for f in &required {
+            let path = format!("{}/{}", dir, f);
+            match std::fs::read_to_string(&path) {
+                Ok(content) if content.is_empty() => errors.push(format!("Empty: {}", f)),
+                Err(_) => errors.push(format!("Missing: {}", f)),
+                Ok(content) => {
+                    if *f == "Snakefile" && !content.contains("rule all") {
+                        errors.push("Snakefile: missing 'rule all'".into());
+                    }
+                    if *f == "metadata.json" {
+                        match serde_json::from_str::<PipelineMetadata>(&content) {
+                            Ok(m) => {
+                                if m.name.is_empty() {
+                                    errors.push("metadata.json: 'name' is empty".into());
                                 }
-                                Err(e) => errors.push(format!("metadata.json: invalid - {}", e)),
+                                if m.tools.is_empty() {
+                                    errors.push("metadata.json: 'tools' is empty".into());
+                                }
+                            }
+                            Err(e) => {
+                                errors.push(format!("metadata.json: invalid - {}", e))
                             }
                         }
                     }
                 }
             }
-            errors
-        })
-        .await
-        .unwrap_or_else(|_| vec!["Task error".into()]);
+        }
 
-        if result.is_empty() {
+        if errors.is_empty() {
             Ok(CallToolResult::success(vec![Content::text(
                 "Validation passed. All files present and valid.",
             )]))
         } else {
             Ok(CallToolResult::error(vec![Content::text(format!(
                 "Validation errors:\n{}",
-                result.join("\n")
+                errors.join("\n")
             ))]))
         }
     }
 
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. Use remote path.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
@@ -353,7 +336,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Dry-run a pipeline (snakemake -n -p) on the remote server via SSH")]
+    #[tool(description = "Dry-run a pipeline (snakemake -n -p) on the remote server via SSH. Use remote paths.")]
     async fn dry_run(
         &self,
         Parameters(params): Parameters<DryRunParams>,
@@ -379,7 +362,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in a tmux session on the remote server via SSH")]
+    #[tool(description = "Execute a pipeline in a tmux session on the remote server via SSH. Use remote paths.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -420,25 +403,29 @@ impl AutoPipeServer {
         let session_name = params.session_name.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<String, String> {
-            // Try tmux first
             let tmux_cmd = format!(
                 "tmux capture-pane -t '{}' -p -l 30 2>/dev/null",
                 session_name
             );
             if let Ok((output, 0)) = ssh::ssh_exec(&config, &tmux_cmd) {
                 if !output.trim().is_empty() {
-                    return Ok(format!("tmux session '{}' output:\n{}", session_name, output));
+                    return Ok(format!(
+                        "tmux session '{}' output:\n{}",
+                        session_name, output
+                    ));
                 }
             }
 
-            // Fall back to docker logs
             let container_name = format!("{}-run", session_name);
             let docker_cmd = format!("docker logs --tail 30 '{}' 2>&1", container_name);
             if let Ok((output, _)) = ssh::ssh_exec(&config, &docker_cmd) {
                 return Ok(format!("Docker logs for '{}':\n{}", container_name, output));
             }
 
-            Ok(format!("No active session or container found for '{}'", session_name))
+            Ok(format!(
+                "No active session or container found for '{}'",
+                session_name
+            ))
         })
         .await
         .map_err(|e| format!("Task error: {}", e));
@@ -450,81 +437,32 @@ impl AutoPipeServer {
         }
     }
 
-    // ── Remote file tools (via SSH/SFTP) ────────────────────────
+    // ── Mount info ──────────────────────────────────────────────
 
-    #[tool(description = "Read a file on the remote server via SSH. Returns the file content so Claude can analyze it.")]
-    async fn read_remote_file(
-        &self,
-        Parameters(params): Parameters<ReadFileParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config.clone();
-        let path = params.file_path.clone();
+    #[tool(description = "Get SSHFS mount information. Shows local mount path, remote root, and path mapping. Use local paths for file access and remote paths for Docker execution.")]
+    async fn get_mount_info(&self) -> Result<CallToolResult, ErrorData> {
+        let mounted = ssh::is_mounted(&self.config);
+        let available = ssh::check_sshfs_available();
 
-        let result = tokio::task::spawn_blocking(move || ssh::sftp_read(&config, &path))
-            .await
-            .map_err(|e| format!("Task error: {}", e));
+        let text = format!(
+            "SSHFS Mount Info:\n\
+             - Local mount path: {}\n\
+             - Remote mount root: {}\n\
+             - SSHFS installed: {}\n\
+             - Currently mounted: {}\n\n\
+             Path mapping:\n\
+             - Local: {}/some/path → Remote: {}/some/path\n\
+             - Use LOCAL paths for file read/write (Claude can access directly)\n\
+             - Use REMOTE paths for Docker execution tools (build_image, dry_run, execute_pipeline)",
+            self.config.local_mount_path,
+            self.config.remote_mount_root,
+            available,
+            mounted,
+            self.config.local_mount_path.trim_end_matches('/'),
+            self.config.remote_mount_root.trim_end_matches('/'),
+        );
 
-        match result {
-            Ok(Ok(content)) => Ok(CallToolResult::success(vec![Content::text(content)])),
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
-    }
-
-    #[tool(description = "Write content to a file on the remote server via SSH")]
-    async fn write_remote_file(
-        &self,
-        Parameters(params): Parameters<WriteFileParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config.clone();
-        let path = params.file_path.clone();
-        let content = params.content.clone();
-
-        let result =
-            tokio::task::spawn_blocking(move || ssh::sftp_write(&config, &path, &content))
-                .await
-                .map_err(|e| format!("Task error: {}", e));
-
-        match result {
-            Ok(Ok(())) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Written to remote:{}",
-                params.file_path
-            ))])),
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
-    }
-
-    #[tool(description = "List files and directories on the remote server via SSH")]
-    async fn list_remote_files(
-        &self,
-        Parameters(params): Parameters<ListFilesParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config.clone();
-        let dir = params.dir_path.clone();
-
-        let result = tokio::task::spawn_blocking(move || ssh::sftp_list(&config, &dir))
-            .await
-            .map_err(|e| format!("Task error: {}", e));
-
-        match result {
-            Ok(Ok(entries)) => {
-                let lines: Vec<String> = entries
-                    .iter()
-                    .map(|e| {
-                        if e.is_dir {
-                            format!("  [DIR]  {}/", e.name)
-                        } else {
-                            format!("  [FILE] {} ({} bytes)", e.name, e.size)
-                        }
-                    })
-                    .collect();
-                let text = format!("{}:\n{}", params.dir_path, lines.join("\n"));
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     // ── Template tools ──────────────────────────────────────────
@@ -559,9 +497,11 @@ impl ServerHandler for AutoPipeServer {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             instructions: Some(
-                "AutoPipe MCP Server - Manage bioinformatics Snakemake pipelines. \
-                 All execution and file access happens on the remote server via SSH. \
-                 Use read_remote_file / write_remote_file / list_remote_files to access data and results."
+                "AutoPipe MCP Server - Manage bioinformatics Snakemake pipelines.\n\
+                 Remote files are accessible locally via SSHFS mount.\n\
+                 Use get_mount_info to see the local↔remote path mapping.\n\
+                 - File access: use LOCAL paths (Claude can read/write directly)\n\
+                 - Docker execution: use REMOTE paths (build_image, dry_run, execute_pipeline)"
                     .into(),
             ),
             ..Default::default()

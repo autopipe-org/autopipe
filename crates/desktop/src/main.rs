@@ -84,8 +84,6 @@ fn main() {
 
 #[cfg(feature = "gui")]
 fn run_gui() {
-    use std::sync::{Arc, Mutex};
-
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([550.0, 500.0])
@@ -93,45 +91,14 @@ fn run_gui() {
         ..Default::default()
     };
 
-    // Shared flag for tray → app communication
-    let tray_show = Arc::new(Mutex::new(false));
-    let tray_quit = Arc::new(Mutex::new(false));
-
-    // Spawn tray icon in a background thread
-    let show_clone = Arc::clone(&tray_show);
-    let quit_clone = Arc::clone(&tray_quit);
-    std::thread::spawn(move || {
-        if let Ok(app_tray) = tray::AppTray::new() {
-            loop {
-                if let Some(action) = app_tray.poll_action() {
-                    match action {
-                        tray::TrayAction::ShowSettings => {
-                            *show_clone.lock().unwrap() = true;
-                        }
-                        tray::TrayAction::Quit => {
-                            *quit_clone.lock().unwrap() = true;
-                            break;
-                        }
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-    });
-
-    let tray_show_for_app = Arc::clone(&tray_show);
-    let tray_quit_for_app = Arc::clone(&tray_quit);
-
     eframe::run_native(
         "AutoPipe",
         options,
         Box::new(move |cc| {
+            // Create tray icon on main thread (required for macOS)
+            let tray = tray::AppTray::new().ok();
             let app = app::AutoPipeApp::new(cc);
-            Ok(Box::new(TrayAwareApp {
-                inner: app,
-                tray_show: tray_show_for_app,
-                tray_quit: tray_quit_for_app,
-            }))
+            Ok(Box::new(TrayAwareApp { inner: app, tray }))
         }),
     )
     .expect("Failed to start eGUI");
@@ -140,31 +107,29 @@ fn run_gui() {
 #[cfg(feature = "gui")]
 struct TrayAwareApp {
     inner: app::AutoPipeApp,
-    tray_show: std::sync::Arc<std::sync::Mutex<bool>>,
-    tray_quit: std::sync::Arc<std::sync::Mutex<bool>>,
+    tray: Option<tray::AppTray>,
 }
 
 #[cfg(feature = "gui")]
 impl eframe::App for TrayAwareApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
-        // Check tray events
-        if *self.tray_quit.lock().unwrap() {
-            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
-            return;
-        }
-
-        let mut show = self.tray_show.lock().unwrap();
-        if *show {
-            *show = false;
-            self.inner.restore_from_tray(ctx);
-        }
-        drop(show);
-
-        // Continuously repaint to check tray events
-        if self.inner.is_minimized_to_tray() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        // Poll tray menu events via global channel
+        if let Some(ref tray) = self.tray {
+            if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+                if event.id() == tray.show_id() {
+                    self.inner.restore_from_tray(ctx);
+                } else if event.id() == tray.quit_id() {
+                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                    return;
+                }
+            }
         }
 
         self.inner.update(ctx, frame);
+
+        // Keep polling even when minimized to tray
+        if self.inner.is_minimized_to_tray() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
     }
 }

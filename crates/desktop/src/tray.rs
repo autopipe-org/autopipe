@@ -50,6 +50,14 @@ impl AppTray {
         }
         None
     }
+
+    pub fn show_id(&self) -> &MenuId {
+        &self.show_id
+    }
+
+    pub fn quit_id(&self) -> &MenuId {
+        &self.quit_id
+    }
 }
 
 fn create_default_icon() -> Icon {

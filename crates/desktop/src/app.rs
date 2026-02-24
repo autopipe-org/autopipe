@@ -276,6 +276,72 @@ impl AutoPipeApp {
                 Err(e) => self.status_message = format!("SSH Failed: {}", e),
             }
         }
+
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+
+        // SSHFS mount settings
+        ui.heading("SSHFS Mount");
+        ui.add_space(5.0);
+        ui.label("Mount a remote directory locally so Claude Desktop can read/write files directly.");
+        ui.add_space(5.0);
+
+        ui.horizontal(|ui| {
+            ui.label("Remote Root:");
+            ui.text_edit_singleline(&mut self.config.remote_mount_root);
+        });
+        ui.label("The remote directory to mount (e.g. /home/user/data)");
+
+        ui.add_space(3.0);
+        ui.horizontal(|ui| {
+            ui.label("Local Mount:");
+            ui.text_edit_singleline(&mut self.config.local_mount_path);
+        });
+        #[cfg(target_os = "windows")]
+        ui.label("Drive letter to mount to (e.g. S:)");
+        #[cfg(not(target_os = "windows"))]
+        ui.label("Local directory to mount to (e.g. ~/autopipe-remote)");
+
+        ui.add_space(5.0);
+
+        // Status indicators
+        let sshfs_available = crate::ssh::check_sshfs_available();
+        let mounted = crate::ssh::is_mounted(&self.config);
+
+        ui.horizontal(|ui| {
+            ui.label("SSHFS:");
+            if sshfs_available {
+                ui.colored_label(egui::Color32::GREEN, "Installed");
+            } else {
+                ui.colored_label(egui::Color32::RED, "Not installed");
+            }
+            ui.label("  Mount:");
+            if mounted {
+                ui.colored_label(egui::Color32::GREEN, "Mounted");
+            } else {
+                ui.colored_label(egui::Color32::GRAY, "Not mounted");
+            }
+        });
+
+        ui.add_space(5.0);
+        ui.horizontal(|ui| {
+            if mounted {
+                if ui.button("Unmount").clicked() {
+                    self.save_config();
+                    match crate::ssh::sshfs_unmount(&self.config) {
+                        Ok(()) => self.status_message = "SSHFS unmounted.".into(),
+                        Err(e) => self.status_message = format!("Unmount failed: {}", e),
+                    }
+                }
+            } else if ui.button("Mount").clicked() {
+                self.save_config();
+                match crate::ssh::sshfs_mount(&self.config) {
+                    Ok(msg) => self.status_message = msg,
+                    Err(e) => self.status_message = format!("Mount failed: {}", e),
+                }
+            }
+        });
     }
 
     fn draw_status_tab(&mut self, ui: &mut egui::Ui) {
