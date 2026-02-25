@@ -109,7 +109,8 @@ impl eframe::App for AutoPipeApp {
         });
 
         // Process GitHub device flow messages
-        if let Some(rx) = &self.github_rx {
+        if let Some(rx) = self.github_rx.take() {
+            let mut keep_rx = true;
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     GitHubMsg::DeviceCode {
@@ -126,12 +127,12 @@ impl eframe::App for AutoPipeApp {
                         self.github_polling = false;
                         self.github_user_code = None;
                         self.github_verification_uri = None;
-                        self.github_rx = None;
+                        keep_rx = false;
                         let _ = self.config.save();
                         self.status_message = "GitHub login successful!".into();
                         // Fetch username
                         let token = self.config.github_token.clone().unwrap();
-                        let (tx, rx) = mpsc::channel();
+                        let (tx, rx2) = mpsc::channel();
                         std::thread::spawn(move || {
                             let rt = tokio::runtime::Runtime::new().unwrap();
                             rt.block_on(async {
@@ -141,17 +142,20 @@ impl eframe::App for AutoPipeApp {
                                 }
                             });
                         });
-                        if let Ok(name) = rx.recv() {
+                        if let Ok(name) = rx2.recv() {
                             self.github_username = name;
                         }
                     }
                     GitHubMsg::Error(e) => {
                         self.github_polling = false;
                         self.github_user_code = None;
-                        self.github_rx = None;
+                        keep_rx = false;
                         self.status_message = format!("GitHub login failed: {}", e);
                     }
                 }
+            }
+            if keep_rx {
+                self.github_rx = Some(rx);
             }
         }
 
@@ -441,12 +445,12 @@ impl AutoPipeApp {
         ui.heading("GitHub Integration");
         ui.add_space(10.0);
 
-        if let Some(ref token) = self.config.github_token {
+        if self.config.github_token.is_some() {
             // Logged in
-            let username = self.github_username.as_deref().unwrap_or("(unknown)");
+            let username = self.github_username.clone().unwrap_or_else(|| "(unknown)".into());
             ui.horizontal(|ui| {
                 ui.label("Logged in as:");
-                ui.strong(username);
+                ui.strong(&username);
             });
 
             ui.add_space(5.0);
@@ -463,14 +467,14 @@ impl AutoPipeApp {
 
             ui.label("Pipeline Repository:");
             ui.horizontal(|ui| {
-                ui.label(format!("{}/", username));
+                ui.label(format!("{}/", &username));
                 ui.text_edit_singleline(&mut self.config.github_repo);
             });
             ui.label("Workflows will be committed to this repository.");
 
             // Resolve username if not loaded yet
             if self.github_username.is_none() {
-                let token = token.clone();
+                let token = self.config.github_token.clone().unwrap();
                 let (tx, rx) = mpsc::channel();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().unwrap();
