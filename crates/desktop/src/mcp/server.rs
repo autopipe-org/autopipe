@@ -839,33 +839,30 @@ impl AutoPipeServer {
             && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
 
         let base64_result = if needs_resize {
-            // Resize using Python PIL (available on most bioinformatics servers)
+            // Ensure autopipe-resizer Docker image exists, build if not
+            let ensure_image = r#"docker image inspect autopipe-resizer >/dev/null 2>&1 || docker build -t autopipe-resizer - << 'DOCKERFILE'
+FROM python:3.11-slim
+RUN pip install --no-cache-dir Pillow
+DOCKERFILE"#;
+            let _ = self.ssh_run(ensure_image).await;
+
+            // Resize using Docker container with Pillow
+            let parent_dir = params.path.rsplitn(2, '/').nth(1).unwrap_or("/");
+            let filename = params.path.rsplitn(2, '/').next().unwrap_or(&params.path);
             let resize_cmd = format!(
-                r#"python3 << 'PYEOF'
+                r#"docker run --rm -v '{parent_dir}:/img:ro' autopipe-resizer python3 << 'PYEOF'
 import sys, base64, io
-try:
-    from PIL import Image
-    img = Image.open('{path}')
-    img.thumbnail((1200, 1200), Image.LANCZOS)
-    buf = io.BytesIO()
-    fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'
-    img.save(buf, format=fmt, quality=85)
-    buf.seek(0)
-    sys.stdout.write(base64.b64encode(buf.read()).decode())
-except ImportError:
-    from matplotlib.image import imread
-    import matplotlib.pyplot as plt
-    img = imread('{path}')
-    fig, ax = plt.subplots()
-    ax.imshow(img)
-    ax.axis('off')
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-    plt.close(fig)
-    buf.seek(0)
-    sys.stdout.write(base64.b64encode(buf.read()).decode())
+from PIL import Image
+img = Image.open('/img/{filename}')
+img.thumbnail((1200, 1200), Image.LANCZOS)
+buf = io.BytesIO()
+fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'
+img.save(buf, format=fmt, quality=85)
+buf.seek(0)
+sys.stdout.write(base64.b64encode(buf.read()).decode())
 PYEOF"#,
-                path = params.path,
+                parent_dir = parent_dir,
+                filename = filename,
                 ext = ext,
             );
             self.ssh_run(&resize_cmd).await
