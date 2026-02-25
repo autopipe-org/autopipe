@@ -240,6 +240,30 @@ impl AutoPipeServer {
         }
     }
 
+    /// Find symlink targets inside a directory and return extra Docker -v mounts.
+    /// This resolves symlinks on the SSH server so Docker can see the real files.
+    async fn resolve_symlink_mounts(&self, dir: &str) -> String {
+        // Find all symlinks, resolve them, get unique parent directories
+        let cmd = format!(
+            "find '{}' -maxdepth 3 -type l -exec readlink -f '{{}}' \\; 2>/dev/null | xargs -I{{}} dirname '{{}}' | sort -u",
+            dir
+        );
+        let dirs = match self.ssh_run(&cmd).await {
+            Ok((output, 0)) => output,
+            _ => return String::new(),
+        };
+
+        let mut mounts = String::new();
+        for target_dir in dirs.trim().lines() {
+            let target_dir = target_dir.trim();
+            if target_dir.is_empty() || target_dir == dir {
+                continue;
+            }
+            mounts.push_str(&format!(" -v '{}:{}:ro'", target_dir, target_dir));
+        }
+        mounts
+    }
+
     /// Find the pipeline directory for a given Docker image name.
     /// Searches the configured pipelines and output directories.
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
@@ -1001,9 +1025,12 @@ impl AutoPipeServer {
             None => String::new(),
         };
 
+        // Resolve symlinks in input_dir for extra Docker mounts
+        let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
+
         let cmd = format!(
-            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, params.input_dir, output_dir, params.image_name, cores
+            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            pipeline_mount, params.input_dir, symlink_mounts, output_dir, params.image_name, cores
         );
 
         match self.ssh_run(&cmd).await {
@@ -1029,6 +1056,9 @@ impl AutoPipeServer {
             None => String::new(),
         };
 
+        // Resolve symlinks in input_dir for extra Docker mounts
+        let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
+
         // Remove old container with same name if exists
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", container_name)).await;
 
@@ -1037,8 +1067,8 @@ impl AutoPipeServer {
 
         // Run with nohup in background, redirect all output to log file
         let cmd = format!(
-            "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            container_name, pipeline_mount, params.input_dir, output_dir, params.image_name, cores, log_path
+            "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            container_name, pipeline_mount, params.input_dir, symlink_mounts, output_dir, params.image_name, cores, log_path
         );
 
         match self.ssh_run(&cmd).await {
