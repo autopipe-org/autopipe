@@ -129,6 +129,16 @@ struct TrayAwareApp {
 #[cfg(feature = "gui")]
 impl eframe::App for TrayAwareApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+        // Debug: verify update() is called when minimized to tray
+        if self.inner.is_minimized_to_tray() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+            if c % 50 == 0 {
+                eprintln!("[update] called while minimized (count={})", c);
+            }
+        }
+
         // Linux: pump GTK events so libappindicator tray icon can render and respond
         #[cfg(target_os = "linux")]
         while gtk::events_pending() {
