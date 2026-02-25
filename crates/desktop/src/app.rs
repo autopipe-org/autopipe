@@ -123,9 +123,8 @@ impl eframe::App for AutoPipeApp {
 }
 
 impl AutoPipeApp {
-    /// Called from main loop to check if tray "Settings" was clicked.
+    /// Restore the window from tray (make visible and focus).
     pub fn restore_from_tray(&mut self, ctx: &egui::Context) {
-        eprintln!("[tray] restore_from_tray called, sending Visible(true) + Focus");
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);

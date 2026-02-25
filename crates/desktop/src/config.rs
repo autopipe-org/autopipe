@@ -85,6 +85,27 @@ impl AppConfig {
         }
     }
 
+    /// Resolve a path: if absolute, return as-is; if relative, join with repo_path.
+    fn resolve_path(&self, path: &str) -> String {
+        if path.starts_with('/') {
+            path.to_string()
+        } else if self.repo_path.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}/{}", self.repo_path.trim_end_matches('/'), path)
+        }
+    }
+
+    /// Full path to pipelines directory on remote server.
+    pub fn full_pipelines_dir(&self) -> String {
+        self.resolve_path(&self.pipelines_dir)
+    }
+
+    /// Full path to output directory on remote server.
+    pub fn full_output_dir(&self) -> String {
+        self.resolve_path(&self.output_dir)
+    }
+
     /// Save config to file.
     pub fn save(&self) -> std::io::Result<()> {
         let path = Self::config_path();

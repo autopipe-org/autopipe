@@ -23,8 +23,8 @@ struct SearchParams {
 struct DownloadParams {
     /// Pipeline ID to download
     pipeline_id: i32,
-    /// Remote directory path on the SSH server where the pipeline will be saved
-    output_dir: String,
+    /// Remote directory path (optional, defaults to configured pipelines directory)
+    output_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -47,8 +47,8 @@ struct DryRunParams {
     image_name: String,
     /// Remote input data directory (mounted as read-only in Docker)
     input_dir: String,
-    /// Remote output directory
-    output_dir: String,
+    /// Remote output directory (optional, defaults to configured output directory)
+    output_dir: Option<String>,
     /// Number of CPU cores (default: 8)
     cores: Option<u32>,
 }
@@ -61,8 +61,8 @@ struct ExecuteParams {
     run_name: String,
     /// Remote input data directory (mounted as read-only in Docker)
     input_dir: String,
-    /// Remote output directory
-    output_dir: String,
+    /// Remote output directory (optional, defaults to configured output directory under run_name)
+    output_dir: Option<String>,
     /// Number of CPU cores (default: 8)
     cores: Option<u32>,
 }
@@ -71,8 +71,8 @@ struct ExecuteParams {
 struct StatusParams {
     /// Run name (matches the run_name used in execute_pipeline)
     run_name: String,
-    /// Remote output directory (where pipeline.log is located)
-    output_dir: String,
+    /// Remote output directory (optional, defaults to configured output directory under run_name)
+    output_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -107,6 +107,12 @@ struct WriteFileParams {
     path: String,
     /// Content to write to the file
     content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ViewImageParams {
+    /// Remote path to an image file (PNG, JPG, SVG, PDF, etc.)
+    path: String,
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -203,34 +209,57 @@ impl AutoPipeServer {
         }
     }
 
+    /// Resolve the output directory for a run.
+    /// Uses the provided path if given, otherwise defaults to {full_output_dir}/{run_name}.
+    fn resolve_output_dir(&self, explicit: &Option<String>, run_name: &str) -> String {
+        match explicit {
+            Some(dir) if !dir.is_empty() => dir.clone(),
+            _ => format!(
+                "{}/{}",
+                self.config.full_output_dir().trim_end_matches('/'),
+                run_name
+            ),
+        }
+    }
+
     /// Find the pipeline directory for a given Docker image name.
-    /// Searches the configured output_dir for a matching pipeline directory.
+    /// Searches the configured pipelines and output directories.
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
-        // The image name follows the pattern "autopipe-<pipeline-name>"
-        // The pipeline directory is at <output_dir>/<pipeline-name>/<pipeline-name>/
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
+
+        // Check under configured pipelines directory: {pipelines_dir}/{name}
+        let pipelines_base = self.config.full_pipelines_dir();
         let candidate = format!(
-            "{}/{}/{}",
-            self.config.output_dir.trim_end_matches('/'),
-            pipeline_name,
+            "{}/{}",
+            pipelines_base.trim_end_matches('/'),
             pipeline_name
         );
-        // Check if the directory exists
-        if let Ok((output, 0)) = self.ssh_run(&format!("test -d '{}' && echo 'exists'", candidate)).await {
+        if let Ok((output, 0)) = self
+            .ssh_run(&format!("test -d '{}' && echo 'exists'", candidate))
+            .await
+        {
             if output.trim().contains("exists") {
                 return Some(candidate);
             }
         }
-        // Also try under the user's home projects path
-        let home_candidate = format!(
-            "/home/{}/projects/autopipe/pipelines_output/{}/{}",
-            self.config.ssh_user, pipeline_name, pipeline_name
+
+        // Check under configured output directory: {output_dir}/{name}/{name}
+        let output_base = self.config.full_output_dir();
+        let candidate = format!(
+            "{}/{}/{}",
+            output_base.trim_end_matches('/'),
+            pipeline_name,
+            pipeline_name
         );
-        if let Ok((output, 0)) = self.ssh_run(&format!("test -d '{}' && echo 'exists'", home_candidate)).await {
+        if let Ok((output, 0)) = self
+            .ssh_run(&format!("test -d '{}' && echo 'exists'", candidate))
+            .await
+        {
             if output.trim().contains("exists") {
-                return Some(home_candidate);
+                return Some(candidate);
             }
         }
+
         None
     }
 }
@@ -244,6 +273,33 @@ impl AutoPipeServer {
             config,
             tool_router: Self::tool_router(),
         }
+    }
+
+    // ── Workspace info ─────────────────────────────────────────
+
+    #[tool(description = "Get the configured workspace paths on the remote SSH server. Call this first to understand where pipelines and outputs are stored.")]
+    async fn get_workspace_info(&self) -> Result<CallToolResult, ErrorData> {
+        let info = format!(
+            "Workspace Configuration:\n\
+             - Base path (repo_path): {}\n\
+             - Pipelines directory: {}\n\
+             - Output directory: {}\n\
+             - SSH: {}@{}:{}\n\n\
+             When executing pipelines, outputs are automatically stored under the output directory.\n\
+             To view result files, use list_files and read_file directly on the output path.\n\
+             To link data, use create_symlink instead of copying files.",
+            if self.config.repo_path.is_empty() {
+                "(not set)"
+            } else {
+                &self.config.repo_path
+            },
+            self.config.full_pipelines_dir(),
+            self.config.full_output_dir(),
+            self.config.ssh_user,
+            self.config.ssh_host,
+            self.config.ssh_port,
+        );
+        Ok(CallToolResult::success(vec![Content::text(info)]))
     }
 
     // ── Registry tools ──────────────────────────────────────────
@@ -279,7 +335,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Download a pipeline by ID and save it to a directory on the remote SSH server")]
+    #[tool(description = "Download a pipeline by ID and save it to the remote SSH server. If output_dir is omitted, saves to the configured pipelines directory.")]
     async fn download_pipeline(
         &self,
         Parameters(params): Parameters<DownloadParams>,
@@ -294,9 +350,12 @@ impl AutoPipeServer {
             }
         };
 
+        let base_dir = params
+            .output_dir
+            .unwrap_or_else(|| self.config.full_pipelines_dir());
         let dir = format!(
             "{}/{}",
-            params.output_dir.trim_end_matches('/'),
+            base_dir.trim_end_matches('/'),
             pipeline.name
         );
         let meta_str =
@@ -504,12 +563,16 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Dry-run a pipeline (snakemake -n -p) on the remote server via SSH")]
+    #[tool(description = "Dry-run a pipeline (snakemake -n -p) on the remote server via SSH. If output_dir is omitted, uses the configured output directory.")]
     async fn dry_run(
         &self,
         Parameters(params): Parameters<DryRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
+        let output_dir = params
+            .output_dir
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.config.full_output_dir());
 
         // Find the pipeline directory to mount
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
@@ -519,7 +582,7 @@ impl AutoPipeServer {
 
         let cmd = format!(
             "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, params.input_dir, params.output_dir, params.image_name, cores
+            pipeline_mount, params.input_dir, output_dir, params.image_name, cores
         );
 
         match self.ssh_run(&cmd).await {
@@ -529,14 +592,15 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Logs are written to {output_dir}/pipeline.log.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
+        let output_dir = self.resolve_output_dir(&params.output_dir, &params.run_name);
         let container_name = format!("{}-run", params.run_name);
-        let log_path = format!("{}/pipeline.log", params.output_dir.trim_end_matches('/'));
+        let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
         // Find the pipeline directory to mount
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
@@ -548,20 +612,24 @@ impl AutoPipeServer {
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", container_name)).await;
 
         // Create output directory
-        let _ = self.ssh_run(&format!("mkdir -p '{}'", params.output_dir)).await;
+        let _ = self.ssh_run(&format!("mkdir -p '{}'", output_dir)).await;
 
         // Run with nohup in background, redirect all output to log file
         let cmd = format!(
             "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro' -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            container_name, pipeline_mount, params.input_dir, params.output_dir, params.image_name, cores, log_path
+            container_name, pipeline_mount, params.input_dir, output_dir, params.image_name, cores, log_path
         );
 
         match self.ssh_run(&cmd).await {
             Ok((output, 0)) => {
                 let pid = output.trim().lines().last().unwrap_or("unknown");
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Pipeline started in background (PID: {}, container: '{}').\nLog file: {}\nUse check_status with run_name='{}' and output_dir='{}' to monitor progress.",
-                    pid, container_name, log_path, params.run_name, params.output_dir
+                    "Pipeline started in background (PID: {}, container: '{}').\n\
+                     Output directory: {}\n\
+                     Log file: {}\n\
+                     Use check_status with run_name='{}' to monitor progress.\n\
+                     Use list_files on the output directory to browse results.",
+                    pid, container_name, output_dir, log_path, params.run_name
                 ))]))
             }
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -572,13 +640,14 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running")]
+    #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running. If output_dir is omitted, uses {configured_output_dir}/{run_name}/.")]
     async fn check_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let output_dir = self.resolve_output_dir(&params.output_dir, &params.run_name);
         let container_name = format!("{}-run", params.run_name);
-        let log_path = format!("{}/pipeline.log", params.output_dir.trim_end_matches('/'));
+        let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
         // Check if container is still running
         let running = match self.ssh_run(&format!("docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", container_name)).await {
@@ -596,14 +665,14 @@ impl AutoPipeServer {
         let status_str = if running { "RUNNING" } else { "FINISHED" };
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Status: {}\nContainer: {}\nLog ({}):\n{}",
-            status_str, container_name, log_path, log_output
+            "Status: {}\nContainer: {}\nOutput: {}\nLog ({}):\n{}",
+            status_str, container_name, output_dir, log_path, log_output
         ))]))
     }
 
     // ── Remote file tools ───────────────────────────────────────
 
-    #[tool(description = "Create a symbolic link on the remote SSH server. Use this to link input/output data into a pipeline working directory. The source path must exist on the server.")]
+    #[tool(description = "Create a symbolic link on the remote SSH server. Use this to link input/output data instead of copying files. Prefer symlinks over cp for accessing result files and plots.")]
     async fn create_symlink(
         &self,
         Parameters(params): Parameters<CreateSymlinkParams>,
@@ -684,7 +753,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Read the contents of a file on the remote SSH server")]
+    #[tool(description = "Read the contents of a file on the remote SSH server. Use this to view result files directly from the output directory.")]
     async fn read_file(
         &self,
         Parameters(params): Parameters<ReadFileParams>,
@@ -722,6 +791,66 @@ impl AutoPipeServer {
         }
     }
 
+    #[tool(description = "View an image file (plot, figure, chart) from the remote SSH server. Returns the image inline so it can be displayed directly. Supports PNG, JPG, SVG, GIF, and PDF.")]
+    async fn view_image(
+        &self,
+        Parameters(params): Parameters<ViewImageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Detect MIME type from extension
+        let mime_type = match params.path.rsplit('.').next().map(|e| e.to_lowercase()) {
+            Some(ref ext) if ext == "png" => "image/png",
+            Some(ref ext) if ext == "jpg" || ext == "jpeg" => "image/jpeg",
+            Some(ref ext) if ext == "gif" => "image/gif",
+            Some(ref ext) if ext == "svg" => "image/svg+xml",
+            Some(ref ext) if ext == "pdf" => "application/pdf",
+            Some(ref ext) if ext == "webp" => "image/webp",
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Unsupported file type: {}. Supported: png, jpg, gif, svg, pdf, webp",
+                    params.path
+                ))]));
+            }
+        };
+
+        // Check file exists and get size
+        let size_check = format!("stat -c%s '{}' 2>/dev/null || echo 'NOT_FOUND'", params.path);
+        match self.ssh_run(&size_check).await {
+            Ok((output, _)) if output.trim() == "NOT_FOUND" => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "File not found: {}",
+                    params.path
+                ))]));
+            }
+            Ok((output, 0)) => {
+                if let Ok(size) = output.trim().parse::<u64>() {
+                    if size > 10 * 1024 * 1024 {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "File too large ({:.1} MB). Max 10 MB.",
+                            size as f64 / 1024.0 / 1024.0
+                        ))]));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Read file as base64 (no line wrapping)
+        let cmd = format!("base64 -w 0 '{}'", params.path);
+        match self.ssh_run(&cmd).await {
+            Ok((base64_data, 0)) => {
+                let trimmed = base64_data.trim().to_string();
+                Ok(CallToolResult::success(vec![Content::image(
+                    trimmed, mime_type,
+                )]))
+            }
+            Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to read image: {}",
+                output.trim()
+            ))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
     // ── Template tools ──────────────────────────────────────────
 
     #[tool(description = "Get pipeline file templates for creating new pipelines")]
@@ -756,8 +885,10 @@ impl ServerHandler for AutoPipeServer {
             instructions: Some(
                 "AutoPipe MCP Server - Manage bioinformatics Snakemake pipelines.\n\
                  All file operations are performed on the remote SSH server.\n\
-                 Use read_file/write_file/list_files for remote file access.\n\
-                 Use create_symlink to link input/output data into pipeline directories.\n\
+                 Use get_workspace_info first to see configured paths.\n\
+                 Pipeline outputs are automatically stored under the configured output directory.\n\
+                 Use list_files and read_file to view results directly from the output path.\n\
+                 IMPORTANT: Use create_symlink instead of cp when linking data or accessing results.\n\
                  All paths are remote server paths."
                     .into(),
             ),
@@ -774,4 +905,3 @@ pub async fn run_mcp_server() -> Result<(), Box<dyn std::error::Error>> {
     service.waiting().await?;
     Ok(())
 }
-
