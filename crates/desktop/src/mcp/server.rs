@@ -791,19 +791,20 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "View an image file (plot, figure, chart) from the remote SSH server. Returns the image inline so it can be displayed directly. Supports PNG, JPG, SVG, GIF, and PDF.")]
+    #[tool(description = "View an image file (plot, figure, chart) from the remote SSH server. Returns the image inline so it can be displayed directly. Large images are automatically resized. Supports PNG, JPG, SVG, GIF, and PDF.")]
     async fn view_image(
         &self,
         Parameters(params): Parameters<ViewImageParams>,
     ) -> Result<CallToolResult, ErrorData> {
         // Detect MIME type from extension
-        let mime_type = match params.path.rsplit('.').next().map(|e| e.to_lowercase()) {
-            Some(ref ext) if ext == "png" => "image/png",
-            Some(ref ext) if ext == "jpg" || ext == "jpeg" => "image/jpeg",
-            Some(ref ext) if ext == "gif" => "image/gif",
-            Some(ref ext) if ext == "svg" => "image/svg+xml",
-            Some(ref ext) if ext == "pdf" => "application/pdf",
-            Some(ref ext) if ext == "webp" => "image/webp",
+        let ext = params.path.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+        let mime_type = match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "svg" => "image/svg+xml",
+            "pdf" => "application/pdf",
+            "webp" => "image/webp",
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Unsupported file type: {}. Supported: png, jpg, gif, svg, pdf, webp",
@@ -814,38 +815,91 @@ impl AutoPipeServer {
 
         // Check file exists and get size
         let size_check = format!("stat -c%s '{}' 2>/dev/null || echo 'NOT_FOUND'", params.path);
-        match self.ssh_run(&size_check).await {
-            Ok((output, _)) if output.trim() == "NOT_FOUND" => {
+        let file_size: u64 = match self.ssh_run(&size_check).await {
+            Ok((output, _)) => {
+                let cleaned = clean_content(&output);
+                let val = cleaned.trim();
+                if val == "NOT_FOUND" || val.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "File not found: {}",
+                        params.path
+                    ))]));
+                }
+                val.parse().unwrap_or(0)
+            }
+            Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "File not found: {}",
-                    params.path
+                    "Cannot check file: {}", e
                 ))]));
             }
-            Ok((output, 0)) => {
-                if let Ok(size) = output.trim().parse::<u64>() {
-                    if size > 10 * 1024 * 1024 {
-                        return Ok(CallToolResult::error(vec![Content::text(format!(
-                            "File too large ({:.1} MB). Max 10 MB.",
-                            size as f64 / 1024.0 / 1024.0
-                        ))]));
-                    }
-                }
-            }
-            _ => {}
-        }
+        };
 
-        // Read file as base64 (no line wrapping)
-        let cmd = format!("base64 -w 0 '{}'", params.path);
-        match self.ssh_run(&cmd).await {
+        // For raster images > 500KB, resize on server using Python
+        let needs_resize = file_size > 500 * 1024
+            && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
+
+        let base64_result = if needs_resize {
+            // Resize using Python PIL (available on most bioinformatics servers)
+            let resize_cmd = format!(
+                "python3 -c \"\
+import sys, base64, io\n\
+try:\n\
+    from PIL import Image\n\
+except ImportError:\n\
+    from matplotlib.image import imread\n\
+    import matplotlib.pyplot as plt\n\
+    img = imread('{path}')\n\
+    fig, ax = plt.subplots()\n\
+    ax.imshow(img)\n\
+    ax.axis('off')\n\
+    buf = io.BytesIO()\n\
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')\n\
+    plt.close(fig)\n\
+    buf.seek(0)\n\
+    sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
+    sys.exit(0)\n\
+img = Image.open('{path}')\n\
+img.thumbnail((1200, 1200), Image.LANCZOS)\n\
+buf = io.BytesIO()\n\
+fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'\n\
+img.save(buf, format=fmt, quality=85)\n\
+buf.seek(0)\n\
+sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
+\"",
+                path = params.path,
+                ext = ext,
+            );
+            self.ssh_run(&resize_cmd).await
+        } else {
+            // Small file or non-raster (SVG/PDF): send as-is
+            let cmd = format!("base64 -w 0 '{}'", params.path);
+            self.ssh_run(&cmd).await
+        };
+
+        match base64_result {
             Ok((base64_data, 0)) => {
-                let trimmed = base64_data.trim().to_string();
+                // Strip {"success": true} prefix if present from shell init
+                let trimmed = clean_content(&base64_data).trim().to_string();
+                if trimmed.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Failed to encode image: empty output",
+                    )]));
+                }
+                // Use PNG mime type if we resized (output is always PNG/JPEG)
+                let final_mime = if needs_resize && matches!(ext.as_str(), "png" | "gif" | "webp") {
+                    "image/png"
+                } else if needs_resize {
+                    "image/jpeg"
+                } else {
+                    mime_type
+                };
                 Ok(CallToolResult::success(vec![Content::image(
-                    trimmed, mime_type,
+                    trimmed, final_mime,
                 )]))
             }
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to read image: {}",
-                output.trim()
+                clean_content(&output).trim()
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
