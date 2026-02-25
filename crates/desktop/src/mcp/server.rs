@@ -850,7 +850,7 @@ DOCKERFILE"#;
             let parent_dir = params.path.rsplitn(2, '/').nth(1).unwrap_or("/");
             let filename = params.path.rsplitn(2, '/').next().unwrap_or(&params.path);
             let resize_cmd = format!(
-                r#"docker run --rm -v '{parent_dir}:/img:ro' autopipe-resizer python3 << 'PYEOF'
+                r#"docker run --rm -i -v '{parent_dir}:/img:ro' autopipe-resizer python3 << 'PYEOF'
 import sys, base64, io
 from PIL import Image
 img = Image.open('/img/{filename}')
