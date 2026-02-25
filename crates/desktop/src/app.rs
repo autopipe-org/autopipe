@@ -577,22 +577,31 @@ async fn run_device_flow(registry_url: &str, tx: mpsc::Sender<GitHubMsg>) {
     let base = registry_url.trim_end_matches('/');
 
     // Step 1: Request device code from our registry server
-    let resp = match client
-        .post(format!("{}/api/auth/device", base))
-        .send()
-        .await
-    {
+    let url = format!("{}/api/auth/device", base);
+    let resp = match client.post(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            let _ = tx.send(GitHubMsg::Error(e.to_string()));
+            let _ = tx.send(GitHubMsg::Error(format!("Request to {} failed: {}", url, e)));
             return;
         }
     };
 
-    let body: serde_json::Value = match resp.json().await {
+    let status = resp.status();
+    let text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = tx.send(GitHubMsg::Error(format!("Failed to read response: {}", e)));
+            return;
+        }
+    };
+
+    let body: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx.send(GitHubMsg::Error(e.to_string()));
+            let _ = tx.send(GitHubMsg::Error(format!(
+                "Invalid JSON (status {}): {} — body: {}",
+                status, e, &text[..text.len().min(200)]
+            )));
             return;
         }
     };
