@@ -436,7 +436,6 @@ impl AutoPipeApp {
             }
         }
     }
-}
 
     fn draw_github_tab(&mut self, ui: &mut egui::Ui) {
         ui.heading("GitHub Integration");
