@@ -118,6 +118,18 @@ pub struct AutoPipeServer {
     tool_router: ToolRouter<Self>,
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Extract valid JSON by stripping any prepended JSON fragments (e.g. `{"success": true}`).
+fn clean_json(raw: &str) -> &str {
+    let s = raw.trim();
+    if let Some(pos) = s.find("}{") {
+        &s[pos + 1..]
+    } else {
+        s
+    }
+}
+
 // ── SSH helper methods ──────────────────────────────────────────────
 
 impl AutoPipeServer {
@@ -326,7 +338,8 @@ impl AutoPipeServer {
             .await
             .unwrap_or_default();
 
-        let metadata: PipelineMetadata = match serde_json::from_str(&meta_content) {
+        let cleaned_meta = clean_json(&meta_content);
+        let metadata: PipelineMetadata = match serde_json::from_str(cleaned_meta) {
             Ok(m) => m,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -347,7 +360,7 @@ impl AutoPipeServer {
             snakefile,
             dockerfile,
             config_yaml,
-            metadata_json: serde_json::from_str(&meta_content).unwrap_or_default(),
+            metadata_json: serde_json::from_str(cleaned_meta).unwrap_or_default(),
             readme,
             author: metadata.author,
             version: metadata.version,
@@ -393,7 +406,7 @@ impl AutoPipeServer {
                         errors.push("Snakefile: missing 'rule all'".into());
                     }
                     if *f == "metadata.json" {
-                        match serde_json::from_str::<PipelineMetadata>(&content) {
+                        match serde_json::from_str::<PipelineMetadata>(clean_json(&content)) {
                             Ok(m) => {
                                 if m.name.is_empty() {
                                     errors.push("metadata.json: 'name' is empty".into());
