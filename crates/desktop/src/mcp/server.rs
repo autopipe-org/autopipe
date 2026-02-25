@@ -120,13 +120,75 @@ pub struct AutoPipeServer {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Extract valid JSON by stripping any prepended JSON fragments (e.g. `{"success": true}`).
-fn clean_json(raw: &str) -> &str {
+/// Strip any prepended JSON fragment like `{"success": true}` from file content.
+/// Works for all file types: JSON files get `}{` split, others get prefix removed.
+fn clean_content(raw: &str) -> String {
     let s = raw.trim();
+    // For JSON-like content with concatenated objects: {"success": true}{"name": ...}
     if let Some(pos) = s.find("}{") {
-        &s[pos + 1..]
+        return s[pos + 1..].to_string();
+    }
+    // For non-JSON files where {"success": true} is prepended as a line
+    let prefix = r#"{"success": true}"#;
+    if s.starts_with(prefix) {
+        return s[prefix.len()..].trim_start().to_string();
+    }
+    // Also handle without spaces: {"success":true}
+    let prefix_no_space = r#"{"success":true}"#;
+    if s.starts_with(prefix_no_space) {
+        return s[prefix_no_space.len()..].trim_start().to_string();
+    }
+    s.to_string()
+}
+
+/// Normalize paths in config.yaml and Snakefile: replace absolute host paths
+/// with Docker mount points (/input, /output).
+fn normalize_paths(content: &str) -> String {
+    let mut result = String::new();
+    for line in content.lines() {
+        let normalized = normalize_path_in_line(line);
+        result.push_str(&normalized);
+        result.push('\n');
+    }
+    // Remove trailing newline if original didn't have one
+    if !content.ends_with('\n') {
+        result.pop();
+    }
+    result
+}
+
+fn normalize_path_in_line(line: &str) -> String {
+    // Skip comments
+    if line.trim_start().starts_with('#') {
+        return line.to_string();
+    }
+    let result = line.to_string();
+    if let Some(colon_pos) = result.find(':') {
+        let key = result[..colon_pos].trim().to_lowercase();
+        let value = result[colon_pos + 1..].trim().to_string();
+        // Normalize input-related paths
+        if key.contains("input") && !key.contains("format") {
+            if let Some(path) = extract_absolute_path(&value) {
+                return result.replace(&path, "/input");
+            }
+        }
+        // Normalize output-related paths
+        if key.contains("output") && !key.contains("format") {
+            if let Some(path) = extract_absolute_path(&value) {
+                return result.replace(&path, "/output");
+            }
+        }
+    }
+    result
+}
+
+/// Extract an absolute path from a YAML value (quoted or unquoted).
+fn extract_absolute_path(value: &str) -> Option<String> {
+    let v = value.trim().trim_matches('"').trim_matches('\'');
+    if v.starts_with('/') && v.len() > 1 && !v.starts_with("/input") && !v.starts_with("/output") && !v.starts_with("/pipeline") {
+        Some(v.to_string())
     } else {
-        s
+        None
     }
 }
 
@@ -321,25 +383,26 @@ impl AutoPipeServer {
             }
         };
 
-        let snakefile = self
-            .ssh_read_file(&format!("{}/Snakefile", dir))
-            .await
-            .unwrap_or_default();
-        let dockerfile = self
-            .ssh_read_file(&format!("{}/Dockerfile", dir))
-            .await
-            .unwrap_or_default();
-        let config_yaml = self
-            .ssh_read_file(&format!("{}/config.yaml", dir))
-            .await
-            .unwrap_or_default();
-        let readme = self
-            .ssh_read_file(&format!("{}/README.md", dir))
-            .await
-            .unwrap_or_default();
+        // Read and clean all files (strip {"success": true} prefix if present)
+        let snakefile = clean_content(
+            &self.ssh_read_file(&format!("{}/Snakefile", dir)).await.unwrap_or_default(),
+        );
+        let dockerfile = clean_content(
+            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
+        );
+        let config_yaml = clean_content(
+            &self.ssh_read_file(&format!("{}/config.yaml", dir)).await.unwrap_or_default(),
+        );
+        let readme = clean_content(
+            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
+        );
 
-        let cleaned_meta = clean_json(&meta_content);
-        let metadata: PipelineMetadata = match serde_json::from_str(cleaned_meta) {
+        // Normalize paths in config.yaml and Snakefile to use /input, /output
+        let snakefile = normalize_paths(&snakefile);
+        let config_yaml = normalize_paths(&config_yaml);
+
+        let cleaned_meta = clean_content(&meta_content);
+        let metadata: PipelineMetadata = match serde_json::from_str(&cleaned_meta) {
             Ok(m) => m,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -360,7 +423,7 @@ impl AutoPipeServer {
             snakefile,
             dockerfile,
             config_yaml,
-            metadata_json: serde_json::from_str(cleaned_meta).unwrap_or_default(),
+            metadata_json: serde_json::from_str(&cleaned_meta).unwrap_or_default(),
             readme,
             author: metadata.author,
             version: metadata.version,
@@ -399,14 +462,15 @@ impl AutoPipeServer {
         for f in &required {
             let path = format!("{}/{}", dir, f);
             match self.ssh_read_file(&path).await {
-                Ok(content) if content.is_empty() => errors.push(format!("Empty: {}", f)),
+                Ok(raw) if raw.is_empty() => errors.push(format!("Empty: {}", f)),
                 Err(_) => errors.push(format!("Missing: {}", f)),
-                Ok(content) => {
+                Ok(raw) => {
+                    let content = clean_content(&raw);
                     if *f == "Snakefile" && !content.contains("rule all") {
                         errors.push("Snakefile: missing 'rule all'".into());
                     }
                     if *f == "metadata.json" {
-                        match serde_json::from_str::<PipelineMetadata>(clean_json(&content)) {
+                        match serde_json::from_str::<PipelineMetadata>(&content) {
                             Ok(m) => {
                                 if m.name.is_empty() {
                                     errors.push("metadata.json: 'name' is empty".into());

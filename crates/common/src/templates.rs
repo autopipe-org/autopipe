@@ -119,6 +119,10 @@ Every pipeline is a directory with 5 required files:
 - Include comments explaining each parameter
 - Provide sensible defaults
 - Mark required parameters with comments
+- IMPORTANT: Use `/input` and `/output` as paths (Docker mount points)
+  - Input data is mounted at `/input` (read-only) at runtime
+  - Output directory is mounted at `/output` at runtime
+  - Do NOT use absolute host paths like `/home/user/data/...`
 
 ## metadata.json Required Fields
 - `name`: pipeline name (lowercase, hyphens)
@@ -137,9 +141,19 @@ Every pipeline is a directory with 5 required files:
 - How to run (docker build + docker run commands)
 - Configuration options from config.yaml
 
+## Path Convention
+- Pipelines always use Docker mount points for data paths:
+  - `/input` — input data (mounted read-only at runtime)
+  - `/output` — output directory (mounted at runtime)
+  - `/pipeline` — pipeline files (Snakefile, config.yaml, etc.)
+- Actual host paths are provided at execution time, not in pipeline files.
+- Example in Snakefile: `"input/{sample}.fastq.gz"` (relative to Docker workdir)
+- Example in config.yaml: `reference: "/input/reference.fa"`
+
 ## Safety Rules
 1. All pipelines use Snakemake format only.
 2. Every pipeline must have a Dockerfile.
 3. NEVER modify or delete user input data. Mount as read-only (:ro).
 4. NEVER run destructive commands on user-provided paths.
+5. NEVER hardcode absolute host paths in pipeline files.
 "#;
