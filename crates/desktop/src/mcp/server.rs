@@ -249,14 +249,14 @@ impl AutoPipeServer {
             dir
         );
         let dirs = match self.ssh_run(&cmd).await {
-            Ok((output, 0)) => output,
+            Ok((output, 0)) => clean_content(&output),
             _ => return String::new(),
         };
 
         let mut mounts = String::new();
         for target_dir in dirs.trim().lines() {
             let target_dir = target_dir.trim();
-            if target_dir.is_empty() || target_dir == dir {
+            if target_dir.is_empty() || target_dir == dir || !target_dir.starts_with('/') {
                 continue;
             }
             mounts.push_str(&format!(" -v '{}:{}:ro'", target_dir, target_dir));
