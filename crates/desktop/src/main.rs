@@ -120,6 +120,12 @@ struct TrayAwareApp {
 #[cfg(feature = "gui")]
 impl eframe::App for TrayAwareApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+        // Linux: pump GTK events so libappindicator tray icon can render and respond
+        #[cfg(target_os = "linux")]
+        while gtk::events_pending() {
+            gtk::main_iteration();
+        }
+
         // Always poll tray icon click events (Windows/macOS only)
         if let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
             match event {
