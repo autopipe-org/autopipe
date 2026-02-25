@@ -845,6 +845,13 @@ impl AutoPipeServer {
 import sys, base64, io\n\
 try:\n\
     from PIL import Image\n\
+    img = Image.open('{path}')\n\
+    img.thumbnail((1200, 1200), Image.LANCZOS)\n\
+    buf = io.BytesIO()\n\
+    fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'\n\
+    img.save(buf, format=fmt, quality=85)\n\
+    buf.seek(0)\n\
+    sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
 except ImportError:\n\
     from matplotlib.image import imread\n\
     import matplotlib.pyplot as plt\n\
@@ -857,14 +864,6 @@ except ImportError:\n\
     plt.close(fig)\n\
     buf.seek(0)\n\
     sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
-    sys.exit(0)\n\
-img = Image.open('{path}')\n\
-img.thumbnail((1200, 1200), Image.LANCZOS)\n\
-buf = io.BytesIO()\n\
-fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'\n\
-img.save(buf, format=fmt, quality=85)\n\
-buf.seek(0)\n\
-sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
 \"",
                 path = params.path,
                 ext = ext,
