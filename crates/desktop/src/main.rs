@@ -137,9 +137,11 @@ impl eframe::App for TrayAwareApp {
 
         // Always poll tray icon click events (Windows/macOS only)
         if let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+            eprintln!("[tray] icon event: {:?}", event);
             match event {
                 tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. }
                 | tray_icon::TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } => {
+                    eprintln!("[tray] left-click -> restoring window");
                     self.inner.restore_from_tray(ctx);
                 }
                 _ => {}
@@ -149,7 +151,9 @@ impl eframe::App for TrayAwareApp {
         // Always poll tray menu events (Settings/Quit)
         if let Some(ref tray) = self.tray {
             if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+                eprintln!("[tray] menu event: {:?}", event.id());
                 if event.id() == tray.show_id() {
+                    eprintln!("[tray] Settings clicked -> restoring window");
                     self.inner.restore_from_tray(ctx);
                 } else if event.id() == tray.quit_id() {
                     ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
