@@ -19,11 +19,8 @@ export const userPipelines = pgTable(
 		inputFormats: text('input_formats').array(),
 		outputFormats: text('output_formats').array(),
 		tags: text('tags').array(),
-		snakefile: text('snakefile').notNull(),
-		dockerfile: text('dockerfile').notNull(),
-		configYaml: text('config_yaml'),
+		githubUrl: varchar('github_url', { length: 500 }).notNull(),
 		metadataJson: jsonb('metadata_json').notNull(),
-		readme: text('readme'),
 		author: varchar('author', { length: 255 }),
 		version: varchar('version', { length: 50 }).default('1.0.0'),
 		verified: boolean('verified').default(false),
@@ -32,5 +29,26 @@ export const userPipelines = pgTable(
 	},
 	(table) => [
 		index('idx_user_pipelines_name').on(table.name),
+	]
+);
+
+export const userPlugins = pgTable(
+	'user_plugins',
+	{
+		pluginId: serial('plugin_id').primaryKey(),
+		name: varchar('name', { length: 255 }).notNull().unique(),
+		description: text('description'),
+		category: varchar('category', { length: 100 }),
+		tags: text('tags').array(),
+		githubUrl: varchar('github_url', { length: 500 }).notNull(),
+		metadataJson: jsonb('metadata_json').notNull(),
+		author: varchar('author', { length: 255 }),
+		version: varchar('version', { length: 50 }).default('1.0.0'),
+		verified: boolean('verified').default(false),
+		createdAt: timestamp('created_at').defaultNow(),
+		updatedAt: timestamp('updated_at').defaultNow()
+	},
+	(table) => [
+		index('idx_user_plugins_name').on(table.name),
 	]
 );

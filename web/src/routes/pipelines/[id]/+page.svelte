@@ -3,23 +3,22 @@
 
 	let { data } = $props();
 	const p = data.pipeline;
+	const f = data.files;
 
 	let activeTab = $state(0);
 
 	type FileTab = { name: string; content: string };
 	const files: FileTab[] = [];
-	if (p.snakefile) files.push({ name: 'Snakefile', content: p.snakefile });
-	if (p.dockerfile) files.push({ name: 'Dockerfile', content: p.dockerfile });
-	if (p.config_yaml) files.push({ name: 'config.yaml', content: p.config_yaml });
-	if (p.metadata_json) {
+	if (f.snakefile) files.push({ name: 'Snakefile', content: f.snakefile });
+	if (f.dockerfile) files.push({ name: 'Dockerfile', content: f.dockerfile });
+	if (f.config_yaml) files.push({ name: 'config.yaml', content: f.config_yaml });
+	if (f.metadata_json) {
 		files.push({
 			name: 'metadata.json',
-			content: typeof p.metadata_json === 'string'
-				? p.metadata_json
-				: JSON.stringify(p.metadata_json, null, 2)
+			content: f.metadata_json
 		});
 	}
-	if (p.readme) files.push({ name: 'README.md', content: p.readme });
+	if (f.readme) files.push({ name: 'README.md', content: f.readme });
 
 	function switchTab(idx: number) {
 		activeTab = idx;
@@ -41,7 +40,10 @@
 			<h2>{p.name}</h2>
 			<p class="detail-desc">{p.description}</p>
 		</div>
-		<a href="/pipelines/{p.pipeline_id}/download" class="btn">Download ZIP</a>
+		<div style="display:flex;gap:8px">
+			<a href={p.github_url} target="_blank" rel="noopener" class="btn" style="background:#24292e">GitHub</a>
+			<a href="/pipelines/{p.pipeline_id}/download" class="btn">Download ZIP</a>
+		</div>
 	</div>
 	<div class="detail-info">
 		<div class="detail-info-item">
@@ -54,11 +56,21 @@
 		</div>
 		<div class="detail-info-item">
 			<span class="label">INPUT</span>
-			<span class="value">{p.input_formats.join(', ')}</span>
+			<span class="value">
+				{#each p.input_formats as fmt, i}
+					<span class="tag">{fmt}</span>
+				{/each}
+				{#if p.input_formats.length === 0}—{/if}
+			</span>
 		</div>
 		<div class="detail-info-item">
 			<span class="label">OUTPUT</span>
-			<span class="value">{p.output_formats.join(', ')}</span>
+			<span class="value">
+				{#each p.output_formats as fmt}
+					<span class="tag">{fmt}</span>
+				{/each}
+				{#if p.output_formats.length === 0}—{/if}
+			</span>
 		</div>
 	</div>
 	<div class="detail-tags">

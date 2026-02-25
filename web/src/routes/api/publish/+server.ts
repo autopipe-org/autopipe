@@ -1,22 +1,23 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { validateSecurity, hasErrors } from '$lib/server/security.js';
+import { fetchGithubFiles } from '$lib/server/github.js';
 import { db, schema } from '$lib/server/db.js';
 import { eq } from 'drizzle-orm';
 
 const { userPipelines } = schema;
 
-// POST /api/publish — Validate security and publish pipeline to registry
+// POST /api/publish — Fetch code from GitHub, validate security, store URL + metadata
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
-		const { pipeline, github_url, github_token } = body;
+		const { github_url, github_token } = body;
 
-		if (!pipeline || !github_token) {
-			return json({ error: 'pipeline and github_token are required' }, { status: 400 });
+		if (!github_url || !github_token) {
+			return json({ error: 'github_url and github_token are required' }, { status: 400 });
 		}
 
-		// 1. Validate GitHub token
+		// 1. Validate GitHub token and get username for author
 		const userResp = await fetch('https://api.github.com/user', {
 			headers: {
 				Authorization: `Bearer ${github_token}`,
@@ -26,84 +27,84 @@ export const POST: RequestHandler = async ({ request }) => {
 		if (!userResp.ok) {
 			return json({ error: 'Invalid GitHub token' }, { status: 401 });
 		}
+		const githubUser = await userResp.json();
+		const author = githubUser.login as string;
 
-		// 2. Check required fields
-		if (!pipeline.name || !pipeline.snakefile || !pipeline.dockerfile) {
+		// 2. Fetch files from GitHub for validation
+		let files;
+		try {
+			files = await fetchGithubFiles(github_url);
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			return json({ error: `Failed to fetch from GitHub: ${message}` }, { status: 400 });
+		}
+
+		// 3. Check required files
+		if (!files.snakefile || !files.dockerfile) {
 			return json(
-				{ error: 'Pipeline must have name, snakefile, and dockerfile' },
+				{ error: 'GitHub repository must contain Snakefile and Dockerfile' },
 				{ status: 400 }
 			);
 		}
 
-		// 3. Validate metadata_json
-		if (!pipeline.metadata_json || typeof pipeline.metadata_json !== 'object') {
-			return json({ error: 'metadata_json must be a valid JSON object' }, { status: 400 });
+		// 4. Parse metadata.json
+		let metadata;
+		try {
+			metadata = files.metadata_json ? JSON.parse(files.metadata_json) : {};
+		} catch {
+			return json({ error: 'metadata.json is not valid JSON' }, { status: 400 });
 		}
 
-		// 4. Security validation
-		const issues = validateSecurity(pipeline.snakefile || '', pipeline.dockerfile || '');
+		if (!metadata.name) {
+			return json({ error: 'metadata.json must contain a "name" field' }, { status: 400 });
+		}
+
+		// 5. Security validation
+		const issues = validateSecurity(files.snakefile, files.dockerfile);
 		if (hasErrors(issues)) {
 			return json({ error: 'Security validation failed', issues }, { status: 422 });
 		}
 
-		// 5. Upsert pipeline (by name)
+		// 6. Upsert pipeline (by name) — store URL + metadata only
+		const name = metadata.name;
 		const existing = await db
 			.select({ pipelineId: userPipelines.pipelineId })
 			.from(userPipelines)
-			.where(eq(userPipelines.name, pipeline.name))
+			.where(eq(userPipelines.name, name))
 			.limit(1);
 
 		let pipelineId: number;
 
+		const values = {
+			description: metadata.description || '',
+			tools: metadata.tools || [],
+			inputFormats: metadata.input_formats || [],
+			outputFormats: metadata.output_formats || [],
+			tags: metadata.tags || [],
+			githubUrl: github_url,
+			metadataJson: metadata,
+			author,
+			version: metadata.version || '1.0.0',
+			verified: false
+		};
+
 		if (existing.length > 0) {
-			// Update existing
 			pipelineId = existing[0].pipelineId;
 			await db
 				.update(userPipelines)
-				.set({
-					description: pipeline.description || '',
-					tools: pipeline.tools || [],
-					inputFormats: pipeline.input_formats || [],
-					outputFormats: pipeline.output_formats || [],
-					tags: pipeline.tags || [],
-					snakefile: pipeline.snakefile,
-					dockerfile: pipeline.dockerfile,
-					configYaml: pipeline.config_yaml || '',
-					metadataJson: pipeline.metadata_json,
-					readme: pipeline.readme || '',
-					author: pipeline.author || '',
-					version: pipeline.version || '1.0.0',
-					verified: pipeline.verified || false,
-					updatedAt: new Date()
-				})
+				.set({ ...values, updatedAt: new Date() })
 				.where(eq(userPipelines.pipelineId, pipelineId));
 		} else {
-			// Insert new
 			const [row] = await db
 				.insert(userPipelines)
-				.values({
-					name: pipeline.name,
-					description: pipeline.description || '',
-					tools: pipeline.tools || [],
-					inputFormats: pipeline.input_formats || [],
-					outputFormats: pipeline.output_formats || [],
-					tags: pipeline.tags || [],
-					snakefile: pipeline.snakefile,
-					dockerfile: pipeline.dockerfile,
-					configYaml: pipeline.config_yaml || '',
-					metadataJson: pipeline.metadata_json,
-					readme: pipeline.readme || '',
-					author: pipeline.author || '',
-					version: pipeline.version || '1.0.0',
-					verified: pipeline.verified || false
-				})
+				.values({ name, ...values })
 				.returning({ pipelineId: userPipelines.pipelineId });
 			pipelineId = row.pipelineId;
 		}
 
-		const response: Record<string, unknown> = { pipeline_id: pipelineId };
+		const response: Record<string, unknown> = { pipeline_id: pipelineId, author };
 		if (issues.length > 0) {
-			response.warnings = issues; // warnings only (errors blocked above)
+			response.warnings = issues;
 		}
 
 		return json(response, { status: 200 });

@@ -13,7 +13,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.iter().any(|a| a == "--mcp-server") {
-        // MCP server mode: Claude Desktop invokes this via stdio
+        // MCP server mode: any MCP-compatible app invokes this via stdio
         tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .init();
@@ -23,7 +23,7 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.iter().any(|a| a == "--register") {
-        // Register MCP server in Claude Desktop config
+        // Auto-register MCP server in Claude Desktop config
         let config_path = config::AppConfig::config_path();
         match claude_config::register_mcp_server(&config_path.to_string_lossy()) {
             Ok(_) => {
@@ -32,6 +32,10 @@ fn main() {
                 println!("  {}", dest.display());
                 println!();
                 println!("Restart Claude Desktop to load autopipe tools.");
+                println!();
+                println!("For other MCP-compatible apps (ChatGPT Desktop, Gemini CLI, etc.),");
+                println!("add this command to their MCP server configuration:");
+                println!("  desktop --mcp-server");
             }
             Err(e) => {
                 eprintln!("Failed to register: {}", e);
@@ -52,7 +56,7 @@ fn main() {
         let dest = claude_config::claude_desktop_config_path();
         println!("Config path: {}", dest.display());
         if claude_config::is_registered() {
-            println!("MCP server: registered");
+            println!("MCP server: registered (Claude Desktop)");
         } else {
             println!("MCP server: not registered");
         }
@@ -67,9 +71,13 @@ fn main() {
         {
             println!("AutoPipe Desktop");
             println!();
+            println!("MCP server for bioinformatics pipeline management.");
+            println!("Compatible with Claude Desktop, ChatGPT Desktop, Gemini CLI,");
+            println!("OpenAI Codex CLI, and any other MCP-compatible AI application.");
+            println!();
             println!("Usage:");
-            println!("  desktop --mcp-server    Run as MCP server (for Claude Desktop)");
-            println!("  desktop --register      Register MCP in Claude Desktop");
+            println!("  desktop --mcp-server    Run as MCP server (for any MCP-compatible app)");
+            println!("  desktop --register      Auto-register MCP in Claude Desktop");
             println!("  desktop --unregister    Unregister MCP from Claude Desktop");
             println!("  desktop --status        Check registration status");
             println!();

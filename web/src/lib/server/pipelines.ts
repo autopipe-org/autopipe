@@ -11,6 +11,7 @@ export interface PipelineSummary {
 	input_formats: string[];
 	output_formats: string[];
 	tags: string[];
+	github_url: string;
 	author: string;
 	version: string;
 	verified: boolean;
@@ -25,11 +26,8 @@ export interface Pipeline {
 	input_formats: string[];
 	output_formats: string[];
 	tags: string[];
-	snakefile: string;
-	dockerfile: string;
-	config_yaml: string;
+	github_url: string;
 	metadata_json: unknown;
-	readme: string;
 	author: string;
 	version: string;
 	verified: boolean;
@@ -46,6 +44,7 @@ function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
 		input_formats: r.inputFormats ?? [],
 		output_formats: r.outputFormats ?? [],
 		tags: r.tags ?? [],
+		github_url: r.githubUrl,
 		author: r.author ?? '',
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
@@ -62,11 +61,8 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		input_formats: r.inputFormats ?? [],
 		output_formats: r.outputFormats ?? [],
 		tags: r.tags ?? [],
-		snakefile: r.snakefile,
-		dockerfile: r.dockerfile,
-		config_yaml: r.configYaml ?? '',
+		github_url: r.githubUrl,
 		metadata_json: r.metadataJson,
-		readme: r.readme ?? '',
 		author: r.author ?? '',
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
@@ -120,11 +116,8 @@ export async function insertPipeline(p: Pipeline): Promise<number> {
 			inputFormats: p.input_formats,
 			outputFormats: p.output_formats,
 			tags: p.tags,
-			snakefile: p.snakefile,
-			dockerfile: p.dockerfile,
-			configYaml: p.config_yaml,
+			githubUrl: p.github_url,
 			metadataJson: p.metadata_json,
-			readme: p.readme,
 			author: p.author,
 			version: p.version,
 			verified: p.verified
@@ -142,11 +135,8 @@ export async function updatePipeline(id: number, p: Pipeline): Promise<boolean> 
 			inputFormats: p.input_formats,
 			outputFormats: p.output_formats,
 			tags: p.tags,
-			snakefile: p.snakefile,
-			dockerfile: p.dockerfile,
-			configYaml: p.config_yaml,
+			githubUrl: p.github_url,
 			metadataJson: p.metadata_json,
-			readme: p.readme,
 			author: p.author,
 			version: p.version,
 			verified: p.verified,

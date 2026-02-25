@@ -76,6 +76,10 @@
 <div class:app-hidden={!appVisible}>
 	<header>
 		<a href="/" class="logo">AutoPipe</a>
+		<nav style="margin-left:auto;display:flex;gap:16px">
+			<a href="/" style="color:#fff;text-decoration:none;font-weight:600">Pipelines</a>
+			<a href="/plugins" style="color:#ccc;text-decoration:none">Plugins</a>
+		</nav>
 	</header>
 	<main>
 		<div class="section">

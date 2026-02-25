@@ -226,9 +226,10 @@ impl AutoPipeApp {
         ui.add_space(15.0);
 
         // Step 1
-        ui.heading("Step 1: Install Claude Desktop");
+        ui.heading("Step 1: Install an MCP-Compatible AI App");
         ui.add_space(5.0);
-        ui.label("Download and install the Claude Desktop app:");
+        ui.label("AutoPipe works with any MCP-compatible AI application.");
+        ui.label("For example, Claude Desktop:");
         ui.hyperlink_to(
             "https://claude.ai/download",
             "https://claude.ai/download",
@@ -252,22 +253,26 @@ impl AutoPipeApp {
         ui.heading("Step 3: Register MCP Tools");
         ui.add_space(5.0);
         ui.label("Click 'Register & Minimize to Tray' at the bottom.");
-        ui.label("This registers autopipe tools in Claude Desktop.");
-        ui.label("After registration, restart Claude Desktop to load the tools.");
+        ui.label("This auto-registers autopipe tools in Claude Desktop.");
+        ui.label("For other MCP apps, add the MCP server config manually:");
+        ui.add_space(3.0);
+        ui.code("desktop --mcp-server");
+        ui.add_space(3.0);
+        ui.label("After registration, restart your AI app to load the tools.");
 
         ui.add_space(15.0);
         ui.separator();
         ui.add_space(10.0);
 
         // Step 4
-        ui.heading("Step 4: Use Claude Desktop");
+        ui.heading("Step 4: Use Your AI App");
         ui.add_space(5.0);
-        ui.label("Open Claude Desktop and start a conversation.");
-        ui.label("You can ask Claude to:");
-        ui.label("  - Search for existing workflows");
+        ui.label("Open your MCP-compatible AI app and start a conversation.");
+        ui.label("You can ask the AI to:");
+        ui.label("  - Search for existing workflows and plugins");
         ui.label("  - Create new bioinformatics pipelines");
         ui.label("  - Build, run, and monitor pipelines");
-        ui.label("  - Upload workflows to the registry for sharing");
+        ui.label("  - Upload and publish workflows to the registry");
     }
 
     fn draw_connection_tab(&mut self, ui: &mut egui::Ui) {
@@ -459,6 +464,7 @@ impl AutoPipeApp {
                 self.github_username = None;
                 let _ = self.config.save();
                 self.status_message = "GitHub logged out.".into();
+                return;
             }
 
             ui.add_space(15.0);
@@ -474,19 +480,21 @@ impl AutoPipeApp {
 
             // Resolve username if not loaded yet
             if self.github_username.is_none() {
-                let token = self.config.github_token.clone().unwrap();
-                let (tx, rx) = mpsc::channel();
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    rt.block_on(async {
-                        match fetch_github_username(&token).await {
-                            Ok(name) => { let _ = tx.send(Some(name)); }
-                            Err(_) => { let _ = tx.send(None); }
-                        }
+                if let Some(ref token) = self.config.github_token {
+                    let token = token.clone();
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        rt.block_on(async {
+                            match fetch_github_username(&token).await {
+                                Ok(name) => { let _ = tx.send(Some(name)); }
+                                Err(_) => { let _ = tx.send(None); }
+                            }
+                        });
                     });
-                });
-                if let Ok(name) = rx.recv() {
-                    self.github_username = name;
+                    if let Ok(name) = rx.recv() {
+                        self.github_username = name;
+                    }
                 }
             }
         } else if self.github_polling {

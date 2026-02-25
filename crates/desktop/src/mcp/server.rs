@@ -1,5 +1,5 @@
 use common::api_client::RegistryClient;
-use common::models::{clean_content, Pipeline, PipelineMetadata};
+use common::models::{clean_content, PipelineMetadata};
 use common::templates;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -127,9 +127,13 @@ struct UploadWorkflowParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PublishWorkflowParams {
-    /// Remote path to the pipeline directory on the SSH server
-    pipeline_dir: String,
     /// GitHub URL of the uploaded workflow (from upload_workflow result)
+    github_url: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PublishPluginParams {
+    /// GitHub URL of the plugin repository
     github_url: String,
 }
 
@@ -195,15 +199,66 @@ fn extract_absolute_path(value: &str) -> Option<String> {
     }
 }
 
+/// Parse a GitHub URL into (owner, repo, path).
+/// Supports formats like:
+///   https://github.com/{owner}/{repo}/tree/{branch}/{path}
+///   https://github.com/{owner}/{repo}
+fn parse_github_url(url: &str) -> Option<(String, String, String)> {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+    let parts: Vec<&str> = url.splitn(4, '/').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let owner = parts[0].to_string();
+    let repo = parts[1].to_string();
+    // Extract path from tree/{branch}/{path}
+    let path = if parts.len() >= 4 && parts[2] == "tree" {
+        // parts[3] = "main/pipeline_name" or "main/path/to/pipeline"
+        let rest = parts[3];
+        // Skip the branch name (first segment)
+        if let Some(slash_pos) = rest.find('/') {
+            rest[slash_pos + 1..].to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    Some((owner, repo, path))
+}
+
+/// Fetch a single file from GitHub Contents API.
+async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, path: &str) -> Option<String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/contents/{}",
+        owner, repo, path
+    );
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github.raw")
+        .header("User-Agent", "autopipe-desktop")
+        .send()
+        .await
+        .ok()?;
+    if resp.status().is_success() {
+        resp.text().await.ok()
+    } else {
+        None
+    }
+}
+
 // ── SSH helper methods ──────────────────────────────────────────────
 
 impl AutoPipeServer {
     async fn ssh_run(&self, cmd: &str) -> Result<(String, i32), String> {
         let config = self.config.clone();
         let cmd = cmd.to_string();
-        tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
+        let (output, code) = tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
             .await
-            .map_err(|e| format!("Task error: {}", e))?
+            .map_err(|e| format!("Task error: {}", e))??;
+        Ok((clean_content(&output), code))
     }
 
     async fn ssh_read_file(&self, path: &str) -> Result<String, String> {
@@ -228,7 +283,6 @@ impl AutoPipeServer {
     }
 
     /// Resolve the output directory for a run.
-    /// Uses the provided path if given, otherwise defaults to {full_output_dir}/{run_name}.
     fn resolve_output_dir(&self, explicit: &Option<String>, run_name: &str) -> String {
         match explicit {
             Some(dir) if !dir.is_empty() => dir.clone(),
@@ -241,9 +295,7 @@ impl AutoPipeServer {
     }
 
     /// Find symlink targets inside a directory and return extra Docker -v mounts.
-    /// This resolves symlinks on the SSH server so Docker can see the real files.
     async fn resolve_symlink_mounts(&self, dir: &str) -> String {
-        // Find all symlinks, resolve them, get unique parent directories
         let cmd = format!(
             "find '{}' -maxdepth 3 -type l -exec readlink -f '{{}}' \\; 2>/dev/null | xargs -I{{}} dirname '{{}}' | sort -u",
             dir
@@ -265,11 +317,9 @@ impl AutoPipeServer {
     }
 
     /// Find the pipeline directory for a given Docker image name.
-    /// Searches the configured pipelines and output directories.
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
 
-        // Check under configured pipelines directory: {pipelines_dir}/{name}
         let pipelines_base = self.config.full_pipelines_dir();
         let candidate = format!(
             "{}/{}",
@@ -285,7 +335,6 @@ impl AutoPipeServer {
             }
         }
 
-        // Check under configured output directory: {output_dir}/{name}/{name}
         let output_base = self.config.full_output_dir();
         let candidate = format!(
             "{}/{}/{}",
@@ -344,7 +393,7 @@ impl AutoPipeServer {
         Ok(CallToolResult::success(vec![Content::text(info)]))
     }
 
-    // ── Registry tools ──────────────────────────────────────────
+    // ── Pipeline registry tools ─────────────────────────────────
 
     #[tool(description = "Search pipelines by keyword in name, description, tools, or tags")]
     async fn search_pipelines(
@@ -377,21 +426,34 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Download a pipeline by ID and save it to the remote SSH server. If output_dir is omitted, saves to the configured pipelines directory.")]
+    #[tool(description = "Download a pipeline by ID from the registry and save it to the remote SSH server. Fetches pipeline files from its GitHub repository. If output_dir is omitted, saves to the configured pipelines directory.")]
     async fn download_pipeline(
         &self,
         Parameters(params): Parameters<DownloadParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let pipeline = match self.registry.download(params.pipeline_id).await {
+        // 1. Get pipeline metadata from registry (includes github_url)
+        let pipeline = match self.registry.get_pipeline(params.pipeline_id).await {
             Ok(p) => p,
             Err(e) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Download failed: {}",
+                    "Failed to get pipeline: {}",
                     e
                 ))]));
             }
         };
 
+        // 2. Parse GitHub URL
+        let (owner, repo, path) = match parse_github_url(&pipeline.github_url) {
+            Some(parsed) => parsed,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid GitHub URL: {}",
+                    pipeline.github_url
+                ))]));
+            }
+        };
+
+        // 3. Create directory on remote server
         let base_dir = params
             .output_dir
             .unwrap_or_else(|| self.config.full_pipelines_dir());
@@ -400,10 +462,7 @@ impl AutoPipeServer {
             base_dir.trim_end_matches('/'),
             pipeline.name
         );
-        let meta_str =
-            serde_json::to_string_pretty(&pipeline.metadata_json).unwrap_or_default();
 
-        // Create directory on remote server
         match self.ssh_run(&format!("mkdir -p '{}'", dir)).await {
             Ok((_, 0)) => {}
             Ok((output, _)) => {
@@ -421,107 +480,34 @@ impl AutoPipeServer {
             }
         }
 
-        // Write each file via SSH
-        let files: Vec<(&str, &str)> = vec![
-            ("Snakefile", &pipeline.snakefile),
-            ("Dockerfile", &pipeline.dockerfile),
-            ("config.yaml", &pipeline.config_yaml),
-            ("metadata.json", &meta_str),
-            ("README.md", &pipeline.readme),
-        ];
+        // 4. Fetch files from GitHub and write to SSH
+        let client = reqwest::Client::new();
+        let file_names = ["Snakefile", "Dockerfile", "config.yaml", "metadata.json", "README.md"];
+        let mut written = Vec::new();
 
-        for (name, content) in &files {
-            let path = format!("{}/{}", dir, name);
-            if let Err(e) = self.ssh_write_file(&path, content).await {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to write {}: {}",
-                    name, e
-                ))]));
+        for filename in &file_names {
+            let file_path = if path.is_empty() {
+                filename.to_string()
+            } else {
+                format!("{}/{}", path, filename)
+            };
+
+            if let Some(content) = fetch_github_file(&client, &owner, &repo, &file_path).await {
+                let remote_path = format!("{}/{}", dir, filename);
+                if let Err(e) = self.ssh_write_file(&remote_path, &content).await {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to write {}: {}",
+                        filename, e
+                    ))]));
+                }
+                written.push(*filename);
             }
         }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Downloaded pipeline '{}' to {} (remote server)",
-            pipeline.name, dir
+            "Downloaded pipeline '{}' to {} (remote server)\nFiles: {}",
+            pipeline.name, dir, written.join(", ")
         ))]))
-    }
-
-    #[tool(description = "Upload a pipeline from a directory on the remote SSH server to the registry")]
-    async fn upload_pipeline(
-        &self,
-        Parameters(params): Parameters<PipelineDirParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let dir = &params.pipeline_dir;
-
-        let meta_content = match self.ssh_read_file(&format!("{}/metadata.json", dir)).await {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot read metadata.json: {}",
-                    e
-                ))]));
-            }
-        };
-
-        // Read and clean all files (strip {"success": true} prefix if present)
-        let snakefile = clean_content(
-            &self.ssh_read_file(&format!("{}/Snakefile", dir)).await.unwrap_or_default(),
-        );
-        let dockerfile = clean_content(
-            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
-        );
-        let config_yaml = clean_content(
-            &self.ssh_read_file(&format!("{}/config.yaml", dir)).await.unwrap_or_default(),
-        );
-        let readme = clean_content(
-            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
-        );
-
-        // Normalize paths in config.yaml and Snakefile to use /input, /output
-        let snakefile = normalize_paths(&snakefile);
-        let config_yaml = normalize_paths(&config_yaml);
-
-        let cleaned_meta = clean_content(&meta_content);
-        let metadata: PipelineMetadata = match serde_json::from_str(&cleaned_meta) {
-            Ok(m) => m,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid metadata.json: {}",
-                    e
-                ))]));
-            }
-        };
-
-        let pipeline = Pipeline {
-            pipeline_id: None,
-            name: metadata.name.clone(),
-            description: metadata.description,
-            tools: metadata.tools,
-            input_formats: metadata.input_formats,
-            output_formats: metadata.output_formats,
-            tags: metadata.tags,
-            snakefile,
-            dockerfile,
-            config_yaml,
-            metadata_json: serde_json::from_str(&cleaned_meta).unwrap_or_default(),
-            readme,
-            author: metadata.author,
-            version: metadata.version,
-            verified: metadata.verified,
-            created_at: None,
-            updated_at: None,
-        };
-
-        match self.registry.upload(&pipeline).await {
-            Ok(id) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Uploaded pipeline '{}' with id={}",
-                metadata.name, id
-            ))])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Upload failed: {}",
-                e
-            ))])),
-        }
     }
 
     #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Requires GitHub login (configured in the GitHub tab). Returns the GitHub commit URL.")]
@@ -606,7 +592,6 @@ impl AutoPipeServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         if repo_check.status() == reqwest::StatusCode::NOT_FOUND {
-            // Create repo
             let create_resp = client
                 .post("https://api.github.com/user/repos")
                 .header("Authorization", format!("Bearer {}", token))
@@ -626,7 +611,6 @@ impl AutoPipeServer {
                     "Failed to create GitHub repo: {}", err_text
                 ))]));
             }
-            // Wait briefly for repo initialization
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
@@ -800,7 +784,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines to check for duplicates. If a pipeline with the same name already exists, inform the user and ask whether to update or cancel.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -814,67 +798,12 @@ impl AutoPipeServer {
             }
         };
 
-        let dir = &params.pipeline_dir;
-
-        // Read pipeline files from SSH
-        let meta_raw = match self.ssh_read_file(&format!("{}/metadata.json", dir)).await {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot read metadata.json: {}", e
-                ))]));
-            }
-        };
-        let cleaned_meta = clean_content(&meta_raw);
-        let metadata: PipelineMetadata = match serde_json::from_str(&cleaned_meta) {
-            Ok(m) => m,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid metadata.json: {}", e
-                ))]));
-            }
-        };
-
-        let snakefile = normalize_paths(&clean_content(
-            &self.ssh_read_file(&format!("{}/Snakefile", dir)).await.unwrap_or_default(),
-        ));
-        let dockerfile = clean_content(
-            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
-        );
-        let config_yaml = normalize_paths(&clean_content(
-            &self.ssh_read_file(&format!("{}/config.yaml", dir)).await.unwrap_or_default(),
-        ));
-        let readme = clean_content(
-            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
-        );
-
-        let pipeline = Pipeline {
-            pipeline_id: None,
-            name: metadata.name.clone(),
-            description: metadata.description,
-            tools: metadata.tools,
-            input_formats: metadata.input_formats,
-            output_formats: metadata.output_formats,
-            tags: metadata.tags,
-            snakefile,
-            dockerfile,
-            config_yaml,
-            metadata_json: serde_json::from_str(&cleaned_meta).unwrap_or_default(),
-            readme,
-            author: metadata.author,
-            version: metadata.version,
-            verified: metadata.verified,
-            created_at: None,
-            updated_at: None,
-        };
-
-        // Call registry publish endpoint
+        // Call registry publish endpoint with just github_url + token
         let base = self.config.registry_url.trim_end_matches('/');
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("{}/api/publish", base))
             .json(&serde_json::json!({
-                "pipeline": pipeline,
                 "github_url": params.github_url,
                 "github_token": token,
             }))
@@ -888,15 +817,15 @@ impl AutoPipeServer {
 
         if status.is_success() {
             let pipeline_id = body["pipeline_id"].as_i64().unwrap_or(0);
+            let name = body["name"].as_str().unwrap_or("unknown");
             let web_url = format!("{}/pipelines/{}", base, pipeline_id);
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Successfully published '{}' to the registry!\n\
                  Web page: {}\n\
                  Pipeline ID: {}",
-                metadata.name, web_url, pipeline_id
+                name, web_url, pipeline_id
             ))]))
         } else if status.as_u16() == 422 {
-            // Security validation failed
             let issues = body["issues"]
                 .as_array()
                 .map(|arr| {
@@ -983,6 +912,87 @@ impl AutoPipeServer {
         }
     }
 
+    // ── Plugin registry tools ───────────────────────────────────
+
+    #[tool(description = "Search plugins by keyword in name, description, category, or tags")]
+    async fn search_plugins(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self.registry.search_plugins(&params.query).await {
+            Ok(results) => {
+                let text = serde_json::to_string_pretty(&results).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Search failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    #[tool(description = "List all plugins in the registry")]
+    async fn list_plugins(&self) -> Result<CallToolResult, ErrorData> {
+        match self.registry.list_plugins().await {
+            Ok(results) => {
+                let text = serde_json::to_string_pretty(&results).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "List failed: {}",
+                e
+            ))])),
+        }
+    }
+
+    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins to check for duplicates. If a plugin with the same name already exists, inform the user and ask whether to update or cancel.")]
+    async fn publish_plugin(
+        &self,
+        Parameters(params): Parameters<PublishPluginParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let token = match &self.config.github_token {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                )]));
+            }
+        };
+
+        let base = self.config.registry_url.trim_end_matches('/');
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/plugins/publish", base))
+            .json(&serde_json::json!({
+                "github_url": params.github_url,
+                "github_token": token,
+            }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if status.is_success() {
+            let plugin_id = body["plugin_id"].as_i64().unwrap_or(0);
+            let name = body["name"].as_str().unwrap_or("unknown");
+            let web_url = format!("{}/plugins/{}", base, plugin_id);
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Successfully published plugin '{}' to the registry!\n\
+                 Web page: {}\n\
+                 Plugin ID: {}",
+                name, web_url, plugin_id
+            ))]))
+        } else {
+            let error_msg = body["error"].as_str().unwrap_or("Unknown error");
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Plugin publish failed: {}", error_msg
+            ))]))
+        }
+    }
+
     // ── Execution tools (via SSH) ───────────────────────────────
 
     #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH")]
@@ -1019,13 +1029,11 @@ impl AutoPipeServer {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| self.config.full_output_dir());
 
-        // Find the pipeline directory to mount
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
             Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", dir),
             None => String::new(),
         };
 
-        // Resolve symlinks in input_dir for extra Docker mounts
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
         let cmd = format!(
@@ -1040,7 +1048,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1050,22 +1058,16 @@ impl AutoPipeServer {
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
-        // Find the pipeline directory to mount
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
             Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", dir),
             None => String::new(),
         };
 
-        // Resolve symlinks in input_dir for extra Docker mounts
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
-        // Remove old container with same name if exists
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", container_name)).await;
-
-        // Create output directory
         let _ = self.ssh_run(&format!("mkdir -p '{}'", output_dir)).await;
 
-        // Run with nohup in background, redirect all output to log file
         let cmd = format!(
             "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
             container_name, pipeline_mount, params.input_dir, symlink_mounts, output_dir, params.image_name, cores, log_path
@@ -1100,13 +1102,11 @@ impl AutoPipeServer {
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
-        // Check if container is still running
         let running = match self.ssh_run(&format!("docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", container_name)).await {
             Ok((output, 0)) => output.trim() == "true",
             _ => false,
         };
 
-        // Read last 50 lines of log
         let log_output = match self.ssh_run(&format!("tail -50 '{}' 2>/dev/null", log_path)).await {
             Ok((output, 0)) => output,
             Ok((output, _)) => format!("(log not available: {})", output.trim()),
@@ -1128,7 +1128,6 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<CreateSymlinkParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Verify source exists
         match self.ssh_run(&format!("test -e '{}' && echo 'exists'", params.source)).await {
             Ok((output, 0)) if output.trim().contains("exists") => {}
             _ => {
@@ -1139,14 +1138,12 @@ impl AutoPipeServer {
             }
         }
 
-        // Create parent directory of target if needed
         if let Some(parent) = std::path::Path::new(&params.target).parent() {
             let _ = self
                 .ssh_run(&format!("mkdir -p '{}'", parent.to_string_lossy()))
                 .await;
         }
 
-        // Create symlink
         match self.ssh_run(&format!("ln -sf '{}' '{}'", params.source, params.target)).await {
             Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Symlink created: {} -> {}",
@@ -1223,7 +1220,6 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<WriteFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Create parent directory if needed
         if let Some(parent) = std::path::Path::new(&params.path).parent() {
             let _ = self
                 .ssh_run(&format!("mkdir -p '{}'", parent.to_string_lossy()))
@@ -1247,7 +1243,6 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<ViewImageParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Detect MIME type from extension
         let ext = params.path.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
         let mime_type = match ext.as_str() {
             "png" => "image/png",
@@ -1264,7 +1259,6 @@ impl AutoPipeServer {
             }
         };
 
-        // Check file exists and get size
         let size_check = format!("stat -c%s '{}' 2>/dev/null || echo 'NOT_FOUND'", params.path);
         let file_size: u64 = match self.ssh_run(&size_check).await {
             Ok((output, _)) => {
@@ -1285,19 +1279,16 @@ impl AutoPipeServer {
             }
         };
 
-        // For raster images > 500KB, resize on server using Python
         let needs_resize = file_size > 500 * 1024
             && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
 
         let base64_result = if needs_resize {
-            // Ensure autopipe-resizer Docker image exists, build if not
             let ensure_image = r#"docker image inspect autopipe-resizer >/dev/null 2>&1 || docker build -t autopipe-resizer - << 'DOCKERFILE'
 FROM python:3.11-slim
 RUN pip install --no-cache-dir Pillow
 DOCKERFILE"#;
             let _ = self.ssh_run(ensure_image).await;
 
-            // Resize using Docker container with Pillow
             let parent_dir = params.path.rsplitn(2, '/').nth(1).unwrap_or("/");
             let filename = params.path.rsplitn(2, '/').next().unwrap_or(&params.path);
             let resize_cmd = format!(
@@ -1318,21 +1309,18 @@ PYEOF"#,
             );
             self.ssh_run(&resize_cmd).await
         } else {
-            // Small file or non-raster (SVG/PDF): send as-is
             let cmd = format!("base64 -w 0 '{}'", params.path);
             self.ssh_run(&cmd).await
         };
 
         match base64_result {
             Ok((base64_data, 0)) => {
-                // Strip {"success": true} prefix if present from shell init
                 let trimmed = clean_content(&base64_data).trim().to_string();
                 if trimmed.is_empty() {
                     return Ok(CallToolResult::error(vec![Content::text(
                         "Failed to encode image: empty output",
                     )]));
                 }
-                // Use PNG mime type if we resized (output is always PNG/JPEG)
                 let final_mime = if needs_resize && matches!(ext.as_str(), "png" | "gif" | "webp") {
                     "image/png"
                 } else if needs_resize {

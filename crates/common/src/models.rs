@@ -11,11 +11,8 @@ pub struct Pipeline {
     pub input_formats: Vec<String>,
     pub output_formats: Vec<String>,
     pub tags: Vec<String>,
-    pub snakefile: String,
-    pub dockerfile: String,
-    pub config_yaml: String,
+    pub github_url: String,
     pub metadata_json: serde_json::Value,
-    pub readme: String,
     pub author: String,
     pub version: String,
     pub verified: bool,
@@ -25,7 +22,7 @@ pub struct Pipeline {
     pub updated_at: Option<String>,
 }
 
-/// Summary returned from list/search (without full file contents).
+/// Summary returned from list/search (without full details).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineSummary {
     pub pipeline_id: i32,
@@ -35,6 +32,7 @@ pub struct PipelineSummary {
     pub input_formats: Vec<String>,
     pub output_formats: Vec<String>,
     pub tags: Vec<String>,
+    pub github_url: String,
     pub author: String,
     pub version: String,
     pub verified: bool,
@@ -61,6 +59,44 @@ pub struct PipelineMetadata {
     pub tags: Vec<String>,
     #[serde(default)]
     pub verified: bool,
+}
+
+/// A plugin stored in the registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Plugin {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_id: Option<i32>,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub category: String,
+    pub tags: Vec<String>,
+    pub github_url: String,
+    pub metadata_json: serde_json::Value,
+    pub author: String,
+    pub version: String,
+    pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+}
+
+/// Summary returned from list/search for plugins.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginSummary {
+    pub plugin_id: i32,
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub category: String,
+    pub tags: Vec<String>,
+    pub github_url: String,
+    pub author: String,
+    pub version: String,
+    pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -95,16 +131,6 @@ pub fn clean_content(raw: &str) -> String {
     s.to_string()
 }
 
-impl Pipeline {
-    /// Remove `{"success":true}` prefix from all file content fields.
-    pub fn clean_file_contents(&mut self) {
-        self.snakefile = clean_content(&self.snakefile);
-        self.dockerfile = clean_content(&self.dockerfile);
-        self.config_yaml = clean_content(&self.config_yaml);
-        self.readme = clean_content(&self.readme);
-    }
-}
-
 /// Search query parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchQuery {
@@ -133,7 +159,6 @@ mod tests {
 
     #[test]
     fn clean_content_splits_json_concatenation() {
-        // metadata.json: {"success":true}{"name":"my-pipeline",...}
         let input = r#"{"success":true}{"name":"my-pipeline","description":"test"}"#;
         let result = clean_content(input);
         assert!(result.starts_with(r#"{"name":"my-pipeline""#), "Got: {}", result);
@@ -157,35 +182,5 @@ mod tests {
         let input = r#"{"name":"pipeline","tools":["bwa"]}"#;
         let result = clean_content(input);
         assert_eq!(result, input);
-    }
-
-    #[test]
-    fn clean_file_contents_cleans_all_fields() {
-        let mut pipeline = Pipeline {
-            pipeline_id: None,
-            name: "test".into(),
-            description: "test".into(),
-            tools: vec![],
-            input_formats: vec![],
-            output_formats: vec![],
-            tags: vec![],
-            snakefile: r#"{"success":true}rule all:"#.into(),
-            dockerfile: r#"{"success": true}FROM ubuntu"#.into(),
-            config_yaml: r#"{"success":true}samples: test"#.into(),
-            readme: r#"{"success":true}# README"#.into(),
-            metadata_json: serde_json::json!({}),
-            author: "test".into(),
-            version: "1.0".into(),
-            verified: false,
-            created_at: None,
-            updated_at: None,
-        };
-
-        pipeline.clean_file_contents();
-
-        assert!(pipeline.snakefile.starts_with("rule all"), "snakefile: {}", pipeline.snakefile);
-        assert!(pipeline.dockerfile.starts_with("FROM"), "dockerfile: {}", pipeline.dockerfile);
-        assert!(pipeline.config_yaml.starts_with("samples"), "config: {}", pipeline.config_yaml);
-        assert!(pipeline.readme.starts_with("# README"), "readme: {}", pipeline.readme);
     }
 }
