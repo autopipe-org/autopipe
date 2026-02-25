@@ -87,12 +87,18 @@ pub async fn index_page(
   <a href="/" class="logo">AutoPipe</a>
 </header>
 <main>
-  <div class="search">
-    <input type="text" id="search-input" placeholder="Search by name, tool, or tag..." value="{search_value}" autocomplete="off">
+  <div class="section">
+    <h3 class="section-title">Search Pipelines</h3>
+    <div class="search">
+      <input type="text" id="search-input" placeholder="Search by name, tool, or tag..." value="{search_value}" autocomplete="off">
+    </div>
   </div>
-  <div class="count">{count} pipelines</div>
-  <div class="grid">
-    {cards}
+  <div class="section">
+    <h3 class="section-title" id="list-title">All Pipelines <span class="section-count">({count})</span></h3>
+    <div class="grid" id="pipeline-grid">
+      {cards}
+    </div>
+    <div class="pagination" id="pagination"></div>
   </div>
 </main>
 </div>
@@ -107,18 +113,65 @@ setTimeout(function() {{
   }}, 500);
 }}, 1200);
 
-document.getElementById('search-input').addEventListener('input', function() {{
-  var q = this.value.toLowerCase();
-  var cards = document.querySelectorAll('.card');
-  var count = 0;
-  cards.forEach(function(card) {{
-    var text = card.textContent.toLowerCase();
-    var match = !q || text.indexOf(q) !== -1;
-    card.style.display = match ? '' : 'none';
-    if (match) count++;
+var PAGE_SIZE = 10;
+var currentPage = 1;
+
+function getVisibleCards() {{
+  var q = document.getElementById('search-input').value.toLowerCase();
+  var cards = Array.from(document.querySelectorAll('.card'));
+  if (!q) return cards;
+  return cards.filter(function(card) {{
+    return card.textContent.toLowerCase().indexOf(q) !== -1;
   }});
-  document.querySelector('.count').textContent = count + ' pipelines';
+}}
+
+function renderPage() {{
+  var all = Array.from(document.querySelectorAll('.card'));
+  var visible = getVisibleCards();
+  var total = visible.length;
+  var totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if (currentPage > totalPages) currentPage = totalPages;
+  var start = (currentPage - 1) * PAGE_SIZE;
+  var end = start + PAGE_SIZE;
+  var visibleSet = new Set(visible.slice(start, end));
+
+  all.forEach(function(card) {{
+    card.style.display = visibleSet.has(card) ? '' : 'none';
+  }});
+
+  var q = document.getElementById('search-input').value.trim();
+  var titleEl = document.getElementById('list-title');
+  if (q) {{
+    titleEl.innerHTML = 'Search Results <span class="section-count">(' + total + ')</span>';
+  }} else {{
+    titleEl.innerHTML = 'All Pipelines <span class="section-count">(' + total + ')</span>';
+  }}
+
+  var pag = document.getElementById('pagination');
+  if (totalPages <= 1) {{ pag.innerHTML = ''; return; }}
+  var html = '';
+  if (currentPage > 1) html += '<button class="page-btn" data-page="' + (currentPage - 1) + '">&laquo;</button>';
+  for (var i = 1; i <= totalPages; i++) {{
+    html += '<button class="page-btn' + (i === currentPage ? ' active' : '') + '" data-page="' + i + '">' + i + '</button>';
+  }}
+  if (currentPage < totalPages) html += '<button class="page-btn" data-page="' + (currentPage + 1) + '">&raquo;</button>';
+  pag.innerHTML = html;
+
+  pag.querySelectorAll('.page-btn').forEach(function(btn) {{
+    btn.addEventListener('click', function() {{
+      currentPage = parseInt(this.getAttribute('data-page'));
+      renderPage();
+      document.getElementById('list-title').scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+    }});
+  }});
+}}
+
+document.getElementById('search-input').addEventListener('input', function() {{
+  currentPage = 1;
+  renderPage();
 }});
+
+renderPage();
 </script>
 </body>
 </html>"#,
@@ -370,12 +423,22 @@ header { padding: 14px 40px; border-bottom: 1px solid #eee; background: #fff; }
 /* Main layout - wide */
 main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 
+/* Sections */
+.section { margin-bottom: 28px; }
+.section-title { font-size: 15px; font-weight: 600; color: #333; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #e5e5e5; }
+.section-count { font-weight: 400; color: #999; font-size: 13px; }
+
 /* Search */
-.search { margin-bottom: 20px; }
+.search { }
 .search input { width: 100%; padding: 11px 16px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; background: #fff; transition: border-color 0.2s; outline: none; }
 .search input:focus { border-color: #999; }
 .search button { display: none; }
-.count { color: #999; margin-bottom: 16px; font-size: 13px; }
+
+/* Pagination */
+.pagination { display: flex; justify-content: center; align-items: center; gap: 4px; margin-top: 20px; padding: 16px 0; }
+.page-btn { min-width: 36px; height: 36px; padding: 0 10px; border: 1px solid #ddd; border-radius: 8px; background: #fff; color: #555; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; }
+.page-btn:hover { background: #f0f0f0; border-color: #ccc; }
+.page-btn.active { background: #111; color: #fff; border-color: #111; }
 
 /* Pipeline cards */
 .grid { display: flex; flex-direction: column; gap: 1px; background: #e5e5e5; border: 1px solid #e5e5e5; border-radius: 10px; overflow: hidden; }

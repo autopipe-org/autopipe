@@ -29,37 +29,6 @@ pub fn claude_desktop_config_path() -> PathBuf {
     }
 }
 
-/// Check if Claude Desktop appears to be installed.
-pub fn is_claude_desktop_installed() -> bool {
-    // Check if the actual Claude Desktop executable exists
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(local) = dirs::data_local_dir() {
-            // Default install path: %LOCALAPPDATA%\Programs\claude-desktop\Claude.exe
-            if local.join("Programs/claude-desktop/Claude.exe").exists() {
-                return true;
-            }
-        }
-        // Also check %LOCALAPPDATA%\AnthropicClaude\Claude.exe
-        if let Some(local) = dirs::data_local_dir() {
-            if local.join("AnthropicClaude/Claude.exe").exists() {
-                return true;
-            }
-        }
-        false
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::path::Path::new("/Applications/Claude.app").exists()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        // Linux: check if claude-desktop binary is on PATH or config file exists
-        let config_path = claude_desktop_config_path();
-        config_path.exists()
-    }
-}
-
 /// Register the autopipe MCP server in Claude Desktop's config.
 pub fn register_mcp_server(config_path: &str) -> std::io::Result<()> {
     let path = claude_desktop_config_path();

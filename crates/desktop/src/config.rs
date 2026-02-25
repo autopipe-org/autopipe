@@ -22,7 +22,12 @@ impl Default for SshAuth {
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// Primary registry URL (kept for backward compatibility with MCP server).
+    #[serde(default = "default_registry_url")]
     pub registry_url: String,
+    /// List of registry URLs. The first one is the active/primary URL.
+    #[serde(default = "default_registry_urls")]
+    pub registry_urls: Vec<String>,
     pub ssh_host: String,
     pub ssh_port: u16,
     pub ssh_user: String,
@@ -33,10 +38,19 @@ pub struct AppConfig {
     pub mcp_registered: bool,
 }
 
+fn default_registry_url() -> String {
+    "http://localhost:8090".into()
+}
+
+fn default_registry_urls() -> Vec<String> {
+    vec!["http://localhost:8090".into()]
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            registry_url: "http://localhost:8090".into(),
+            registry_url: default_registry_url(),
+            registry_urls: default_registry_urls(),
             ssh_host: String::new(),
             ssh_port: 22,
             ssh_user: String::new(),

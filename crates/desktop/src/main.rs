@@ -56,11 +56,8 @@ fn main() {
         } else {
             println!("MCP server: not registered");
         }
-        if claude_config::is_claude_desktop_installed() {
-            println!("Claude Desktop: detected");
-        } else {
-            println!("Claude Desktop: not detected");
-        }
+        let config = config::AppConfig::load();
+        println!("Registry URLs: {:?}", config.registry_urls);
     } else {
         #[cfg(feature = "gui")]
         {
@@ -100,7 +97,13 @@ fn run_gui() {
         options,
         Box::new(move |cc| {
             // Create tray icon on main thread (required for macOS)
-            let tray = tray::AppTray::new().ok();
+            let tray = match tray::AppTray::new() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    eprintln!("Warning: Failed to create tray icon: {}", e);
+                    None
+                }
+            };
             let app = app::AutoPipeApp::new(cc);
             Ok(Box::new(TrayAwareApp { inner: app, tray }))
         }),
@@ -117,20 +120,18 @@ struct TrayAwareApp {
 #[cfg(feature = "gui")]
 impl eframe::App for TrayAwareApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
-        // Poll tray icon click events (restore on left-click or double-click)
-        if self.inner.is_minimized_to_tray() {
-            if let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
-                match event {
-                    tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. }
-                    | tray_icon::TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } => {
-                        self.inner.restore_from_tray(ctx);
-                    }
-                    _ => {}
+        // Always poll tray icon click events (Windows/macOS only)
+        if let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+            match event {
+                tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. }
+                | tray_icon::TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } => {
+                    self.inner.restore_from_tray(ctx);
                 }
+                _ => {}
             }
         }
 
-        // Poll tray menu events via global channel
+        // Always poll tray menu events (Settings/Quit)
         if let Some(ref tray) = self.tray {
             if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
                 if event.id() == tray.show_id() {
@@ -146,7 +147,7 @@ impl eframe::App for TrayAwareApp {
 
         // Keep polling even when minimized to tray
         if self.inner.is_minimized_to_tray() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }

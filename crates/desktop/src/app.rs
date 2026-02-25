@@ -149,16 +149,6 @@ impl AutoPipeApp {
             "https://claude.ai/download",
             "https://claude.ai/download",
         );
-        ui.add_space(5.0);
-        let installed = claude_config::is_claude_desktop_installed();
-        ui.horizontal(|ui| {
-            ui.label("Claude Desktop:");
-            if installed {
-                ui.colored_label(egui::Color32::GREEN, "Detected");
-            } else {
-                ui.colored_label(egui::Color32::YELLOW, "Not detected (install and launch it first)");
-            }
-        });
 
         ui.add_space(15.0);
         ui.separator();
@@ -197,24 +187,52 @@ impl AutoPipeApp {
     }
 
     fn draw_connection_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Registry Connection");
+        ui.heading("Registry Connections");
         ui.add_space(10.0);
 
-        ui.horizontal(|ui| {
-            ui.label("Registry URL:");
-            ui.text_edit_singleline(&mut self.config.registry_url);
-        });
+        ui.label("The first URL is used as the active registry for MCP tools.");
+        ui.label("Example: http://192.168.100.30:8090");
+        ui.add_space(10.0);
+
+        let mut remove_idx: Option<usize> = None;
+        let mut test_idx: Option<usize> = None;
+
+        for i in 0..self.config.registry_urls.len() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{}.", i + 1));
+                ui.add(egui::TextEdit::singleline(&mut self.config.registry_urls[i])
+                    .desired_width(350.0));
+                if ui.button("Test").clicked() {
+                    test_idx = Some(i);
+                }
+                if self.config.registry_urls.len() > 1 {
+                    if ui.button("Remove").clicked() {
+                        remove_idx = Some(i);
+                    }
+                }
+            });
+        }
+
+        if let Some(idx) = remove_idx {
+            self.config.registry_urls.remove(idx);
+        }
+
+        if let Some(idx) = test_idx {
+            let url = self.config.registry_urls[idx].clone();
+            self.status_message = match reqwest_test(&url) {
+                Ok(_) => format!("Connection {} OK", idx + 1),
+                Err(e) => format!("Connection {} failed: {}", idx + 1, e),
+            };
+        }
 
         ui.add_space(5.0);
-        ui.label("This is the address of the web server that stores workflows.");
-        ui.label("Example: http://192.168.100.30:8090");
+        if ui.button("+ Add Registry URL").clicked() {
+            self.config.registry_urls.push(String::new());
+        }
 
-        ui.add_space(10.0);
-        if ui.button("Test Connection").clicked() {
-            self.status_message = match reqwest_test(&self.config.registry_url) {
-                Ok(_) => "Registry connection OK".into(),
-                Err(e) => format!("Connection failed: {}", e),
-            };
+        // Sync primary URL with first entry
+        if let Some(first) = self.config.registry_urls.first() {
+            self.config.registry_url = first.clone();
         }
     }
 
@@ -283,17 +301,6 @@ impl AutoPipeApp {
         ui.heading("Status");
         ui.add_space(10.0);
 
-        // Claude Desktop detection
-        let installed = claude_config::is_claude_desktop_installed();
-        ui.horizontal(|ui| {
-            ui.label("Claude Desktop:");
-            if installed {
-                ui.colored_label(egui::Color32::GREEN, "Installed");
-            } else {
-                ui.colored_label(egui::Color32::RED, "Not detected");
-            }
-        });
-
         // MCP registration
         let registered = claude_config::is_registered();
         ui.horizontal(|ui| {
@@ -311,11 +318,14 @@ impl AutoPipeApp {
             ui.label(claude_config::claude_desktop_config_path().to_string_lossy().to_string());
         });
 
-        // Registry URL
-        ui.horizontal(|ui| {
-            ui.label("Registry URL:");
-            ui.label(&self.config.registry_url);
-        });
+        // Registry URLs
+        ui.label("Registry URLs:");
+        for (i, url) in self.config.registry_urls.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("  {}.", i + 1));
+                ui.label(url);
+            });
+        }
 
         ui.add_space(10.0);
         if registered {
