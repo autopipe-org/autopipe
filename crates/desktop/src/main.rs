@@ -96,6 +96,15 @@ fn run_gui() {
         "AutoPipe",
         options,
         Box::new(move |cc| {
+            // Background thread: keep requesting repaints so the event loop
+            // stays alive even when the window is hidden (Visible(false)).
+            // Without this, tray menu events are never polled on Windows.
+            let ctx_bg = cc.egui_ctx.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                ctx_bg.request_repaint();
+            });
+
             // Create tray icon on main thread (required for macOS)
             let tray = match tray::AppTray::new() {
                 Ok(t) => Some(t),

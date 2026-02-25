@@ -113,9 +113,9 @@ impl eframe::App for AutoPipeApp {
             });
         });
 
-        // Minimize to tray: use Minimized (not Visible(false) which stops the event loop)
+        // Minimize to tray: hide window from taskbar
         if self.should_minimize {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             self.should_minimize = false;
             self.minimized_to_tray = true;
         }
