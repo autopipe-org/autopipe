@@ -841,30 +841,30 @@ impl AutoPipeServer {
         let base64_result = if needs_resize {
             // Resize using Python PIL (available on most bioinformatics servers)
             let resize_cmd = format!(
-                "python3 -c \"\
-import sys, base64, io\n\
-try:\n\
-    from PIL import Image\n\
-    img = Image.open('{path}')\n\
-    img.thumbnail((1200, 1200), Image.LANCZOS)\n\
-    buf = io.BytesIO()\n\
-    fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'\n\
-    img.save(buf, format=fmt, quality=85)\n\
-    buf.seek(0)\n\
-    sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
-except ImportError:\n\
-    from matplotlib.image import imread\n\
-    import matplotlib.pyplot as plt\n\
-    img = imread('{path}')\n\
-    fig, ax = plt.subplots()\n\
-    ax.imshow(img)\n\
-    ax.axis('off')\n\
-    buf = io.BytesIO()\n\
-    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')\n\
-    plt.close(fig)\n\
-    buf.seek(0)\n\
-    sys.stdout.write(base64.b64encode(buf.read()).decode())\n\
-\"",
+                r#"python3 << 'PYEOF'
+import sys, base64, io
+try:
+    from PIL import Image
+    img = Image.open('{path}')
+    img.thumbnail((1200, 1200), Image.LANCZOS)
+    buf = io.BytesIO()
+    fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'
+    img.save(buf, format=fmt, quality=85)
+    buf.seek(0)
+    sys.stdout.write(base64.b64encode(buf.read()).decode())
+except ImportError:
+    from matplotlib.image import imread
+    import matplotlib.pyplot as plt
+    img = imread('{path}')
+    fig, ax = plt.subplots()
+    ax.imshow(img)
+    ax.axis('off')
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    sys.stdout.write(base64.b64encode(buf.read()).decode())
+PYEOF"#,
                 path = params.path,
                 ext = ext,
             );
