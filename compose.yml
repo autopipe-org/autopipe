@@ -1,14 +1,15 @@
 services:
   registry:
     build:
-      context: .
-      dockerfile: Dockerfile.registry
+      context: ./web
+      dockerfile: Dockerfile
     ports:
       - "8090:8090"
     environment:
-      REGISTRY_ADDR: "0.0.0.0:8090"
+      PORT: "8090"
       POSTGRES_HOST: "10.125.208.41"
       POSTGRES_PORT: "5433"
       POSTGRES_DB: autopipe_wf
       POSTGRES_USER: autopipe
       POSTGRES_PASSWORD: autopipe123
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID}"

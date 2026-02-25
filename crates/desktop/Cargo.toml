@@ -19,6 +19,7 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 ssh2 = "0.9"
+open = "5"
 
 # GUI dependencies (optional, requires GTK on Linux)
 eframe = { version = "0.31", optional = true }

@@ -115,6 +115,24 @@ struct ViewImageParams {
     path: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UploadWorkflowParams {
+    /// Remote path to the pipeline directory on the SSH server
+    pipeline_dir: String,
+    /// Git commit message (optional, auto-generated if omitted)
+    commit_message: Option<String>,
+    /// Semantic version string (e.g., "1.0.0"). Claude should determine this based on changes.
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PublishWorkflowParams {
+    /// Remote path to the pipeline directory on the SSH server
+    pipeline_dir: String,
+    /// GitHub URL of the uploaded workflow (from upload_workflow result)
+    github_url: String,
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -479,6 +497,409 @@ impl AutoPipeServer {
                 "Upload failed: {}",
                 e
             ))])),
+        }
+    }
+
+    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Requires GitHub login (configured in the GitHub tab). Returns the GitHub commit URL.")]
+    async fn upload_workflow(
+        &self,
+        Parameters(params): Parameters<UploadWorkflowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let token = match &self.config.github_token {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                )]));
+            }
+        };
+
+        let dir = &params.pipeline_dir;
+
+        // Read pipeline files from SSH
+        let meta_raw = match self.ssh_read_file(&format!("{}/metadata.json", dir)).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot read metadata.json: {}", e
+                ))]));
+            }
+        };
+        let cleaned_meta = clean_content(&meta_raw);
+        let metadata: PipelineMetadata = match serde_json::from_str(&cleaned_meta) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid metadata.json: {}", e
+                ))]));
+            }
+        };
+
+        let snakefile = normalize_paths(&clean_content(
+            &self.ssh_read_file(&format!("{}/Snakefile", dir)).await.unwrap_or_default(),
+        ));
+        let dockerfile = clean_content(
+            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
+        );
+        let config_yaml = normalize_paths(&clean_content(
+            &self.ssh_read_file(&format!("{}/config.yaml", dir)).await.unwrap_or_default(),
+        ));
+        let readme = clean_content(
+            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
+        );
+
+        // Update version in metadata if provided
+        let mut meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
+        if let Some(ref ver) = params.version {
+            meta_json["version"] = serde_json::Value::String(ver.clone());
+        }
+        let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
+
+        let pipeline_name = &metadata.name;
+        let repo_name = &self.config.github_repo;
+
+        let client = reqwest::Client::new();
+
+        // 1. Get GitHub username
+        let user_resp = client
+            .get("https://api.github.com/user")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let user: serde_json::Value = user_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let owner = user["login"].as_str().unwrap_or_default().to_string();
+
+        // 2. Ensure repo exists
+        let repo_check = client
+            .get(format!("https://api.github.com/repos/{}/{}", owner, repo_name))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if repo_check.status() == reqwest::StatusCode::NOT_FOUND {
+            // Create repo
+            let create_resp = client
+                .post("https://api.github.com/user/repos")
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .json(&serde_json::json!({
+                    "name": repo_name,
+                    "description": "AutoPipe bioinformatics pipelines",
+                    "auto_init": true
+                }))
+                .send()
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+            if !create_resp.status().is_success() {
+                let err_text = create_resp.text().await.unwrap_or_default();
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to create GitHub repo: {}", err_text
+                ))]));
+            }
+            // Wait briefly for repo initialization
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // 3. Get latest commit SHA on main branch
+        let ref_resp = client
+            .get(format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/main",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let ref_body: serde_json::Value = ref_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let latest_sha = ref_body["object"]["sha"].as_str().unwrap_or_default().to_string();
+
+        if latest_sha.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Could not get latest commit SHA from the repository.",
+            )]));
+        }
+
+        // 4. Get base tree SHA
+        let commit_resp = client
+            .get(format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                owner, repo_name, latest_sha
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let commit_body: serde_json::Value = commit_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let base_tree = commit_body["tree"]["sha"].as_str().unwrap_or_default().to_string();
+
+        // 5. Create tree with pipeline files
+        let files_to_commit: Vec<(&str, &str)> = vec![
+            ("Snakefile", &snakefile),
+            ("Dockerfile", &dockerfile),
+            ("config.yaml", &config_yaml),
+            ("metadata.json", &metadata_json_str),
+            ("README.md", &readme),
+        ];
+
+        let tree_items: Vec<serde_json::Value> = files_to_commit
+            .iter()
+            .filter(|(_, content)| !content.is_empty())
+            .map(|(name, content)| {
+                serde_json::json!({
+                    "path": format!("{}/{}", pipeline_name, name),
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": content
+                })
+            })
+            .collect();
+
+        let tree_resp = client
+            .post(format!(
+                "https://api.github.com/repos/{}/{}/git/trees",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({
+                "base_tree": base_tree,
+                "tree": tree_items
+            }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let tree_body: serde_json::Value = tree_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let new_tree_sha = tree_body["sha"].as_str().unwrap_or_default().to_string();
+
+        // 6. Create commit
+        let commit_msg = params.commit_message.unwrap_or_else(|| {
+            if let Some(ref ver) = params.version {
+                format!("Upload {} v{}", pipeline_name, ver)
+            } else {
+                format!("Upload {}", pipeline_name)
+            }
+        });
+
+        let new_commit_resp = client
+            .post(format!(
+                "https://api.github.com/repos/{}/{}/git/commits",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({
+                "message": commit_msg,
+                "tree": new_tree_sha,
+                "parents": [latest_sha]
+            }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let new_commit_body: serde_json::Value = new_commit_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let new_commit_sha = new_commit_body["sha"].as_str().unwrap_or_default().to_string();
+
+        // 7. Update ref to point to new commit
+        let update_ref = client
+            .patch(format!(
+                "https://api.github.com/repos/{}/{}/git/refs/heads/main",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({ "sha": new_commit_sha }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if !update_ref.status().is_success() {
+            let err = update_ref.text().await.unwrap_or_default();
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to update branch ref: {}", err
+            ))]));
+        }
+
+        // 8. Create version tag if version is provided
+        if let Some(ref ver) = params.version {
+            let tag_name = format!("{}/v{}", pipeline_name, ver);
+            let _ = client
+                .post(format!(
+                    "https://api.github.com/repos/{}/{}/git/refs",
+                    owner, repo_name
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .json(&serde_json::json!({
+                    "ref": format!("refs/tags/{}", tag_name),
+                    "sha": new_commit_sha
+                }))
+                .send()
+                .await;
+        }
+
+        let github_url = format!(
+            "https://github.com/{}/{}/tree/main/{}",
+            owner, repo_name, pipeline_name
+        );
+        let commit_url = format!(
+            "https://github.com/{}/{}/commit/{}",
+            owner, repo_name, new_commit_sha
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Successfully uploaded '{}' to GitHub!\n\
+             Pipeline URL: {}\n\
+             Commit: {}\n\
+             {}",
+            pipeline_name,
+            github_url,
+            commit_url,
+            if let Some(ref ver) = params.version {
+                format!("Version tag: {}/v{}", pipeline_name, ver)
+            } else {
+                String::new()
+            }
+        ))]))
+    }
+
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website.")]
+    async fn publish_workflow(
+        &self,
+        Parameters(params): Parameters<PublishWorkflowParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let token = match &self.config.github_token {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                )]));
+            }
+        };
+
+        let dir = &params.pipeline_dir;
+
+        // Read pipeline files from SSH
+        let meta_raw = match self.ssh_read_file(&format!("{}/metadata.json", dir)).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot read metadata.json: {}", e
+                ))]));
+            }
+        };
+        let cleaned_meta = clean_content(&meta_raw);
+        let metadata: PipelineMetadata = match serde_json::from_str(&cleaned_meta) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid metadata.json: {}", e
+                ))]));
+            }
+        };
+
+        let snakefile = normalize_paths(&clean_content(
+            &self.ssh_read_file(&format!("{}/Snakefile", dir)).await.unwrap_or_default(),
+        ));
+        let dockerfile = clean_content(
+            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
+        );
+        let config_yaml = normalize_paths(&clean_content(
+            &self.ssh_read_file(&format!("{}/config.yaml", dir)).await.unwrap_or_default(),
+        ));
+        let readme = clean_content(
+            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
+        );
+
+        let pipeline = Pipeline {
+            pipeline_id: None,
+            name: metadata.name.clone(),
+            description: metadata.description,
+            tools: metadata.tools,
+            input_formats: metadata.input_formats,
+            output_formats: metadata.output_formats,
+            tags: metadata.tags,
+            snakefile,
+            dockerfile,
+            config_yaml,
+            metadata_json: serde_json::from_str(&cleaned_meta).unwrap_or_default(),
+            readme,
+            author: metadata.author,
+            version: metadata.version,
+            verified: metadata.verified,
+            created_at: None,
+            updated_at: None,
+        };
+
+        // Call registry publish endpoint
+        let base = self.config.registry_url.trim_end_matches('/');
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/publish", base))
+            .json(&serde_json::json!({
+                "pipeline": pipeline,
+                "github_url": params.github_url,
+                "github_token": token,
+            }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if status.is_success() {
+            let pipeline_id = body["pipeline_id"].as_i64().unwrap_or(0);
+            let web_url = format!("{}/pipelines/{}", base, pipeline_id);
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Successfully published '{}' to the registry!\n\
+                 Web page: {}\n\
+                 Pipeline ID: {}",
+                metadata.name, web_url, pipeline_id
+            ))]))
+        } else if status.as_u16() == 422 {
+            // Security validation failed
+            let issues = body["issues"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|i| {
+                            format!(
+                                "- [{}] {} (line {}, {})",
+                                i["severity"].as_str().unwrap_or("?"),
+                                i["message"].as_str().unwrap_or(""),
+                                i["line"].as_u64().unwrap_or(0),
+                                i["file"].as_str().unwrap_or("")
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_else(|| body["error"].as_str().unwrap_or("Unknown error").to_string());
+
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Security validation failed. Please fix the following issues:\n{}",
+                issues
+            ))]))
+        } else {
+            let error_msg = body["error"].as_str().unwrap_or("Unknown error");
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Publish failed: {}", error_msg
+            ))]))
         }
     }
 

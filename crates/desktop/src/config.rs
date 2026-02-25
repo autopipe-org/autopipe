@@ -36,6 +36,12 @@ pub struct AppConfig {
     pub pipelines_dir: String,
     pub output_dir: String,
     pub mcp_registered: bool,
+    /// GitHub personal access token (obtained via device flow).
+    #[serde(default)]
+    pub github_token: Option<String>,
+    /// GitHub repository name for pipeline uploads (default: "autopipe-pipelines").
+    #[serde(default = "default_github_repo")]
+    pub github_repo: String,
 }
 
 fn default_registry_url() -> String {
@@ -44,6 +50,10 @@ fn default_registry_url() -> String {
 
 fn default_registry_urls() -> Vec<String> {
     vec!["http://localhost:8090".into()]
+}
+
+fn default_github_repo() -> String {
+    "autopipe-pipelines".into()
 }
 
 impl Default for AppConfig {
@@ -59,6 +69,8 @@ impl Default for AppConfig {
             pipelines_dir: "pipelines".into(),
             output_dir: "pipelines_output".into(),
             mcp_registered: false,
+            github_token: None,
+            github_repo: default_github_repo(),
         }
     }
 }

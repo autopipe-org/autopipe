@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::sync::mpsc;
 
 use crate::claude_config;
 use crate::config::{AppConfig, SshAuth};
@@ -8,7 +9,23 @@ enum Tab {
     Setup,
     Connection,
     Ssh,
+    GitHub,
     Status,
+}
+
+/// Messages from the device-flow background thread.
+enum GitHubMsg {
+    /// Device code received — show user_code to user.
+    DeviceCode {
+        device_code: String,
+        user_code: String,
+        verification_uri: String,
+        interval: u64,
+    },
+    /// Polling succeeded — token obtained.
+    Token(String),
+    /// An error occurred.
+    Error(String),
 }
 
 pub struct AutoPipeApp {
@@ -20,6 +37,12 @@ pub struct AutoPipeApp {
     status_message: String,
     should_minimize: bool,
     minimized_to_tray: bool,
+    // GitHub device flow state
+    github_rx: Option<mpsc::Receiver<GitHubMsg>>,
+    github_user_code: Option<String>,
+    github_verification_uri: Option<String>,
+    github_polling: bool,
+    github_username: Option<String>,
 }
 
 impl AutoPipeApp {
@@ -31,6 +54,9 @@ impl AutoPipeApp {
             SshAuth::Password { password } => (2, String::new(), password.clone()),
         };
 
+        // If token exists, try to resolve GitHub username
+        let github_username = None; // Will be resolved on GitHub tab open
+
         Self {
             config,
             active_tab: Tab::Setup,
@@ -40,6 +66,11 @@ impl AutoPipeApp {
             status_message: String::new(),
             should_minimize: false,
             minimized_to_tray: false,
+            github_rx: None,
+            github_user_code: None,
+            github_verification_uri: None,
+            github_polling: false,
+            github_username,
         }
     }
 
@@ -72,14 +103,63 @@ impl eframe::App for AutoPipeApp {
                 ui.selectable_value(&mut self.active_tab, Tab::Setup, "Setup");
                 ui.selectable_value(&mut self.active_tab, Tab::Connection, "Connection");
                 ui.selectable_value(&mut self.active_tab, Tab::Ssh, "SSH");
+                ui.selectable_value(&mut self.active_tab, Tab::GitHub, "GitHub");
                 ui.selectable_value(&mut self.active_tab, Tab::Status, "Status");
             });
         });
+
+        // Process GitHub device flow messages
+        if let Some(rx) = &self.github_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    GitHubMsg::DeviceCode {
+                        device_code: _,
+                        user_code,
+                        verification_uri,
+                        interval: _,
+                    } => {
+                        self.github_user_code = Some(user_code);
+                        self.github_verification_uri = Some(verification_uri);
+                    }
+                    GitHubMsg::Token(token) => {
+                        self.config.github_token = Some(token);
+                        self.github_polling = false;
+                        self.github_user_code = None;
+                        self.github_verification_uri = None;
+                        self.github_rx = None;
+                        let _ = self.config.save();
+                        self.status_message = "GitHub login successful!".into();
+                        // Fetch username
+                        let token = self.config.github_token.clone().unwrap();
+                        let (tx, rx) = mpsc::channel();
+                        std::thread::spawn(move || {
+                            let rt = tokio::runtime::Runtime::new().unwrap();
+                            rt.block_on(async {
+                                match fetch_github_username(&token).await {
+                                    Ok(name) => { let _ = tx.send(Some(name)); }
+                                    Err(_) => { let _ = tx.send(None); }
+                                }
+                            });
+                        });
+                        if let Ok(name) = rx.recv() {
+                            self.github_username = name;
+                        }
+                    }
+                    GitHubMsg::Error(e) => {
+                        self.github_polling = false;
+                        self.github_user_code = None;
+                        self.github_rx = None;
+                        self.status_message = format!("GitHub login failed: {}", e);
+                    }
+                }
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| match self.active_tab {
             Tab::Setup => self.draw_setup_tab(ui),
             Tab::Connection => self.draw_connection_tab(ui),
             Tab::Ssh => self.draw_ssh_tab(ui),
+            Tab::GitHub => self.draw_github_tab(ui),
             Tab::Status => self.draw_status_tab(ui),
         });
 
@@ -353,6 +433,232 @@ impl AutoPipeApp {
                 Err(e) => {
                     self.status_message = format!("Register failed: {}", e);
                 }
+            }
+        }
+    }
+}
+
+    fn draw_github_tab(&mut self, ui: &mut egui::Ui) {
+        ui.heading("GitHub Integration");
+        ui.add_space(10.0);
+
+        if let Some(ref token) = self.config.github_token {
+            // Logged in
+            let username = self.github_username.as_deref().unwrap_or("(unknown)");
+            ui.horizontal(|ui| {
+                ui.label("Logged in as:");
+                ui.strong(username);
+            });
+
+            ui.add_space(5.0);
+            if ui.button("Logout").clicked() {
+                self.config.github_token = None;
+                self.github_username = None;
+                let _ = self.config.save();
+                self.status_message = "GitHub logged out.".into();
+            }
+
+            ui.add_space(15.0);
+            ui.separator();
+            ui.add_space(10.0);
+
+            ui.label("Pipeline Repository:");
+            ui.horizontal(|ui| {
+                ui.label(format!("{}/", username));
+                ui.text_edit_singleline(&mut self.config.github_repo);
+            });
+            ui.label("Workflows will be committed to this repository.");
+
+            // Resolve username if not loaded yet
+            if self.github_username.is_none() {
+                let token = token.clone();
+                let (tx, rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        match fetch_github_username(&token).await {
+                            Ok(name) => { let _ = tx.send(Some(name)); }
+                            Err(_) => { let _ = tx.send(None); }
+                        }
+                    });
+                });
+                if let Ok(name) = rx.recv() {
+                    self.github_username = name;
+                }
+            }
+        } else if self.github_polling {
+            // Waiting for user to authorize
+            ui.label("Complete the authorization in your browser:");
+            ui.add_space(10.0);
+
+            if let Some(ref code) = self.github_user_code {
+                ui.horizontal(|ui| {
+                    ui.label("Your code:");
+                    ui.heading(code);
+                });
+            }
+
+            ui.add_space(5.0);
+            if let Some(ref uri) = self.github_verification_uri {
+                if ui.button("Open Browser").clicked() {
+                    let _ = open::that(uri);
+                }
+                ui.label(format!("Or visit: {}", uri));
+            }
+
+            ui.add_space(10.0);
+            ui.spinner();
+            ui.label("Waiting for authorization...");
+
+            if ui.button("Cancel").clicked() {
+                self.github_polling = false;
+                self.github_user_code = None;
+                self.github_verification_uri = None;
+                self.github_rx = None;
+            }
+        } else {
+            // Not logged in
+            ui.label("Connect your GitHub account to upload and publish workflows.");
+            ui.add_space(10.0);
+
+            if ui.button("Login with GitHub").clicked() {
+                let registry_url = self.config.registry_url.clone();
+                let (tx, rx) = mpsc::channel();
+                self.github_rx = Some(rx);
+                self.github_polling = true;
+
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    rt.block_on(async {
+                        run_device_flow(&registry_url, tx).await;
+                    });
+                });
+            }
+
+            ui.add_space(15.0);
+            ui.separator();
+            ui.add_space(10.0);
+
+            ui.label("Pipeline Repository:");
+            ui.horizontal(|ui| {
+                ui.label("<username>/");
+                ui.text_edit_singleline(&mut self.config.github_repo);
+            });
+        }
+    }
+}
+
+async fn fetch_github_username(token: &str) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "autopipe-desktop")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    body["login"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No login field".to_string())
+}
+
+async fn run_device_flow(registry_url: &str, tx: mpsc::Sender<GitHubMsg>) {
+    let client = reqwest::Client::new();
+    let base = registry_url.trim_end_matches('/');
+
+    // Step 1: Request device code from our registry server
+    let resp = match client
+        .post(format!("{}/api/auth/device", base))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(GitHubMsg::Error(e.to_string()));
+            return;
+        }
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tx.send(GitHubMsg::Error(e.to_string()));
+            return;
+        }
+    };
+
+    let device_code = body["device_code"].as_str().unwrap_or_default().to_string();
+    let user_code = body["user_code"].as_str().unwrap_or_default().to_string();
+    let verification_uri = body["verification_uri"]
+        .as_str()
+        .unwrap_or("https://github.com/login/device")
+        .to_string();
+    let interval = body["interval"].as_u64().unwrap_or(5);
+
+    if device_code.is_empty() {
+        let _ = tx.send(GitHubMsg::Error(
+            body["error"]
+                .as_str()
+                .unwrap_or("Failed to get device code")
+                .to_string(),
+        ));
+        return;
+    }
+
+    let _ = tx.send(GitHubMsg::DeviceCode {
+        device_code: device_code.clone(),
+        user_code,
+        verification_uri,
+        interval,
+    });
+
+    // Step 2: Poll for token
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
+        let poll_resp = match client
+            .post(format!("{}/api/auth/device/poll", base))
+            .json(&serde_json::json!({ "device_code": device_code }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(GitHubMsg::Error(e.to_string()));
+                return;
+            }
+        };
+
+        let poll_body: serde_json::Value = match poll_resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = tx.send(GitHubMsg::Error(e.to_string()));
+                return;
+            }
+        };
+
+        if let Some(token) = poll_body["access_token"].as_str() {
+            let _ = tx.send(GitHubMsg::Token(token.to_string()));
+            return;
+        }
+
+        let error = poll_body["error"].as_str().unwrap_or("");
+        match error {
+            "authorization_pending" | "slow_down" => continue,
+            "expired_token" => {
+                let _ = tx.send(GitHubMsg::Error("Device code expired. Please try again.".into()));
+                return;
+            }
+            _ => {
+                let _ = tx.send(GitHubMsg::Error(format!("Poll error: {}", error)));
+                return;
             }
         }
     }
