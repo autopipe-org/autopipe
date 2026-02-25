@@ -27,6 +27,7 @@ impl AppTray {
 
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false) // left-click restores window, right-click shows menu
             .with_tooltip("AutoPipe - Running")
             .with_icon(icon)
             .build()?;
