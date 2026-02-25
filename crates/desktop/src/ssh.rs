@@ -1,14 +1,27 @@
 use crate::config::{AppConfig, SshAuth};
 use ssh2::Session;
 use std::io::Read;
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::time::Duration;
 
 // ── SSH session for remote commands ─────────────────────────────────
 
 fn create_session(config: &AppConfig) -> Result<Session, String> {
     let addr = format!("{}:{}", config.ssh_host, config.ssh_port);
-    let tcp = TcpStream::connect(&addr).map_err(|e| format!("TCP connect failed: {}", e))?;
+    let sock_addr = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolve failed: {}", e))?
+        .next()
+        .ok_or_else(|| "No address resolved".to_string())?;
+
+    let tcp = TcpStream::connect_timeout(&sock_addr, Duration::from_secs(10))
+        .map_err(|e| format!("TCP connect failed: {}", e))?;
+
+    tcp.set_read_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("Set read timeout failed: {}", e))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(30)))
+        .map_err(|e| format!("Set write timeout failed: {}", e))?;
 
     let mut sess = Session::new().map_err(|e| format!("SSH session error: {}", e))?;
     sess.set_tcp_stream(tcp);
