@@ -49,8 +49,9 @@ pub async fn get_pipeline(
 
 pub async fn create_pipeline(
     State(state): State<Arc<DbState>>,
-    Json(pipeline): Json<Pipeline>,
+    Json(mut pipeline): Json<Pipeline>,
 ) -> impl IntoResponse {
+    pipeline.clean_file_contents();
     match crate::db::insert_pipeline(&state.client, &pipeline).await {
         Ok(id) => (
             StatusCode::CREATED,
@@ -72,8 +73,9 @@ pub async fn create_pipeline(
 pub async fn update_pipeline(
     State(state): State<Arc<DbState>>,
     Path(id): Path<i32>,
-    Json(pipeline): Json<Pipeline>,
+    Json(mut pipeline): Json<Pipeline>,
 ) -> impl IntoResponse {
+    pipeline.clean_file_contents();
     match crate::db::update_pipeline(&state.client, id, &pipeline).await {
         Ok(true) => Json(serde_json::json!({"updated": true})).into_response(),
         Ok(false) => (

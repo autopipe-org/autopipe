@@ -38,7 +38,7 @@ async fn main() {
     let state = Arc::new(db::DbState { client });
     let app = routes::create_router(state);
 
-    let addr = std::env::var("REGISTRY_ADDR").unwrap_or_else(|_| "0.0.0.0:8090".into());
+    let addr = std::env::var("REGISTRY_ADDR").unwrap_or_else(|_| "10.125.208.38:8090".into());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("Failed to bind");

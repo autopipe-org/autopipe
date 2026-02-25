@@ -1,5 +1,5 @@
 use common::api_client::RegistryClient;
-use common::models::{Pipeline, PipelineMetadata};
+use common::models::{clean_content, Pipeline, PipelineMetadata};
 use common::templates;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -119,27 +119,6 @@ pub struct AutoPipeServer {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
-
-/// Strip any prepended JSON fragment like `{"success": true}` from file content.
-/// Works for all file types: JSON files get `}{` split, others get prefix removed.
-fn clean_content(raw: &str) -> String {
-    let s = raw.trim();
-    // For JSON-like content with concatenated objects: {"success": true}{"name": ...}
-    if let Some(pos) = s.find("}{") {
-        return s[pos + 1..].to_string();
-    }
-    // For non-JSON files where {"success": true} is prepended as a line
-    let prefix = r#"{"success": true}"#;
-    if s.starts_with(prefix) {
-        return s[prefix.len()..].trim_start().to_string();
-    }
-    // Also handle without spaces: {"success":true}
-    let prefix_no_space = r#"{"success":true}"#;
-    if s.starts_with(prefix_no_space) {
-        return s[prefix_no_space.len()..].trim_start().to_string();
-    }
-    s.to_string()
-}
 
 /// Normalize paths in config.yaml and Snakefile: replace absolute host paths
 /// with Docker mount points (/input, /output).

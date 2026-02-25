@@ -84,6 +84,10 @@ fn main() {
 
 #[cfg(feature = "gui")]
 fn run_gui() {
+    // Linux: tray-icon uses GTK for menus, must init before use
+    #[cfg(target_os = "linux")]
+    gtk::init().expect("Failed to initialize GTK");
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([550.0, 500.0])
@@ -113,6 +117,19 @@ struct TrayAwareApp {
 #[cfg(feature = "gui")]
 impl eframe::App for TrayAwareApp {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+        // Poll tray icon click events (restore on left-click or double-click)
+        if self.inner.is_minimized_to_tray() {
+            if let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+                match event {
+                    tray_icon::TrayIconEvent::Click { button: tray_icon::MouseButton::Left, .. }
+                    | tray_icon::TrayIconEvent::DoubleClick { button: tray_icon::MouseButton::Left, .. } => {
+                        self.inner.restore_from_tray(ctx);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Poll tray menu events via global channel
         if let Some(ref tray) = self.tray {
             if let Ok(event) = tray_icon::menu::MenuEvent::receiver().try_recv() {

@@ -71,19 +71,55 @@ pub async fn index_page(
 <style>{CSS}</style>
 </head>
 <body>
+<div id="splash" class="splash">
+  <div class="splash-inner">
+    <div class="splash-icon">
+      <span class="dot"></span><span class="line"></span><span class="dot"></span><span class="line"></span><span class="dot"></span>
+    </div>
+    <div class="splash-title">AutoPipe</div>
+    <div class="splash-sub">Bioinformatics Snakemake Pipeline Registry</div>
+    <div class="splash-bar"><div class="splash-bar-fill"></div></div>
+    <div class="splash-loading">Loading pipelines...</div>
+  </div>
+</div>
+<div id="app" class="app-hidden">
 <header>
   <a href="/" class="logo">AutoPipe</a>
 </header>
 <main>
-  <form class="search" method="get" action="/">
-    <input type="text" name="q" placeholder="Search by name, tool, or tag..." value="{search_value}">
-    <button type="submit">Search</button>
-  </form>
+  <div class="search">
+    <input type="text" id="search-input" placeholder="Search by name, tool, or tag..." value="{search_value}" autocomplete="off">
+  </div>
   <div class="count">{count} pipelines</div>
   <div class="grid">
     {cards}
   </div>
 </main>
+</div>
+<script>
+setTimeout(function() {{
+  var splash = document.getElementById('splash');
+  var app = document.getElementById('app');
+  splash.classList.add('splash-fade');
+  setTimeout(function() {{
+    splash.style.display = 'none';
+    app.classList.remove('app-hidden');
+  }}, 500);
+}}, 1200);
+
+document.getElementById('search-input').addEventListener('input', function() {{
+  var q = this.value.toLowerCase();
+  var cards = document.querySelectorAll('.card');
+  var count = 0;
+  cards.forEach(function(card) {{
+    var text = card.textContent.toLowerCase();
+    var match = !q || text.indexOf(q) !== -1;
+    card.style.display = match ? '' : 'none';
+    if (match) count++;
+  }});
+  document.querySelector('.count').textContent = count + ' pipelines';
+}});
+</script>
 </body>
 </html>"#,
         CSS = CSS,
@@ -376,6 +412,21 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 .tab-panel pre { padding: 24px; overflow-x: auto; font-size: 13px; line-height: 1.6; background: #fff; margin: 0; }
+
+/* Splash screen */
+.splash { position: fixed; inset: 0; background: #fff; z-index: 1000; display: flex; align-items: center; justify-content: center; transition: opacity 0.5s; }
+.splash-fade { opacity: 0; }
+.splash-inner { text-align: center; }
+.splash-icon { display: flex; align-items: center; justify-content: center; gap: 0; margin-bottom: 24px; }
+.splash-icon .dot { width: 10px; height: 10px; background: #111; border-radius: 50%; }
+.splash-icon .line { width: 32px; height: 2px; background: #ccc; }
+.splash-title { font-family: 'Georgia', 'Times New Roman', serif; font-size: 2.5rem; font-weight: 700; color: #111; letter-spacing: -0.02em; margin-bottom: 8px; }
+.splash-sub { font-size: 14px; color: #999; margin-bottom: 40px; }
+.splash-bar { width: 200px; height: 3px; background: #eee; border-radius: 2px; margin: 0 auto 20px; overflow: hidden; }
+.splash-bar-fill { width: 0; height: 100%; background: #111; border-radius: 2px; animation: splash-progress 1.2s ease-out forwards; }
+@keyframes splash-progress { 0% { width: 0; } 100% { width: 100%; } }
+.splash-loading { font-size: 13px; color: #bbb; }
+.app-hidden { display: none; }
 
 /* General */
 a { color: #111; }
