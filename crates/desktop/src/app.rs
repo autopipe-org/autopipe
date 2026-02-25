@@ -126,6 +126,7 @@ impl AutoPipeApp {
     /// Called from main loop to check if tray "Settings" was clicked.
     pub fn restore_from_tray(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.minimized_to_tray = false;
     }

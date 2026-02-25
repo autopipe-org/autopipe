@@ -111,3 +111,81 @@ pub struct SearchQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clean_content_strips_success_true_no_space() {
+        let input = r#"{"success":true}rule all:
+    input: "output.txt""#;
+        let result = clean_content(input);
+        assert!(result.starts_with("rule all:"), "Got: {}", result);
+    }
+
+    #[test]
+    fn clean_content_strips_success_true_with_space() {
+        let input = r#"{"success": true}FROM ubuntu:22.04"#;
+        let result = clean_content(input);
+        assert!(result.starts_with("FROM"), "Got: {}", result);
+    }
+
+    #[test]
+    fn clean_content_splits_json_concatenation() {
+        // metadata.json: {"success":true}{"name":"my-pipeline",...}
+        let input = r#"{"success":true}{"name":"my-pipeline","description":"test"}"#;
+        let result = clean_content(input);
+        assert!(result.starts_with(r#"{"name":"my-pipeline""#), "Got: {}", result);
+    }
+
+    #[test]
+    fn clean_content_leaves_normal_content_unchanged() {
+        let input = "rule all:\n    input: \"output.txt\"";
+        let result = clean_content(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn clean_content_handles_empty() {
+        assert_eq!(clean_content(""), "");
+        assert_eq!(clean_content("   "), "");
+    }
+
+    #[test]
+    fn clean_content_leaves_normal_json_unchanged() {
+        let input = r#"{"name":"pipeline","tools":["bwa"]}"#;
+        let result = clean_content(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn clean_file_contents_cleans_all_fields() {
+        let mut pipeline = Pipeline {
+            pipeline_id: None,
+            name: "test".into(),
+            description: "test".into(),
+            tools: vec![],
+            input_formats: vec![],
+            output_formats: vec![],
+            tags: vec![],
+            snakefile: r#"{"success":true}rule all:"#.into(),
+            dockerfile: r#"{"success": true}FROM ubuntu"#.into(),
+            config_yaml: r#"{"success":true}samples: test"#.into(),
+            readme: r#"{"success":true}# README"#.into(),
+            metadata_json: serde_json::json!({}),
+            author: "test".into(),
+            version: "1.0".into(),
+            verified: false,
+            created_at: None,
+            updated_at: None,
+        };
+
+        pipeline.clean_file_contents();
+
+        assert!(pipeline.snakefile.starts_with("rule all"), "snakefile: {}", pipeline.snakefile);
+        assert!(pipeline.dockerfile.starts_with("FROM"), "dockerfile: {}", pipeline.dockerfile);
+        assert!(pipeline.config_yaml.starts_with("samples"), "config: {}", pipeline.config_yaml);
+        assert!(pipeline.readme.starts_with("# README"), "readme: {}", pipeline.readme);
+    }
+}
