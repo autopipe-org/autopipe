@@ -3,8 +3,15 @@ export const CSS = `
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif; background: #fafafa; color: #111; line-height: 1.5; }
 
 /* Header */
-header { padding: 14px 40px; border-bottom: 1px solid #eee; background: #fff; }
-.logo { font-size: 1.15rem; font-weight: 700; color: #111; text-decoration: none; letter-spacing: -0.02em; }
+header { padding: 14px 40px 0; border-bottom: 1px solid #eee; background: #fff; }
+.header-top { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+.header-sub { font-size: 14px; color: #999; font-weight: 400; }
+.header-tabs { display: flex; gap: 24px; }
+.header-tab { font-size: 14px; font-weight: 500; color: #999; text-decoration: none; padding-bottom: 10px; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; }
+.header-tab:hover { color: #111; }
+.header-tab.active { color: #111; font-weight: 600; border-bottom-color: #111; }
+.logo { font-size: 1.15rem; font-weight: 700; color: #111; text-decoration: none; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
+.logo-icon { height: 24px; width: auto; }
 
 /* Main layout - wide */
 main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
@@ -74,6 +81,28 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 @keyframes splash-progress { 0% { width: 0; } 100% { width: 100%; } }
 .splash-loading { font-size: 13px; color: #bbb; }
 .app-hidden { display: none; }
+
+/* 2-column detail layout */
+.detail-layout { display: flex; gap: 32px; }
+.detail-main { flex: 3; min-width: 0; }
+.detail-sidebar { flex: 1; min-width: 240px; max-width: 300px; }
+
+/* Version timeline */
+.sidebar-title { font-size: 11px; font-weight: 600; color: #999; letter-spacing: 0.04em; margin-bottom: 16px; }
+.version-timeline { position: relative; padding-left: 28px; }
+.version-line { position: absolute; left: 8px; top: 12px; bottom: 12px; width: 2px; background: #e5e5e5; }
+.version-item { position: relative; margin-bottom: 24px; cursor: pointer; text-decoration: none; display: block; color: inherit; }
+.version-item:last-child { margin-bottom: 0; }
+.version-dot { position: absolute; left: -24px; top: 6px; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #ddd; background: #fff; }
+.version-dot.current { background: #111; border-color: #111; }
+.version-card { padding: 16px; border: 1px solid transparent; border-radius: 8px; }
+.version-card.current { background: #f8f8f8; border-color: #eee; }
+.version-ver { font-family: 'SF Mono', 'Consolas', monospace; font-size: 15px; font-weight: 600; color: #111; }
+.version-badge { display: inline-block; font-size: 10px; color: #999; border: 1px solid #ddd; border-radius: 100px; padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
+.version-meta { font-size: 12px; color: #999; margin-top: 4px; }
+.version-desc { font-size: 13px; color: #888; margin-top: 6px; line-height: 1.4; }
+.version-more { font-size: 13px; color: #888; cursor: pointer; background: none; border: none; padding: 8px 0; margin-top: 8px; }
+.version-more:hover { color: #111; }
 
 /* General */
 a { color: #111; }

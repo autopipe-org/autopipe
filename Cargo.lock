@@ -903,6 +903,7 @@ dependencies = [
  "dirs",
  "eframe",
  "gtk",
+ "image",
  "open",
  "reqwest",
  "rmcp",

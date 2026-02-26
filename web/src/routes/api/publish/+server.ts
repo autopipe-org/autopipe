@@ -11,7 +11,7 @@ const { userPipelines } = schema;
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
-		const { github_url, github_token } = body;
+		const { github_url, github_token, forked_from } = body;
 
 		if (!github_url || !github_token) {
 			return json({ error: 'github_url and github_token are required' }, { status: 400 });
@@ -85,7 +85,8 @@ export const POST: RequestHandler = async ({ request }) => {
 			metadataJson: metadata,
 			author,
 			version: metadata.version || '1.0.0',
-			verified: false
+			verified: false,
+			forkedFrom: typeof forked_from === 'number' ? forked_from : null
 		};
 
 		if (existing.length > 0) {

@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = []
-gui = ["eframe", "tray-icon", "gtk"]
+gui = ["eframe", "tray-icon", "image", "gtk"]
 
 [dependencies]
 common = { path = "../common" }
@@ -24,6 +24,7 @@ open = "5"
 # GUI dependencies (optional, requires GTK on Linux)
 eframe = { version = "0.31", optional = true }
 tray-icon = { version = "0.19", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }

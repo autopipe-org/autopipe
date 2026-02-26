@@ -1,4 +1,4 @@
-use crate::models::{Pipeline, PipelineSummary, PluginSummary};
+use crate::models::{Pipeline, PipelineSummary, Plugin, PluginSummary};
 use reqwest::Client;
 use thiserror::Error;
 
@@ -131,5 +131,26 @@ impl RegistryClient {
             });
         }
         Ok(resp.json().await?)
+    }
+
+    /// Get a plugin by exact name.
+    pub async fn get_plugin_by_name(&self, name: &str) -> Result<Option<Plugin>, ApiError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/plugins", self.base_url))
+            .query(&[("name", name)])
+            .send()
+            .await?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(ApiError::Server {
+                status: resp.status().as_u16(),
+                message: resp.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(Some(resp.json().await?))
     }
 }

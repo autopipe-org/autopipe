@@ -39,9 +39,12 @@ pub struct AppConfig {
     /// GitHub personal access token (obtained via device flow).
     #[serde(default)]
     pub github_token: Option<String>,
-    /// GitHub repository name for pipeline uploads (default: "autopipe-pipelines").
+    /// GitHub repository name for uploads (default: "autopipe-hub").
     #[serde(default = "default_github_repo")]
     pub github_repo: String,
+    /// Remote directory for plugins (default: "plugins").
+    #[serde(default = "default_plugins_dir")]
+    pub plugins_dir: String,
 }
 
 fn default_registry_url() -> String {
@@ -53,7 +56,11 @@ fn default_registry_urls() -> Vec<String> {
 }
 
 fn default_github_repo() -> String {
-    "autopipe-pipelines".into()
+    "autopipe-hub".into()
+}
+
+fn default_plugins_dir() -> String {
+    "plugins".into()
 }
 
 impl Default for AppConfig {
@@ -71,6 +78,7 @@ impl Default for AppConfig {
             mcp_registered: false,
             github_token: None,
             github_repo: default_github_repo(),
+            plugins_dir: default_plugins_dir(),
         }
     }
 }
@@ -116,6 +124,11 @@ impl AppConfig {
     /// Full path to output directory on remote server.
     pub fn full_output_dir(&self) -> String {
         self.resolve_path(&self.output_dir)
+    }
+
+    /// Full path to plugins directory on remote server.
+    pub fn full_plugins_dir(&self) -> String {
+        self.resolve_path(&self.plugins_dir)
     }
 
     /// Save config to file.

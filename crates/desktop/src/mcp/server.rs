@@ -129,12 +129,35 @@ struct UploadWorkflowParams {
 struct PublishWorkflowParams {
     /// GitHub URL of the uploaded workflow (from upload_workflow result)
     github_url: String,
+    /// Original pipeline ID if this was derived from a registry pipeline. Omit for new pipelines.
+    forked_from: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PublishPluginParams {
     /// GitHub URL of the plugin repository
     github_url: String,
+    /// Original plugin ID if this was derived from a registry plugin. Omit for new plugins.
+    forked_from: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UploadPluginParams {
+    /// Remote path to the plugin directory on the SSH server
+    plugin_dir: String,
+    /// Custom commit message (optional)
+    commit_message: Option<String>,
+    /// Plugin version tag (optional)
+    version: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RunPluginParams {
+    /// Plugin name (as registered in the registry)
+    plugin_name: String,
+    /// JSON object of parameters to pass to the plugin (e.g. {"path": "/data/file.h5ad"})
+    #[serde(default)]
+    params: serde_json::Value,
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -598,7 +621,7 @@ impl AutoPipeServer {
                 .header("User-Agent", "autopipe-desktop")
                 .json(&serde_json::json!({
                     "name": repo_name,
-                    "description": "AutoPipe bioinformatics pipelines",
+                    "description": "AutoPipe bioinformatics pipelines and plugins",
                     "auto_init": true
                 }))
                 .send()
@@ -665,7 +688,7 @@ impl AutoPipeServer {
             .filter(|(_, content)| !content.is_empty())
             .map(|(name, content)| {
                 serde_json::json!({
-                    "path": format!("{}/{}", pipeline_name, name),
+                    "path": format!("pipelines/{}/{}", pipeline_name, name),
                     "mode": "100644",
                     "type": "blob",
                     "content": content
@@ -760,7 +783,7 @@ impl AutoPipeServer {
         }
 
         let github_url = format!(
-            "https://github.com/{}/{}/tree/main/{}",
+            "https://github.com/{}/{}/tree/main/pipelines/{}",
             owner, repo_name, pipeline_name
         );
         let commit_url = format!(
@@ -784,7 +807,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines to check for duplicates. If a pipeline with the same name already exists, inform the user and ask whether to update or cancel.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines to check for duplicates. If a pipeline with the same name already exists, inform the user and ask whether to update or cancel. FORK TRACKING: If this pipeline was downloaded from the registry and modified, set forked_from to the original pipeline_id. If created from scratch, omit forked_from.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -806,6 +829,7 @@ impl AutoPipeServer {
             .json(&serde_json::json!({
                 "github_url": params.github_url,
                 "github_token": token,
+                "forked_from": params.forked_from,
             }))
             .send()
             .await
@@ -945,7 +969,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins to check for duplicates. If a plugin with the same name already exists, inform the user and ask whether to update or cancel.")]
+    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins to check for duplicates. If a plugin with the same name already exists, inform the user and ask whether to update or cancel. FORK TRACKING: If this plugin was downloaded from the registry and modified, set forked_from to the original plugin_id. If created from scratch, omit forked_from.")]
     async fn publish_plugin(
         &self,
         Parameters(params): Parameters<PublishPluginParams>,
@@ -966,6 +990,7 @@ impl AutoPipeServer {
             .json(&serde_json::json!({
                 "github_url": params.github_url,
                 "github_token": token,
+                "forked_from": params.forked_from,
             }))
             .send()
             .await
@@ -1048,7 +1073,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask. NOTE: If the pipeline was downloaded from the registry, call the registry API POST /api/pipelines/{pipeline_id}/run to increment the run count after successful execution.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1363,6 +1388,391 @@ PYEOF"#,
             templates::GENERATION_GUIDE,
         )]))
     }
+
+    // ── Plugin upload & run tools ─────────────────────────────────
+
+    #[tool(description = "Upload a plugin from the remote SSH server to GitHub. Files are committed under plugins/{name}/ in the autopipe-hub repo. Reads metadata.json (required), Dockerfile, run.py, requirements.txt, and README.md from the plugin directory.")]
+    async fn upload_plugin(
+        &self,
+        Parameters(params): Parameters<UploadPluginParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let token = match &self.config.github_token {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                )]));
+            }
+        };
+
+        let dir = &params.plugin_dir;
+
+        // Read metadata.json (required) to get plugin name
+        let meta_raw = match self.ssh_read_file(&format!("{}/metadata.json", dir)).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot read metadata.json: {}", e
+                ))]));
+            }
+        };
+        let cleaned_meta = clean_content(&meta_raw);
+        let meta_json: serde_json::Value = match serde_json::from_str(&cleaned_meta) {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid metadata.json: {}", e
+                ))]));
+            }
+        };
+        let plugin_name = meta_json["name"]
+            .as_str()
+            .unwrap_or("unknown-plugin")
+            .to_string();
+
+        // Update version in metadata if provided
+        let mut meta_json_updated = meta_json.clone();
+        if let Some(ref ver) = params.version {
+            meta_json_updated["version"] = serde_json::Value::String(ver.clone());
+        }
+        let metadata_json_str = serde_json::to_string_pretty(&meta_json_updated).unwrap_or_default();
+
+        // Read optional files
+        let dockerfile = clean_content(
+            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
+        );
+        let run_py = clean_content(
+            &self.ssh_read_file(&format!("{}/run.py", dir)).await.unwrap_or_default(),
+        );
+        let requirements = clean_content(
+            &self.ssh_read_file(&format!("{}/requirements.txt", dir)).await.unwrap_or_default(),
+        );
+        let readme = clean_content(
+            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
+        );
+
+        let repo_name = &self.config.github_repo;
+        let client = reqwest::Client::new();
+
+        // 1. Get GitHub username
+        let user_resp = client
+            .get("https://api.github.com/user")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let user: serde_json::Value = user_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let owner = user["login"].as_str().unwrap_or_default().to_string();
+
+        // 2. Ensure repo exists
+        let repo_check = client
+            .get(format!("https://api.github.com/repos/{}/{}", owner, repo_name))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if repo_check.status() == reqwest::StatusCode::NOT_FOUND {
+            let create_resp = client
+                .post("https://api.github.com/user/repos")
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .json(&serde_json::json!({
+                    "name": repo_name,
+                    "description": "AutoPipe bioinformatics pipelines and plugins",
+                    "auto_init": true
+                }))
+                .send()
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+            if !create_resp.status().is_success() {
+                let err_text = create_resp.text().await.unwrap_or_default();
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to create GitHub repo: {}", err_text
+                ))]));
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // 3. Get latest commit SHA on main branch
+        let ref_resp = client
+            .get(format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/main",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let ref_body: serde_json::Value = ref_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let latest_sha = ref_body["object"]["sha"].as_str().unwrap_or_default().to_string();
+
+        if latest_sha.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Could not get latest commit SHA from the repository.",
+            )]));
+        }
+
+        // 4. Get base tree SHA
+        let commit_resp = client
+            .get(format!(
+                "https://api.github.com/repos/{}/{}/git/commits/{}",
+                owner, repo_name, latest_sha
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let commit_body: serde_json::Value = commit_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let base_tree = commit_body["tree"]["sha"].as_str().unwrap_or_default().to_string();
+
+        // 5. Create tree with plugin files
+        let files_to_commit: Vec<(&str, &str)> = vec![
+            ("metadata.json", &metadata_json_str),
+            ("Dockerfile", &dockerfile),
+            ("run.py", &run_py),
+            ("requirements.txt", &requirements),
+            ("README.md", &readme),
+        ];
+
+        let tree_items: Vec<serde_json::Value> = files_to_commit
+            .iter()
+            .filter(|(_, content)| !content.is_empty())
+            .map(|(name, content)| {
+                serde_json::json!({
+                    "path": format!("plugins/{}/{}", plugin_name, name),
+                    "mode": "100644",
+                    "type": "blob",
+                    "content": content
+                })
+            })
+            .collect();
+
+        let tree_resp = client
+            .post(format!(
+                "https://api.github.com/repos/{}/{}/git/trees",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({
+                "base_tree": base_tree,
+                "tree": tree_items
+            }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let tree_body: serde_json::Value = tree_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let new_tree_sha = tree_body["sha"].as_str().unwrap_or_default().to_string();
+
+        // 6. Create commit
+        let commit_msg = params.commit_message.unwrap_or_else(|| {
+            if let Some(ref ver) = params.version {
+                format!("Upload plugin {} v{}", plugin_name, ver)
+            } else {
+                format!("Upload plugin {}", plugin_name)
+            }
+        });
+
+        let new_commit_resp = client
+            .post(format!(
+                "https://api.github.com/repos/{}/{}/git/commits",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({
+                "message": commit_msg,
+                "tree": new_tree_sha,
+                "parents": [latest_sha]
+            }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        let new_commit_body: serde_json::Value = new_commit_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let new_commit_sha = new_commit_body["sha"].as_str().unwrap_or_default().to_string();
+
+        // 7. Update ref to point to new commit
+        let update_ref = client
+            .patch(format!(
+                "https://api.github.com/repos/{}/{}/git/refs/heads/main",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({ "sha": new_commit_sha }))
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if !update_ref.status().is_success() {
+            let err = update_ref.text().await.unwrap_or_default();
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to update branch ref: {}", err
+            ))]));
+        }
+
+        // 8. Create version tag if version is provided
+        if let Some(ref ver) = params.version {
+            let tag_name = format!("{}/v{}", plugin_name, ver);
+            let _ = client
+                .post(format!(
+                    "https://api.github.com/repos/{}/{}/git/refs",
+                    owner, repo_name
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .json(&serde_json::json!({
+                    "ref": format!("refs/tags/{}", tag_name),
+                    "sha": new_commit_sha
+                }))
+                .send()
+                .await;
+        }
+
+        let github_url = format!(
+            "https://github.com/{}/{}/tree/main/plugins/{}",
+            owner, repo_name, plugin_name
+        );
+        let commit_url = format!(
+            "https://github.com/{}/{}/commit/{}",
+            owner, repo_name, new_commit_sha
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Successfully uploaded plugin '{}' to GitHub!\n\
+             Plugin URL: {}\n\
+             Commit: {}\n\
+             {}",
+            plugin_name,
+            github_url,
+            commit_url,
+            if let Some(ref ver) = params.version {
+                format!("Version tag: {}/v{}", plugin_name, ver)
+            } else {
+                String::new()
+            }
+        ))]))
+    }
+
+    #[tool(description = "Execute a registered plugin on the remote server via Docker. Use this when the user wants to view, inspect, or process data files (e.g., 'show me the h5ad file', 'summarize this CSV'). WORKFLOW: 1. Call list_plugins and match by input_types against the file extension. 2. Call run_plugin with the plugin name and parameters. The plugin runs inside a Docker container on the remote SSH server. If no matching plugin exists, inform the user and suggest creating one.")]
+    async fn run_plugin(
+        &self,
+        Parameters(params): Parameters<RunPluginParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let base = self.config.registry_url.trim_end_matches('/');
+        let plugins_dir = self.config.full_plugins_dir();
+        let plugin_name = &params.plugin_name;
+
+        // 1. Query registry for plugin metadata
+        let plugin = self.registry.get_plugin_by_name(plugin_name).await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let plugin = match plugin {
+            Some(p) => p,
+            None => return Ok(CallToolResult::error(vec![Content::text(
+                format!("Plugin '{}' not found in the registry. Use list_plugins to see available plugins.", plugin_name)
+            )])),
+        };
+
+        let metadata = &plugin.metadata_json;
+        let entry_point = metadata.get("entry_point")
+            .and_then(|v| v.as_str())
+            .unwrap_or("run.py");
+
+        // 2. Check if plugin exists on remote server
+        let plugin_path = format!("{}/{}", plugins_dir, plugin_name);
+        let check = self.ssh_run(&format!("test -d '{}' && echo EXISTS || echo MISSING", plugin_path)).await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if check.0.trim() == "MISSING" {
+            // Download plugin files from GitHub
+            let github_url = &plugin.github_url;
+            if let Some((owner, repo, path)) = parse_github_url(github_url) {
+                let client = reqwest::Client::new();
+                self.ssh_run(&format!("mkdir -p '{}'", plugin_path)).await
+                    .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+                let file_names = ["Dockerfile", "run.py", "requirements.txt", "metadata.json", "README.md"];
+                for filename in &file_names {
+                    let file_path = if path.is_empty() {
+                        filename.to_string()
+                    } else {
+                        format!("{}/{}", path, filename)
+                    };
+                    if let Some(content) = fetch_github_file(&client, &owner, &repo, &file_path).await {
+                        let remote_path = format!("{}/{}", plugin_path, filename);
+                        let _ = self.ssh_write_file(&remote_path, &content).await;
+                    }
+                }
+            } else {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Could not parse plugin GitHub URL to download files."
+                )]));
+            }
+        }
+
+        // 3. Build Docker image
+        let image_name = format!("plugin-{}", plugin_name);
+        let build_cmd = format!("cd '{}' && docker build -t '{}' .", plugin_path, image_name);
+        let build_output = self.ssh_run(&build_cmd).await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if build_output.1 != 0 {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Docker build failed:\n{}", build_output.0
+            ))]));
+        }
+
+        // 4. Run the plugin
+        let mut docker_cmd = "docker run --rm".to_string();
+
+        // Add parameter environment variables
+        if let Some(obj) = params.params.as_object() {
+            for (key, value) in obj {
+                let val_str = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                docker_cmd.push_str(&format!(" -e 'PARAM_{}={}'", key, val_str));
+            }
+            // Mount input paths if a 'path' param exists
+            if let Some(path_val) = obj.get("path") {
+                if let Some(path_str) = path_val.as_str() {
+                    let parent = path_str.rsplit_once('/').map(|(p, _)| p).unwrap_or(path_str);
+                    docker_cmd.push_str(&format!(" -v '{}:/input:ro'", parent));
+                }
+            }
+        }
+
+        let output_dir = self.config.full_output_dir();
+        docker_cmd.push_str(&format!(" -v '{}:/output' '{}' python3 /plugin/{}", output_dir, image_name, entry_point));
+
+        let run_output = self.ssh_run(&docker_cmd).await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        // 5. Increment run count (best-effort, ignore errors)
+        let _ = reqwest::Client::new()
+            .post(format!("{}/api/plugins/{}/run", base, plugin.plugin_id.unwrap_or(0)))
+            .send()
+            .await;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Plugin '{}' executed successfully.\n\nOutput:\n{}", plugin_name, run_output.0
+        ))]))
+    }
 }
 
 #[tool_handler]
@@ -1372,13 +1782,21 @@ impl ServerHandler for AutoPipeServer {
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             instructions: Some(
-                "AutoPipe MCP Server - Manage bioinformatics Snakemake pipelines.\n\
-                 All file operations are performed on the remote SSH server.\n\
+                "AutoPipe MCP Server — Bioinformatics pipeline & plugin management.\n\
+                 All file operations are on the remote SSH server.\n\
                  Use get_workspace_info first to see configured paths.\n\
-                 Pipeline outputs are automatically stored under the configured output directory.\n\
-                 Use list_files and read_file to view results directly from the output path.\n\
-                 IMPORTANT: Use create_symlink instead of cp when linking data or accessing results.\n\
-                 All paths are remote server paths."
+                 Use create_symlink instead of cp for data files.\n\
+                 Pipeline outputs are stored under the configured output directory.\n\
+                 Use list_files and read_file to view results from the output path.\n\n\
+                 PLUGIN AUTO-MATCHING:\n\
+                 When the user asks to view/process a file (e.g., 'show me the h5ad'),\n\
+                 call list_plugins and match by input_types field in metadata.\n\
+                 If a matching plugin is found, call run_plugin automatically.\n\
+                 The user does NOT need to mention 'plugin' — just match the file type.\n\n\
+                 FORK TRACKING (PUBLISH):\n\
+                 When publishing a pipeline/plugin that was downloaded and modified,\n\
+                 set the forked_from parameter to the original ID.\n\
+                 When publishing something created from scratch, omit forked_from."
                     .into(),
             ),
             ..Default::default()

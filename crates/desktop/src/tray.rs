@@ -62,16 +62,10 @@ impl AppTray {
 }
 
 fn create_default_icon() -> Icon {
-    let size = 16;
-    let mut rgba = vec![0u8; size * size * 4];
-    for y in 0..size {
-        for x in 0..size {
-            let idx = (y * size + x) * 4;
-            rgba[idx] = 50;
-            rgba[idx + 1] = 180;
-            rgba[idx + 2] = 50;
-            rgba[idx + 3] = 255;
-        }
-    }
-    Icon::from_rgba(rgba, size as u32, size as u32).expect("Failed to create icon")
+    let png_bytes = include_bytes!("../assets/tray_icon.png");
+    let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+        .expect("Failed to decode tray icon PNG");
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Icon::from_rgba(rgba.into_raw(), w, h).expect("Failed to create icon")
 }

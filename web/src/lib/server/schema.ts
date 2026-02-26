@@ -3,6 +3,7 @@ import {
 	serial,
 	varchar,
 	text,
+	integer,
 	boolean,
 	timestamp,
 	jsonb,
@@ -24,6 +25,8 @@ export const userPipelines = pgTable(
 		author: varchar('author', { length: 255 }),
 		version: varchar('version', { length: 50 }).default('1.0.0'),
 		verified: boolean('verified').default(false),
+		forkedFrom: integer('forked_from'),
+		runCount: integer('run_count').default(0),
 		createdAt: timestamp('created_at').defaultNow(),
 		updatedAt: timestamp('updated_at').defaultNow()
 	},
@@ -45,6 +48,8 @@ export const userPlugins = pgTable(
 		author: varchar('author', { length: 255 }),
 		version: varchar('version', { length: 50 }).default('1.0.0'),
 		verified: boolean('verified').default(false),
+		forkedFrom: integer('forked_from'),
+		runCount: integer('run_count').default(0),
 		createdAt: timestamp('created_at').defaultNow(),
 		updatedAt: timestamp('updated_at').defaultNow()
 	},

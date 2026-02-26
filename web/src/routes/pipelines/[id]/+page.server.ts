@@ -1,6 +1,6 @@
 import { error, redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { getPipeline, deletePipeline } from '$lib/server/pipelines.js';
+import { getPipeline, deletePipeline, getVersionChain } from '$lib/server/pipelines.js';
 import { fetchGithubFiles, GithubNotFoundError } from '$lib/server/github.js';
 
 export const load: PageServerLoad = async ({ params }) => {
@@ -10,10 +10,12 @@ export const load: PageServerLoad = async ({ params }) => {
 	const pipeline = await getPipeline(id);
 	if (!pipeline) throw error(404, 'Pipeline not found');
 
+	const versionChain = await getVersionChain(id);
+
 	// Fetch files from GitHub
 	try {
 		const files = await fetchGithubFiles(pipeline.github_url);
-		return { pipeline, files };
+		return { pipeline, files, versionChain };
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
 			// GitHub link broken — auto-delete from DB

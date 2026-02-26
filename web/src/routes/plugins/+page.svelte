@@ -44,10 +44,13 @@
 </svelte:head>
 
 <header>
-	<a href="/" class="logo">AutoPipe</a>
-	<nav style="margin-left:auto;display:flex;gap:16px">
-		<a href="/" style="color:#ccc;text-decoration:none">Pipelines</a>
-		<a href="/plugins" style="color:#fff;text-decoration:none;font-weight:600">Plugins</a>
+	<div class="header-top">
+		<a href="/" class="logo"><img src="/logo.svg" alt="" class="logo-icon">AutoPipe</a>
+		<span class="header-sub">Bioinformatics Snakemake Pipeline Registry</span>
+	</div>
+	<nav class="header-tabs">
+		<a href="/" class="header-tab">Pipelines</a>
+		<a href="/plugins" class="header-tab active">Plugins</a>
 	</nav>
 </header>
 <main>

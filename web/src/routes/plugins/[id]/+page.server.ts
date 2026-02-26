@@ -1,6 +1,6 @@
 import { error } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
-import { getPlugin } from '$lib/server/plugins.js';
+import { getPlugin, getVersionChain } from '$lib/server/plugins.js';
 
 export const load: PageServerLoad = async ({ params }) => {
 	const id = parseInt(params.id);
@@ -9,5 +9,7 @@ export const load: PageServerLoad = async ({ params }) => {
 	const plugin = await getPlugin(id);
 	if (!plugin) throw error(404, 'Plugin not found');
 
-	return { plugin };
+	const versionChain = await getVersionChain(id);
+
+	return { plugin, versionChain };
 };

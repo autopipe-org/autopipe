@@ -15,6 +15,8 @@ export interface PipelineSummary {
 	author: string;
 	version: string;
 	verified: boolean;
+	forked_from: number | null;
+	run_count: number;
 	created_at: string | null;
 }
 
@@ -31,6 +33,8 @@ export interface Pipeline {
 	author: string;
 	version: string;
 	verified: boolean;
+	forked_from?: number | null;
+	run_count?: number;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -48,6 +52,8 @@ function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
 		author: r.author ?? '',
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
+		forked_from: r.forkedFrom ?? null,
+		run_count: r.runCount ?? 0,
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -66,6 +72,8 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		author: r.author ?? '',
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
+		forked_from: r.forkedFrom ?? null,
+		run_count: r.runCount ?? 0,
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};
@@ -153,4 +161,59 @@ export async function deletePipeline(id: number): Promise<boolean> {
 		.where(eq(userPipelines.pipelineId, id))
 		.returning({ pipelineId: userPipelines.pipelineId });
 	return result.length > 0;
+}
+
+export async function incrementRunCount(pipelineId: number): Promise<void> {
+	await db
+		.update(userPipelines)
+		.set({ runCount: sql`${userPipelines.runCount} + 1` })
+		.where(eq(userPipelines.pipelineId, pipelineId));
+}
+
+export async function getVersionChain(pipelineId: number): Promise<PipelineSummary[]> {
+	// 1. Follow forked_from upward to find the root
+	const allRows = await db.select().from(userPipelines);
+	const byId = new Map(allRows.map((r) => [r.pipelineId, r]));
+
+	// Walk up the fork chain to find the root
+	let currentId: number | null = pipelineId;
+	const chainIds = new Set<number>();
+	while (currentId !== null) {
+		if (chainIds.has(currentId)) break; // prevent cycles
+		chainIds.add(currentId);
+		const row = byId.get(currentId);
+		if (!row) break;
+		currentId = row.forkedFrom ?? null;
+	}
+
+	// 2. Walk down: find all pipelines whose forked_from is in the chain
+	let changed = true;
+	while (changed) {
+		changed = false;
+		for (const row of allRows) {
+			if (row.forkedFrom !== null && chainIds.has(row.forkedFrom) && !chainIds.has(row.pipelineId)) {
+				chainIds.add(row.pipelineId);
+				changed = true;
+			}
+		}
+	}
+
+	// 3. Return sorted by created_at desc
+	const chainRows = allRows
+		.filter((r) => chainIds.has(r.pipelineId))
+		.sort((a, b) => {
+			const ta = a.createdAt?.getTime() ?? 0;
+			const tb = b.createdAt?.getTime() ?? 0;
+			return tb - ta;
+		});
+	return chainRows.map(rowToSummary);
+}
+
+export async function getDerivedPipelines(pipelineId: number): Promise<PipelineSummary[]> {
+	const rows = await db
+		.select()
+		.from(userPipelines)
+		.where(eq(userPipelines.forkedFrom, pipelineId))
+		.orderBy(sql`${userPipelines.createdAt} DESC`);
+	return rows.map(rowToSummary);
 }

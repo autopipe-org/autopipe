@@ -6,9 +6,11 @@
 
 	let searchValue = $state(data.q);
 	let currentPage = $state(1);
-	let splashVisible = $state(true);
+
+	const alreadyVisited = typeof sessionStorage !== 'undefined' && sessionStorage.getItem('autopipe_visited') === '1';
+	let splashVisible = $state(!alreadyVisited);
 	let splashFading = $state(false);
-	let appVisible = $state(false);
+	let appVisible = $state(alreadyVisited);
 
 	const PAGE_SIZE = 10;
 
@@ -42,6 +44,8 @@
 	}
 
 	onMount(() => {
+		if (alreadyVisited) return;
+		sessionStorage.setItem('autopipe_visited', '1');
 		setTimeout(() => {
 			splashFading = true;
 			setTimeout(() => {
@@ -75,10 +79,13 @@
 
 <div class:app-hidden={!appVisible}>
 	<header>
-		<a href="/" class="logo">AutoPipe</a>
-		<nav style="margin-left:auto;display:flex;gap:16px">
-			<a href="/" style="color:#fff;text-decoration:none;font-weight:600">Pipelines</a>
-			<a href="/plugins" style="color:#ccc;text-decoration:none">Plugins</a>
+		<div class="header-top">
+			<a href="/" class="logo"><img src="/logo.svg" alt="" class="logo-icon">AutoPipe</a>
+			<span class="header-sub">Bioinformatics Snakemake Pipeline Registry</span>
+		</div>
+		<nav class="header-tabs">
+			<a href="/" class="header-tab active">Pipelines</a>
+			<a href="/plugins" class="header-tab">Plugins</a>
 		</nav>
 	</header>
 	<main>

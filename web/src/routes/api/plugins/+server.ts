@@ -1,11 +1,17 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { listPlugins, searchPlugins } from '$lib/server/plugins.js';
+import { listPlugins, searchPlugins, getPluginByName } from '$lib/server/plugins.js';
 
-// GET /api/plugins — list all or search with ?q=
+// GET /api/plugins — list all, search with ?q=, or exact match with ?name=
 export const GET: RequestHandler = async ({ url }) => {
+	const name = url.searchParams.get('name');
 	const q = url.searchParams.get('q');
 	try {
+		if (name) {
+			const plugin = await getPluginByName(name);
+			if (!plugin) return json({ error: 'Plugin not found' }, { status: 404 });
+			return json(plugin);
+		}
 		const plugins = q ? await searchPlugins(q) : await listPlugins();
 		return json(plugins);
 	} catch (e: unknown) {

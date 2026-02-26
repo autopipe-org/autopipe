@@ -4,6 +4,12 @@
 	let { data } = $props();
 	const p = data.plugin;
 
+	let showAll = $state(false);
+
+	const displayedVersions = $derived(
+		showAll ? data.versionChain : data.versionChain.slice(0, 3)
+	);
+
 	const metadataStr = typeof p.metadata_json === 'string'
 		? p.metadata_json
 		: JSON.stringify(p.metadata_json, null, 2);
@@ -15,53 +21,79 @@
 </svelte:head>
 
 <header>
-	<a href="/" class="logo">AutoPipe</a>
-	<nav style="margin-left:auto;display:flex;gap:16px">
-		<a href="/" style="color:#ccc;text-decoration:none">Pipelines</a>
-		<a href="/plugins" style="color:#fff;text-decoration:none;font-weight:600">Plugins</a>
+	<div class="header-top">
+		<a href="/" class="logo"><img src="/logo.svg" alt="" class="logo-icon">AutoPipe</a>
+		<span class="header-sub">Bioinformatics Snakemake Pipeline Registry</span>
+	</div>
+	<nav class="header-tabs">
+		<a href="/" class="header-tab">Pipelines</a>
+		<a href="/plugins" class="header-tab active">Plugins</a>
 	</nav>
 </header>
 <main>
 	<a href="/plugins" class="back-link">&larr; Back to plugins</a>
-	<div class="detail-header">
-		<div>
-			<h2>{p.name}</h2>
-			<p class="detail-desc">{p.description}</p>
+	<div class="detail-layout">
+		<div class="detail-main">
+			<div class="detail-header">
+				<div>
+					<h2>{p.name}</h2>
+					<p class="detail-desc">{p.description}</p>
+				</div>
+				<div style="display:flex;gap:8px">
+					<a href={p.github_url} target="_blank" rel="noopener" class="btn" style="background:#24292e">GitHub</a>
+				</div>
+			</div>
+			<div class="detail-info">
+				<div class="detail-info-item">
+					<span class="label">VERSION</span>
+					<span class="value">{p.version}</span>
+				</div>
+				<div class="detail-info-item">
+					<span class="label">AUTHOR</span>
+					<span class="value">{p.author || 'unknown'}</span>
+				</div>
+				<div class="detail-info-item">
+					<span class="label">CATEGORY</span>
+					<span class="value">{p.category || '—'}</span>
+				</div>
+			</div>
+			<div class="detail-tags">
+				<span class="label">TAGS</span>
+				{#each p.tags as tag}
+					<span class="tag">{tag}</span>
+				{/each}
+				{#if p.tags.length === 0}
+					<span style="color:#888">—</span>
+				{/if}
+			</div>
+			<div class="files-section">
+				<div class="tab-bar">
+					<button class="tab-btn active">metadata.json</button>
+				</div>
+				<div class="tab-content">
+					<div class="tab-panel active">
+						<pre><code>{metadataStr}</code></pre>
+					</div>
+				</div>
+			</div>
 		</div>
-		<div style="display:flex;gap:8px">
-			<a href={p.github_url} target="_blank" rel="noopener" class="btn" style="background:#24292e">GitHub</a>
-		</div>
-	</div>
-	<div class="detail-info">
-		<div class="detail-info-item">
-			<span class="label">VERSION</span>
-			<span class="value">{p.version}</span>
-		</div>
-		<div class="detail-info-item">
-			<span class="label">AUTHOR</span>
-			<span class="value">{p.author || 'unknown'}</span>
-		</div>
-		<div class="detail-info-item">
-			<span class="label">CATEGORY</span>
-			<span class="value">{p.category || '—'}</span>
-		</div>
-	</div>
-	<div class="detail-tags">
-		<span class="label">TAGS</span>
-		{#each p.tags as tag}
-			<span class="tag">{tag}</span>
-		{/each}
-		{#if p.tags.length === 0}
-			<span style="color:#888">—</span>
-		{/if}
-	</div>
-	<div class="files-section">
-		<div class="tab-bar">
-			<button class="tab-btn active">metadata.json</button>
-		</div>
-		<div class="tab-content">
-			<div class="tab-panel active">
-				<pre><code>{metadataStr}</code></pre>
+		<div class="detail-sidebar">
+			<div class="sidebar-title">VERSIONS</div>
+			<div class="version-timeline">
+				<div class="version-line"></div>
+				{#each displayedVersions as v (v.plugin_id)}
+					<a href="/plugins/{v.plugin_id}" class="version-item">
+						<div class="version-dot" class:current={v.plugin_id === p.plugin_id}></div>
+						<div class="version-card" class:current={v.plugin_id === p.plugin_id}>
+							<span class="version-ver">v{v.version}</span>
+							{#if v.verified}<span class="version-badge">verified</span>{/if}
+							<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
+						</div>
+					</a>
+				{/each}
+				{#if data.versionChain.length > 3 && !showAll}
+					<button class="version-more" onclick={() => showAll = true}>show more ({data.versionChain.length - 3} more)</button>
+				{/if}
 			</div>
 		</div>
 	</div>
