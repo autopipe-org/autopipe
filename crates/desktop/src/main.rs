@@ -124,10 +124,24 @@ fn run_gui() {
     #[cfg(target_os = "linux")]
     gtk::init().expect("Failed to initialize GTK");
 
+    let app_icon = {
+        let png_bytes = include_bytes!("../assets/tray_icon.png");
+        let img = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+            .expect("Failed to decode app icon PNG");
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        eframe::egui::IconData {
+            rgba: rgba.into_raw(),
+            width: w,
+            height: h,
+        }
+    };
+
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([550.0, 500.0])
-            .with_title("AutoPipe"),
+            .with_title("AutoPipe")
+            .with_icon(std::sync::Arc::new(app_icon)),
         ..Default::default()
     };
 

@@ -129,7 +129,7 @@ struct UploadWorkflowParams {
 struct PublishWorkflowParams {
     /// GitHub URL of the uploaded workflow (from upload_workflow result)
     github_url: String,
-    /// Original pipeline ID if this was derived from a registry pipeline. Omit for new pipelines.
+    /// Set to an existing pipeline_id to link this as a related/derived version. Same-name pipelines are auto-linked. Use this for cross-name forks (e.g., a similar pipeline with a different name).
     forked_from: Option<i32>,
 }
 
@@ -137,7 +137,7 @@ struct PublishWorkflowParams {
 struct PublishPluginParams {
     /// GitHub URL of the plugin repository
     github_url: String,
-    /// Original plugin ID if this was derived from a registry plugin. Omit for new plugins.
+    /// Set to an existing plugin_id to link this as a related/derived version. Same-name plugins are auto-linked. Use this for cross-name forks (e.g., a similar plugin with a different name).
     forked_from: Option<i32>,
 }
 
@@ -807,7 +807,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines to check for duplicates. If a pipeline with the same name already exists, inform the user and ask whether to update or cancel. FORK TRACKING: If this pipeline was downloaded from the registry and modified, set forked_from to the original pipeline_id. If created from scratch, omit forked_from.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines. VERSION TRACKING: Each publish creates a new version entry. If the same name already exists, it is automatically linked as a new version. FORK TRACKING: If this pipeline is based on or similar to an existing registry pipeline, set forked_from to that pipeline_id to link them. If created from scratch with a new name, omit forked_from.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -969,7 +969,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins to check for duplicates. If a plugin with the same name already exists, inform the user and ask whether to update or cancel. FORK TRACKING: If this plugin was downloaded from the registry and modified, set forked_from to the original plugin_id. If created from scratch, omit forked_from.")]
+    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins. VERSION TRACKING: Each publish creates a new version entry. If the same name already exists, it is automatically linked as a new version. FORK TRACKING: If this plugin is based on or similar to an existing registry plugin, set forked_from to that plugin_id to link them. If created from scratch with a new name, omit forked_from.")]
     async fn publish_plugin(
         &self,
         Parameters(params): Parameters<PublishPluginParams>,
@@ -1793,10 +1793,12 @@ impl ServerHandler for AutoPipeServer {
                  call list_plugins and match by input_types field in metadata.\n\
                  If a matching plugin is found, call run_plugin automatically.\n\
                  The user does NOT need to mention 'plugin' — just match the file type.\n\n\
-                 FORK TRACKING (PUBLISH):\n\
-                 When publishing a pipeline/plugin that was downloaded and modified,\n\
-                 set the forked_from parameter to the original ID.\n\
-                 When publishing something created from scratch, omit forked_from."
+                 VERSION & FORK TRACKING (PUBLISH):\n\
+                 Each publish creates a new version entry in the registry.\n\
+                 Same name → automatically linked as a new version.\n\
+                 Similar to existing → set forked_from to that pipeline/plugin ID.\n\
+                 Brand new → omit forked_from.\n\
+                 Before publishing, ALWAYS search the registry first."
                     .into(),
             ),
             ..Default::default()

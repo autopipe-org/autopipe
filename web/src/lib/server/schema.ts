@@ -14,7 +14,7 @@ export const userPipelines = pgTable(
 	'user_pipelines',
 	{
 		pipelineId: serial('pipeline_id').primaryKey(),
-		name: varchar('name', { length: 255 }).notNull().unique(),
+		name: varchar('name', { length: 255 }).notNull(),
 		description: text('description'),
 		tools: text('tools').array(),
 		inputFormats: text('input_formats').array(),
@@ -39,7 +39,7 @@ export const userPlugins = pgTable(
 	'user_plugins',
 	{
 		pluginId: serial('plugin_id').primaryKey(),
-		name: varchar('name', { length: 255 }).notNull().unique(),
+		name: varchar('name', { length: 255 }).notNull(),
 		description: text('description'),
 		category: varchar('category', { length: 100 }),
 		tags: text('tags').array(),

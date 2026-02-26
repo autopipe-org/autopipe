@@ -79,17 +79,21 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 	};
 }
 
+/** List pipelines — only the latest version per name */
 export async function listPipelines(): Promise<PipelineSummary[]> {
-	const rows = await db
-		.select()
-		.from(userPipelines)
-		.orderBy(sql`${userPipelines.createdAt} DESC`);
-	return rows.map(rowToSummary);
+	const rows = await db.execute(sql`
+		SELECT DISTINCT ON (name) *
+		FROM user_pipelines
+		ORDER BY name, created_at DESC
+	`);
+	return (rows.rows as (typeof userPipelines.$inferSelect)[]).map(rowToSummary);
 }
 
+/** Search pipelines — only the latest version per name */
 export async function searchPipelines(query: string): Promise<PipelineSummary[]> {
 	const pattern = `%${query}%`;
-	const rows = await db
+	// First get all matches, then deduplicate by name (keep latest)
+	const allRows = await db
 		.select()
 		.from(userPipelines)
 		.where(
@@ -101,7 +105,15 @@ export async function searchPipelines(query: string): Promise<PipelineSummary[]>
 			)
 		)
 		.orderBy(sql`${userPipelines.createdAt} DESC`);
-	return rows.map(rowToSummary);
+
+	// Deduplicate: keep only the latest per name
+	const seen = new Set<string>();
+	const deduped = allRows.filter((r) => {
+		if (seen.has(r.name)) return false;
+		seen.add(r.name);
+		return true;
+	});
+	return deduped.map(rowToSummary);
 }
 
 export async function getPipeline(id: number): Promise<Pipeline | null> {
@@ -170,23 +182,41 @@ export async function incrementRunCount(pipelineId: number): Promise<void> {
 		.where(eq(userPipelines.pipelineId, pipelineId));
 }
 
+/** Get all versions related to this pipeline: same name + forked_from chain */
 export async function getVersionChain(pipelineId: number): Promise<PipelineSummary[]> {
-	// 1. Follow forked_from upward to find the root
 	const allRows = await db.select().from(userPipelines);
 	const byId = new Map(allRows.map((r) => [r.pipelineId, r]));
 
-	// Walk up the fork chain to find the root
-	let currentId: number | null = pipelineId;
+	const current = byId.get(pipelineId);
+	if (!current) return [];
+
 	const chainIds = new Set<number>();
-	while (currentId !== null) {
-		if (chainIds.has(currentId)) break; // prevent cycles
-		chainIds.add(currentId);
-		const row = byId.get(currentId);
-		if (!row) break;
-		currentId = row.forkedFrom ?? null;
+
+	// 1. All records with the same name
+	for (const row of allRows) {
+		if (row.name === current.name) {
+			chainIds.add(row.pipelineId);
+		}
 	}
 
-	// 2. Walk down: find all pipelines whose forked_from is in the chain
+	// 2. Walk up forked_from chain (covers cross-name forks)
+	let walkId: number | null = pipelineId;
+	while (walkId !== null) {
+		if (chainIds.has(walkId)) {
+			// Already included, but keep walking up
+			const row = byId.get(walkId);
+			if (!row || row.forkedFrom === null) break;
+			walkId = row.forkedFrom;
+			chainIds.add(walkId);
+		} else {
+			chainIds.add(walkId);
+			const row = byId.get(walkId);
+			if (!row) break;
+			walkId = row.forkedFrom;
+		}
+	}
+
+	// 3. Walk down: find children of any chain member
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -198,7 +228,7 @@ export async function getVersionChain(pipelineId: number): Promise<PipelineSumma
 		}
 	}
 
-	// 3. Return sorted by created_at desc
+	// Return sorted by created_at desc (newest first)
 	const chainRows = allRows
 		.filter((r) => chainIds.has(r.pipelineId))
 		.sort((a, b) => {

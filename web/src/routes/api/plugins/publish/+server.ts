@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db, schema } from '$lib/server/db.js';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 const { userPlugins } = schema;
 
@@ -68,41 +68,43 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'metadata.json must contain a "name" field' }, { status: 400 });
 		}
 
-		// 4. Upsert plugin (by name)
+		// 4. Always INSERT a new record (version tracking)
 		const name = metadata.name;
-		const existing = await db
-			.select({ pluginId: userPlugins.pluginId })
-			.from(userPlugins)
-			.where(eq(userPlugins.name, name))
-			.limit(1);
 
-		let pluginId: number;
-
-		const values = {
-			description: metadata.description || '',
-			category: metadata.category || '',
-			tags: metadata.tags || [],
-			githubUrl: github_url,
-			metadataJson: metadata,
-			author,
-			version: metadata.version || '1.0.0',
-			verified: false,
-			forkedFrom: typeof forked_from === 'number' ? forked_from : null
-		};
-
-		if (existing.length > 0) {
-			pluginId = existing[0].pluginId;
-			await db
-				.update(userPlugins)
-				.set({ ...values, updatedAt: new Date() })
-				.where(eq(userPlugins.pluginId, pluginId));
+		// Determine forked_from: explicit param > auto-detect same name > null
+		let resolvedForkedFrom: number | null = null;
+		if (typeof forked_from === 'number') {
+			resolvedForkedFrom = forked_from;
 		} else {
-			const [row] = await db
-				.insert(userPlugins)
-				.values({ name, ...values })
-				.returning({ pluginId: userPlugins.pluginId });
-			pluginId = row.pluginId;
+			// Auto-detect: if same name exists, link to the most recent one
+			const existing = await db
+				.select({ pluginId: userPlugins.pluginId })
+				.from(userPlugins)
+				.where(eq(userPlugins.name, name))
+				.orderBy(sql`${userPlugins.createdAt} DESC`)
+				.limit(1);
+			if (existing.length > 0) {
+				resolvedForkedFrom = existing[0].pluginId;
+			}
 		}
+
+		const [row] = await db
+			.insert(userPlugins)
+			.values({
+				name,
+				description: metadata.description || '',
+				category: metadata.category || '',
+				tags: metadata.tags || [],
+				githubUrl: github_url,
+				metadataJson: metadata,
+				author,
+				version: metadata.version || '1.0.0',
+				verified: false,
+				forkedFrom: resolvedForkedFrom
+			})
+			.returning({ pluginId: userPlugins.pluginId });
+
+		const pluginId = row.pluginId;
 
 		return json({ plugin_id: pluginId, name, author }, { status: 200 });
 	} catch (e: unknown) {

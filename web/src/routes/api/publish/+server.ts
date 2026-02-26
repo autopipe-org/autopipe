@@ -3,7 +3,7 @@ import type { RequestHandler } from './$types';
 import { validateSecurity, hasErrors } from '$lib/server/security.js';
 import { fetchGithubFiles } from '$lib/server/github.js';
 import { db, schema } from '$lib/server/db.js';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
 const { userPipelines } = schema;
 
@@ -65,45 +65,47 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'Security validation failed', issues }, { status: 422 });
 		}
 
-		// 6. Upsert pipeline (by name) — store URL + metadata only
+		// 6. Always INSERT a new record (version tracking)
 		const name = metadata.name;
-		const existing = await db
-			.select({ pipelineId: userPipelines.pipelineId })
-			.from(userPipelines)
-			.where(eq(userPipelines.name, name))
-			.limit(1);
 
-		let pipelineId: number;
-
-		const values = {
-			description: metadata.description || '',
-			tools: metadata.tools || [],
-			inputFormats: metadata.input_formats || [],
-			outputFormats: metadata.output_formats || [],
-			tags: metadata.tags || [],
-			githubUrl: github_url,
-			metadataJson: metadata,
-			author,
-			version: metadata.version || '1.0.0',
-			verified: false,
-			forkedFrom: typeof forked_from === 'number' ? forked_from : null
-		};
-
-		if (existing.length > 0) {
-			pipelineId = existing[0].pipelineId;
-			await db
-				.update(userPipelines)
-				.set({ ...values, updatedAt: new Date() })
-				.where(eq(userPipelines.pipelineId, pipelineId));
+		// Determine forked_from: explicit param > auto-detect same name > null
+		let resolvedForkedFrom: number | null = null;
+		if (typeof forked_from === 'number') {
+			resolvedForkedFrom = forked_from;
 		} else {
-			const [row] = await db
-				.insert(userPipelines)
-				.values({ name, ...values })
-				.returning({ pipelineId: userPipelines.pipelineId });
-			pipelineId = row.pipelineId;
+			// Auto-detect: if same name exists, link to the most recent one
+			const existing = await db
+				.select({ pipelineId: userPipelines.pipelineId })
+				.from(userPipelines)
+				.where(eq(userPipelines.name, name))
+				.orderBy(sql`${userPipelines.createdAt} DESC`)
+				.limit(1);
+			if (existing.length > 0) {
+				resolvedForkedFrom = existing[0].pipelineId;
+			}
 		}
 
-		const response: Record<string, unknown> = { pipeline_id: pipelineId, author };
+		const [row] = await db
+			.insert(userPipelines)
+			.values({
+				name,
+				description: metadata.description || '',
+				tools: metadata.tools || [],
+				inputFormats: metadata.input_formats || [],
+				outputFormats: metadata.output_formats || [],
+				tags: metadata.tags || [],
+				githubUrl: github_url,
+				metadataJson: metadata,
+				author,
+				version: metadata.version || '1.0.0',
+				verified: false,
+				forkedFrom: resolvedForkedFrom
+			})
+			.returning({ pipelineId: userPipelines.pipelineId });
+
+		const pipelineId = row.pipelineId;
+
+		const response: Record<string, unknown> = { pipeline_id: pipelineId, name, author };
 		if (issues.length > 0) {
 			response.warnings = issues;
 		}
