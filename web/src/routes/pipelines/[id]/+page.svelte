@@ -38,7 +38,7 @@
 <header>
 	<div class="header-top">
 		<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-		<span class="header-sub">Bioinformatics Snakemake Pipeline Registry</span>
+		<span class="header-sub">Bioinformatics Pipeline Registry</span>
 	</div>
 	<nav class="header-tabs">
 		<a href="/" class="header-tab active">Pipelines</a>
@@ -53,6 +53,9 @@
 				<div>
 					<h2>{p.name}</h2>
 					<p class="detail-desc">{p.description}</p>
+					{#if data.basedOn}
+						<p class="based-on">Based on: <a href="/pipelines/{data.basedOn.pipeline_id}">{data.basedOn.name} v{data.basedOn.version}</a> by {data.basedOn.author}</p>
+					{/if}
 				</div>
 				<div style="display:flex;gap:8px">
 					<a href={p.github_url} target="_blank" rel="noopener" class="btn" style="background:#24292e">GitHub</a>
@@ -88,14 +91,24 @@
 				</div>
 			</div>
 			<div class="detail-tags">
-				<span class="label">TOOLS</span>
-				{#each p.tools as tool}
-					<span class="tag tool">{tool}</span>
-				{/each}
-				<span class="label" style="margin-left:16px">TAGS</span>
-				{#each p.tags as tag}
-					<span class="tag">{tag}</span>
-				{/each}
+				<div class="tag-row">
+					<span class="label">TOOLS</span>
+					<div class="tag-list">
+						{#each p.tools as tool}
+							<span class="tag tool">{tool}</span>
+						{/each}
+						{#if p.tools.length === 0}<span class="tag-empty">—</span>{/if}
+					</div>
+				</div>
+				<div class="tag-row">
+					<span class="label">TAGS</span>
+					<div class="tag-list">
+						{#each p.tags as tag}
+							<span class="tag">{tag}</span>
+						{/each}
+						{#if p.tags.length === 0}<span class="tag-empty">—</span>{/if}
+					</div>
+				</div>
 			</div>
 			<div class="files-section">
 				<div class="tab-bar">
@@ -122,15 +135,26 @@
 			<div class="sidebar-title">VERSIONS</div>
 			<div class="version-timeline">
 				<div class="version-line"></div>
-				{#each displayedVersions as v (v.pipeline_id)}
-					<a href="/pipelines/{v.pipeline_id}" class="version-item">
-						<div class="version-dot" class:current={v.pipeline_id === p.pipeline_id}></div>
-						<div class="version-card" class:current={v.pipeline_id === p.pipeline_id}>
-							<span class="version-ver">v{v.version}</span>
-							{#if v.verified}<span class="version-badge">verified</span>{/if}
-							<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
+				{#each displayedVersions as v, i (v.pipeline_id)}
+					{#if i === 0}
+						<div class="version-item">
+							<div class="version-dot current"></div>
+							<div class="version-card current">
+								<span class="version-ver">v{v.version}</span>
+								<span class="version-badge">latest</span>
+								<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
+							</div>
 						</div>
-					</a>
+					{:else}
+						<a href="/pipelines/{v.pipeline_id}/download?tag={encodeURIComponent(v.name + '/v' + v.version)}" class="version-item">
+							<div class="version-dot"></div>
+							<div class="version-card">
+								<span class="version-ver">v{v.version}</span>
+								<span class="version-badge download">&darr;</span>
+								<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
+							</div>
+						</a>
+					{/if}
 				{/each}
 				{#if data.versionChain.length > 3 && !showAll}
 					<button class="version-more" onclick={() => showAll = true}>show more ({data.versionChain.length - 3} more)</button>

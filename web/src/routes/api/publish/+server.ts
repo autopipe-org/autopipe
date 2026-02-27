@@ -72,15 +72,27 @@ export const POST: RequestHandler = async ({ request }) => {
 		const resolvedForkedFrom: number | null =
 			typeof forked_from === 'number' ? forked_from : null;
 
-		// Name deduplication: if forked_from is NULL and same name exists, append suffix
-		if (resolvedForkedFrom === null) {
+		if (resolvedForkedFrom !== null) {
+			// forked_from specified → check original author
+			const [parent] = await db
+				.select({ author: userPipelines.author, name: userPipelines.name })
+				.from(userPipelines)
+				.where(eq(userPipelines.pipelineId, resolvedForkedFrom))
+				.limit(1);
+
+			if (parent && parent.author === author) {
+				// Same author → version upgrade: use the original pipeline's name
+				name = parent.name;
+			}
+			// Different author → fork: keep metadata.name as-is (user chooses freely)
+		} else {
+			// No forked_from → name deduplication if same name exists
 			const existing = await db
 				.select({ pipelineId: userPipelines.pipelineId })
 				.from(userPipelines)
 				.where(eq(userPipelines.name, name))
 				.limit(1);
 			if (existing.length > 0) {
-				// Find the next available suffix
 				let suffix = 2;
 				while (true) {
 					const candidate = `${metadata.name} ${suffix}`;

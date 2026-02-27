@@ -70,7 +70,7 @@
 				></span><span class="dot"></span>
 			</div>
 			<div class="splash-title">AutoPipe</div>
-			<div class="splash-sub">Bioinformatics Snakemake Pipeline Registry</div>
+			<div class="splash-sub">Bioinformatics Pipeline Registry</div>
 			<div class="splash-bar"><div class="splash-bar-fill"></div></div>
 			<div class="splash-loading">Loading pipelines...</div>
 		</div>
@@ -81,7 +81,7 @@
 	<header>
 		<div class="header-top">
 			<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-			<span class="header-sub">Bioinformatics Snakemake Pipeline Registry</span>
+			<span class="header-sub">Bioinformatics Pipeline Registry</span>
 		</div>
 		<nav class="header-tabs">
 			<a href="/" class="header-tab active">Pipelines</a>

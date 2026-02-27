@@ -45,10 +45,12 @@ async function fetchFile(
 	owner: string,
 	repo: string,
 	path: string,
-	filename: string
+	filename: string,
+	ref?: string
 ): Promise<string> {
 	const filePath = path ? `${path}/${filename}` : filename;
-	const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
+	let apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
+	if (ref) apiUrl += `?ref=${encodeURIComponent(ref)}`;
 
 	const resp = await fetch(apiUrl, {
 		headers: {
@@ -101,5 +103,31 @@ export async function fetchGithubFiles(githubUrl: string): Promise<GithubFiles> 
 	// Update cache
 	cache.set(githubUrl, { files, ts: Date.now() });
 
+	return files;
+}
+
+/** Fetch pipeline files at a specific git ref (tag or commit). */
+export async function fetchGithubFilesAtRef(
+	githubUrl: string,
+	ref: string
+): Promise<GithubFiles> {
+	const cacheKey = `${githubUrl}@${ref}`;
+	const cached = cache.get(cacheKey);
+	if (cached && Date.now() - cached.ts < CACHE_TTL) {
+		return cached.files;
+	}
+
+	const { owner, repo, path } = parseGithubUrl(githubUrl);
+
+	const [snakefile, dockerfile, config_yaml, metadata_json, readme] = await Promise.all([
+		fetchFile(owner, repo, path, 'Snakefile', ref),
+		fetchFile(owner, repo, path, 'Dockerfile', ref),
+		fetchFile(owner, repo, path, 'config.yaml', ref),
+		fetchFile(owner, repo, path, 'metadata.json', ref),
+		fetchFile(owner, repo, path, 'README.md', ref)
+	]);
+
+	const files: GithubFiles = { snakefile, dockerfile, config_yaml, metadata_json, readme };
+	cache.set(cacheKey, { files, ts: Date.now() });
 	return files;
 }

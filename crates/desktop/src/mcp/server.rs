@@ -420,14 +420,17 @@ impl AutoPipeServer {
 
     // ── Workspace info ─────────────────────────────────────────
 
-    #[tool(description = "Get the configured workspace paths on the remote SSH server. Call this first to understand where pipelines and outputs are stored.")]
+    #[tool(description = "Get the configured workspace paths on the remote SSH server. Call this first to understand where pipelines, plugins, and outputs are stored.")]
     async fn get_workspace_info(&self) -> Result<CallToolResult, ErrorData> {
         let info = format!(
             "Workspace Configuration:\n\
              - Base path (repo_path): {}\n\
              - Pipelines directory: {}\n\
+             - Plugins directory: {}\n\
              - Output directory: {}\n\
              - SSH: {}@{}:{}\n\n\
+             When creating pipelines, save files under the Pipelines directory.\n\
+             When creating plugins, save files under the Plugins directory.\n\
              When executing pipelines, outputs are automatically stored under the output directory.\n\
              To view result files, use list_files and read_file directly on the output path.\n\
              To link data, use create_symlink instead of copying files.",
@@ -437,6 +440,7 @@ impl AutoPipeServer {
                 &self.config.repo_path
             },
             self.config.full_pipelines_dir(),
+            self.config.full_plugins_dir(),
             self.config.full_output_dir(),
             self.config.ssh_user,
             self.config.ssh_host,
@@ -836,7 +840,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines with both the pipeline name and key tool names. Compare the content (tools, description, analysis type) of search results against the new pipeline. FORK TRACKING: If 50%+ of tools overlap AND the analysis type is the same as an existing pipeline, set forked_from to that pipeline_id (version upgrade). If the pipeline is new or different, omit forked_from. The server does NOT auto-detect forked_from. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines with both the pipeline name and key tool names. Compare the content (tools, description, analysis type) of search results against the new pipeline. VERSION UPGRADE: If a similar pipeline exists AND the author matches yours, ask the user: '기존 파이프라인 [name] v[version]의 버전업으로 등록할까요?'. If yes, set forked_from to that pipeline_id (same name will be kept by the server). If no, omit forked_from. FORK (Based on): If a similar pipeline exists but by a DIFFERENT author, inform the user: '레지스트리에 [author]님의 [name] v[version] 파이프라인과 유사합니다. Based on으로 등록하겠습니다.' and set forked_from to that pipeline_id. The user can choose any name freely. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -998,7 +1002,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins with both the plugin name and key identifiers. Compare the content (description, category, functionality) of search results against the new plugin. FORK TRACKING: If the plugin is a clear upgrade or variant of an existing plugin, set forked_from to that plugin_id. If the plugin is new or different, omit forked_from. The server does NOT auto-detect forked_from. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
+    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins with both the plugin name and key identifiers. Compare the content (description, category, functionality) of search results against the new plugin. VERSION UPGRADE: If a similar plugin exists AND the author matches yours, ask the user: '기존 플러그인 [name] v[version]의 버전업으로 등록할까요?'. If yes, set forked_from to that plugin_id. If no, omit forked_from. FORK (Based on): If a similar plugin exists but by a DIFFERENT author, inform the user and set forked_from. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
     async fn publish_plugin(
         &self,
         Parameters(params): Parameters<PublishPluginParams>,

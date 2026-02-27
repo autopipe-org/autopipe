@@ -1,20 +1,24 @@
 import type { RequestHandler } from './$types';
 import { error } from '@sveltejs/kit';
 import { getPipeline, deletePipeline } from '$lib/server/pipelines.js';
-import { fetchGithubFiles, GithubNotFoundError } from '$lib/server/github.js';
+import { fetchGithubFiles, fetchGithubFilesAtRef, GithubNotFoundError } from '$lib/server/github.js';
 import JSZip from 'jszip';
 
-export const GET: RequestHandler = async ({ params }) => {
+export const GET: RequestHandler = async ({ params, url }) => {
 	const id = parseInt(params.id);
 	if (isNaN(id)) throw error(400, 'Invalid pipeline ID');
 
 	const pipeline = await getPipeline(id);
 	if (!pipeline) throw error(404, 'Pipeline not found');
 
-	// Fetch files from GitHub
+	const tag = url.searchParams.get('tag'); // e.g., "pipeline-name/v1.0.0"
+
+	// Fetch files from GitHub (at specific tag if provided)
 	let files;
 	try {
-		files = await fetchGithubFiles(pipeline.github_url);
+		files = tag
+			? await fetchGithubFilesAtRef(pipeline.github_url, tag)
+			: await fetchGithubFiles(pipeline.github_url);
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
 			await deletePipeline(id);
@@ -42,10 +46,14 @@ export const GET: RequestHandler = async ({ params }) => {
 
 	const buf = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
 
+	const zipName = tag
+		? `${pipeline.name}-${tag.split('/').pop() || pipeline.version}.zip`
+		: `${pipeline.name}.zip`;
+
 	return new Response(buf, {
 		headers: {
 			'Content-Type': 'application/zip',
-			'Content-Disposition': `attachment; filename="${pipeline.name}.zip"`
+			'Content-Disposition': `attachment; filename="${zipName}"`
 		}
 	});
 };

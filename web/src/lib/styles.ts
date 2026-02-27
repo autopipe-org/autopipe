@@ -49,11 +49,18 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 .detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 24px; }
 .detail-header h2 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; }
 .detail-desc { color: #666; font-size: 14px; }
+.based-on { font-size: 13px; color: #888; margin-top: 6px; }
+.based-on a { color: #0366d6; text-decoration: none; }
+.based-on a:hover { text-decoration: underline; }
 .detail-info { display: flex; gap: 48px; padding: 20px 0; border-top: 1px solid #eee; border-bottom: 1px solid #eee; margin-bottom: 16px; }
 .detail-info-item { display: flex; flex-direction: column; gap: 4px; }
 .label { font-size: 11px; font-weight: 600; color: #999; letter-spacing: 0.04em; }
 .value { font-size: 14px; color: #111; }
-.detail-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 16px 0; margin-bottom: 24px; }
+.detail-tags { display: flex; flex-direction: column; gap: 12px; padding: 16px 0; margin-bottom: 24px; }
+.tag-row { display: flex; align-items: baseline; gap: 12px; }
+.tag-row .label { min-width: 48px; flex-shrink: 0; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-empty { font-size: 13px; color: #ccc; }
 .btn { display: inline-block; padding: 9px 22px; background: #111; color: #fff; text-decoration: none; border-radius: 8px; font-size: 13px; font-weight: 500; transition: background 0.2s; white-space: nowrap; }
 .btn:hover { background: #333; }
 
@@ -99,6 +106,7 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 .version-card.current { background: #f8f8f8; border-color: #eee; }
 .version-ver { font-family: 'SF Mono', 'Consolas', monospace; font-size: 15px; font-weight: 600; color: #111; }
 .version-badge { display: inline-block; font-size: 10px; color: #999; border: 1px solid #ddd; border-radius: 100px; padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
+.version-badge.download { color: #0366d6; border-color: #0366d6; cursor: pointer; }
 .version-meta { font-size: 12px; color: #999; margin-top: 4px; }
 .version-desc { font-size: 13px; color: #888; margin-top: 6px; line-height: 1.4; }
 .version-more { font-size: 13px; color: #888; cursor: pointer; background: none; border: none; padding: 8px 0; margin-top: 8px; }

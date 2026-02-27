@@ -46,7 +46,7 @@
 <header>
 	<div class="header-top">
 		<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-		<span class="header-sub">Bioinformatics Snakemake Pipeline Registry</span>
+		<span class="header-sub">Bioinformatics Pipeline Registry</span>
 	</div>
 	<nav class="header-tabs">
 		<a href="/" class="header-tab">Pipelines</a>

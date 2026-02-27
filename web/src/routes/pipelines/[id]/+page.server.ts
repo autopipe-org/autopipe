@@ -12,16 +12,43 @@ export const load: PageServerLoad = async ({ params }) => {
 
 	const versionChain = await getVersionChain(id);
 
+	// Always show the latest version's code
+	const latest = versionChain.length > 0 ? versionChain[0] : null;
+	const codeSource =
+		latest && latest.pipeline_id !== pipeline.pipeline_id
+			? await getPipeline(latest.pipeline_id)
+			: pipeline;
+	const githubUrl = (codeSource ?? pipeline).github_url;
+
 	// Fetch files from GitHub
+	let files;
 	try {
-		const files = await fetchGithubFiles(pipeline.github_url);
-		return { pipeline, files, versionChain };
+		files = await fetchGithubFiles(githubUrl);
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
-			// GitHub link broken — auto-delete from DB
 			await deletePipeline(id);
 			throw redirect(302, '/?deleted=' + encodeURIComponent(pipeline.name));
 		}
 		throw error(502, `Failed to fetch from GitHub: ${e instanceof Error ? e.message : String(e)}`);
 	}
+
+	// basedOn info: when forked_from exists and the original author differs
+	let basedOn: { pipeline_id: number; name: string; version: string; author: string } | null =
+		null;
+	if (pipeline.forked_from) {
+		const parent = await getPipeline(pipeline.forked_from);
+		if (parent && parent.author !== pipeline.author) {
+			// Find the latest version of the original pipeline (for navigation)
+			const parentChain = await getVersionChain(pipeline.forked_from);
+			const latestParent = parentChain.length > 0 ? parentChain[0] : null;
+			basedOn = {
+				pipeline_id: latestParent?.pipeline_id ?? parent.pipeline_id!,
+				name: parent.name,
+				version: parent.version,
+				author: parent.author
+			};
+		}
+	}
+
+	return { pipeline, files, versionChain, basedOn };
 };
