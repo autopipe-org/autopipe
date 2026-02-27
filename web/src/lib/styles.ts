@@ -44,7 +44,8 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 .empty { text-align: center; color: #999; padding: 60px 20px; font-size: 14px; background: #fff; }
 
 /* Detail page */
-.back-link { display: inline-block; font-size: 13px; color: #888; text-decoration: none; margin-bottom: 24px; }
+.back-link-wrap { margin-bottom: 24px; }
+.back-link { font-size: 13px; color: #888; text-decoration: none; }
 .back-link:hover { color: #111; }
 .detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 24px; }
 .detail-header h2 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 8px; }
@@ -106,11 +107,15 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 .version-card.current { background: #f8f8f8; border-color: #eee; }
 .version-ver { font-family: 'SF Mono', 'Consolas', monospace; font-size: 15px; font-weight: 600; color: #111; }
 .version-badge { display: inline-block; font-size: 10px; color: #999; border: 1px solid #ddd; border-radius: 100px; padding: 1px 8px; margin-left: 8px; vertical-align: middle; }
-.version-badge.download { color: #0366d6; border-color: #0366d6; cursor: pointer; }
+.version-badge.download { color: #888; border-color: #ccc; cursor: pointer; }
 .version-meta { font-size: 12px; color: #999; margin-top: 4px; }
 .version-desc { font-size: 13px; color: #888; margin-top: 6px; line-height: 1.4; }
 .version-more { font-size: 13px; color: #888; cursor: pointer; background: none; border: none; padding: 8px 0; margin-top: 8px; }
 .version-more:hover { color: #111; }
+
+/* Plugin guide banner */
+.plugin-guide { background: #f6f8fa; border: 1px solid #e5e5e5; border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
+.plugin-guide p { font-size: 13px; color: #555; line-height: 1.6; margin: 0; }
 
 /* General */
 a { color: #111; }

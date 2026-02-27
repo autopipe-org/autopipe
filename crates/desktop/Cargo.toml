@@ -1,5 +1,5 @@
 [package]
-name = "desktop"
+name = "autopipe"
 version.workspace = true
 edition.workspace = true
 

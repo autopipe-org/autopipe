@@ -1,6 +1,4 @@
 <script lang="ts">
-	import { CSS } from '$lib/styles.js';
-
 	let { data } = $props();
 
 	let searchValue = $state(data.q);
@@ -40,20 +38,12 @@
 
 <svelte:head>
 	<title>Plugins - AutoPipe</title>
-	{@html `<style>${CSS}</style>`}
 </svelte:head>
 
-<header>
-	<div class="header-top">
-		<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-		<span class="header-sub">Bioinformatics Pipeline Registry</span>
-	</div>
-	<nav class="header-tabs">
-		<a href="/" class="header-tab">Pipelines</a>
-		<a href="/plugins" class="header-tab active">Plugins</a>
-	</nav>
-</header>
 <main>
+	<div class="plugin-guide">
+		<p>Plugins extend AutoPipe with reusable tools for data visualization, file conversion, and analysis. Create and run plugins directly from any MCP-compatible app.</p>
+	</div>
 	<div class="section">
 		<h3 class="section-title">Search Plugins</h3>
 		<div class="search">

@@ -1,6 +1,4 @@
 <script lang="ts">
-	import { CSS } from '$lib/styles.js';
-
 	let { data } = $props();
 	const p = data.pipeline;
 	const f = data.files;
@@ -32,21 +30,10 @@
 
 <svelte:head>
 	<title>{p.name} - AutoPipe</title>
-	{@html `<style>${CSS}</style>`}
 </svelte:head>
 
-<header>
-	<div class="header-top">
-		<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-		<span class="header-sub">Bioinformatics Pipeline Registry</span>
-	</div>
-	<nav class="header-tabs">
-		<a href="/" class="header-tab active">Pipelines</a>
-		<a href="/plugins" class="header-tab">Plugins</a>
-	</nav>
-</header>
 <main>
-	<a href="/" class="back-link">&larr; Back to list</a>
+	<div class="back-link-wrap"><a href="/" class="back-link">&larr; Back to list</a></div>
 	<div class="detail-layout">
 		<div class="detail-main">
 			<div class="detail-header">
@@ -150,7 +137,7 @@
 							<div class="version-dot"></div>
 							<div class="version-card">
 								<span class="version-ver">v{v.version}</span>
-								<span class="version-badge download">&darr;</span>
+								<span class="version-badge download">Download ZIP</span>
 								<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
 							</div>
 						</a>

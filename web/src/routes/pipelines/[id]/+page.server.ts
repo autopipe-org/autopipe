@@ -40,7 +40,9 @@ export const load: PageServerLoad = async ({ params }) => {
 		if (parent && parent.author !== pipeline.author) {
 			// Find the latest version of the original pipeline (for navigation)
 			const parentChain = await getVersionChain(pipeline.forked_from);
-			const latestParent = parentChain.length > 0 ? parentChain[0] : null;
+			// Filter to same-name versions only (exclude forks with different names)
+			const parentVersions = parentChain.filter(v => v.name === parent.name);
+			const latestParent = parentVersions.length > 0 ? parentVersions[0] : null;
 			basedOn = {
 				pipeline_id: latestParent?.pipeline_id ?? parent.pipeline_id!,
 				name: parent.name,

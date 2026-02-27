@@ -1,6 +1,4 @@
 <script lang="ts">
-	import { CSS } from '$lib/styles.js';
-
 	let { data } = $props();
 	const p = data.plugin;
 
@@ -17,21 +15,10 @@
 
 <svelte:head>
 	<title>{p.name} - Plugins - AutoPipe</title>
-	{@html `<style>${CSS}</style>`}
 </svelte:head>
 
-<header>
-	<div class="header-top">
-		<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-		<span class="header-sub">Bioinformatics Pipeline Registry</span>
-	</div>
-	<nav class="header-tabs">
-		<a href="/" class="header-tab">Pipelines</a>
-		<a href="/plugins" class="header-tab active">Plugins</a>
-	</nav>
-</header>
 <main>
-	<a href="/plugins" class="back-link">&larr; Back to plugins</a>
+	<div class="back-link-wrap"><a href="/plugins" class="back-link">&larr; Back to list</a></div>
 	<div class="detail-layout">
 		<div class="detail-main">
 			<div class="detail-header">
@@ -58,13 +45,15 @@
 				</div>
 			</div>
 			<div class="detail-tags">
-				<span class="label">TAGS</span>
-				{#each p.tags as tag}
-					<span class="tag">{tag}</span>
-				{/each}
-				{#if p.tags.length === 0}
-					<span style="color:#888">—</span>
-				{/if}
+				<div class="tag-row">
+					<span class="label">TAGS</span>
+					<div class="tag-list">
+						{#each p.tags as tag}
+							<span class="tag">{tag}</span>
+						{/each}
+						{#if p.tags.length === 0}<span class="tag-empty">—</span>{/if}
+					</div>
+				</div>
 			</div>
 			<div class="files-section">
 				<div class="tab-bar">

@@ -23,6 +23,18 @@ interface ParsedUrl {
 const cache = new Map<string, { files: GithubFiles; ts: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
+
+function githubHeaders(): Record<string, string> {
+	const h: Record<string, string> = {
+		'User-Agent': 'autopipe-registry'
+	};
+	if (GITHUB_TOKEN) {
+		h['Authorization'] = `Bearer ${GITHUB_TOKEN}`;
+	}
+	return h;
+}
+
 export function parseGithubUrl(url: string): ParsedUrl {
 	// Formats:
 	// https://github.com/{owner}/{repo}/tree/{branch}/{path}
@@ -54,8 +66,8 @@ async function fetchFile(
 
 	const resp = await fetch(apiUrl, {
 		headers: {
-			Accept: 'application/vnd.github.raw',
-			'User-Agent': 'autopipe-registry'
+			...githubHeaders(),
+			Accept: 'application/vnd.github.raw'
 		}
 	});
 
@@ -83,7 +95,7 @@ export async function fetchGithubFiles(githubUrl: string): Promise<GithubFiles> 
 		? `https://api.github.com/repos/${owner}/${repo}/contents/${path}`
 		: `https://api.github.com/repos/${owner}/${repo}`;
 	const checkResp = await fetch(checkPath, {
-		headers: { 'User-Agent': 'autopipe-registry' }
+		headers: githubHeaders()
 	});
 
 	if (checkResp.status === 404) {

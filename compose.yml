@@ -13,3 +13,4 @@ services:
       POSTGRES_USER: autopipe
       POSTGRES_PASSWORD: autopipe123
       GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"

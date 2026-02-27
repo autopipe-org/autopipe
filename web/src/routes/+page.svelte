@@ -1,16 +1,8 @@
 <script lang="ts">
-	import { CSS } from '$lib/styles.js';
-	import { onMount } from 'svelte';
-
 	let { data } = $props();
 
 	let searchValue = $state(data.q);
 	let currentPage = $state(1);
-
-	const alreadyVisited = typeof sessionStorage !== 'undefined' && sessionStorage.getItem('autopipe_visited') === '1';
-	let splashVisible = $state(!alreadyVisited);
-	let splashFading = $state(false);
-	let appVisible = $state(alreadyVisited);
 
 	const PAGE_SIZE = 10;
 
@@ -42,110 +34,69 @@
 		currentPage = page;
 		document.getElementById('list-title')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 	}
-
-	onMount(() => {
-		if (alreadyVisited) return;
-		sessionStorage.setItem('autopipe_visited', '1');
-		setTimeout(() => {
-			splashFading = true;
-			setTimeout(() => {
-				splashVisible = false;
-				appVisible = true;
-			}, 500);
-		}, 1200);
-	});
 </script>
 
 <svelte:head>
 	<title>AutoPipe</title>
-	{@html `<style>${CSS}</style>`}
 </svelte:head>
 
-{#if splashVisible}
-	<div class="splash" class:splash-fade={splashFading}>
-		<div class="splash-inner">
-			<div class="splash-icon">
-				<span class="dot"></span><span class="line"></span><span class="dot"></span><span
-					class="line"
-				></span><span class="dot"></span>
-			</div>
-			<div class="splash-title">AutoPipe</div>
-			<div class="splash-sub">Bioinformatics Pipeline Registry</div>
-			<div class="splash-bar"><div class="splash-bar-fill"></div></div>
-			<div class="splash-loading">Loading pipelines...</div>
+<main>
+	<div class="section">
+		<h3 class="section-title">Search Pipelines</h3>
+		<div class="search">
+			<input
+				type="text"
+				placeholder="Search by name, tool, or tag..."
+				value={searchValue}
+				oninput={onSearchInput}
+				autocomplete="off"
+			/>
 		</div>
 	</div>
-{/if}
-
-<div class:app-hidden={!appVisible}>
-	<header>
-		<div class="header-top">
-			<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-			<span class="header-sub">Bioinformatics Pipeline Registry</span>
+	<div class="section">
+		<h3 class="section-title" id="list-title">
+			{searchValue ? 'Search Results' : 'All Pipelines'}
+			<span class="section-count">({filteredPipelines().length})</span>
+		</h3>
+		<div class="grid">
+			{#each paginatedPipelines() as p (p.pipeline_id)}
+				<a href="/pipelines/{p.pipeline_id}" class="card">
+					<div class="card-title">
+						{p.name}
+						<span class="card-version">v{p.version}</span>
+					</div>
+					<div class="card-desc">{p.description}</div>
+					<div class="card-tags">
+						{#each p.tools as tool}
+							<span class="tag tool">{tool}</span>
+						{/each}
+						{#each p.tags as tag}
+							<span class="tag">{tag}</span>
+						{/each}
+					</div>
+				</a>
+			{:else}
+				<p class="empty">No pipelines found.</p>
+			{/each}
 		</div>
-		<nav class="header-tabs">
-			<a href="/" class="header-tab active">Pipelines</a>
-			<a href="/plugins" class="header-tab">Plugins</a>
-		</nav>
-	</header>
-	<main>
-		<div class="section">
-			<h3 class="section-title">Search Pipelines</h3>
-			<div class="search">
-				<input
-					type="text"
-					placeholder="Search by name, tool, or tag..."
-					value={searchValue}
-					oninput={onSearchInput}
-					autocomplete="off"
-				/>
-			</div>
-		</div>
-		<div class="section">
-			<h3 class="section-title" id="list-title">
-				{searchValue ? 'Search Results' : 'All Pipelines'}
-				<span class="section-count">({filteredPipelines().length})</span>
-			</h3>
-			<div class="grid">
-				{#each paginatedPipelines() as p (p.pipeline_id)}
-					<a href="/pipelines/{p.pipeline_id}" class="card">
-						<div class="card-title">
-							{p.name}
-							<span class="card-version">v{p.version}</span>
-						</div>
-						<div class="card-desc">{p.description}</div>
-						<div class="card-tags">
-							{#each p.tools as tool}
-								<span class="tag tool">{tool}</span>
-							{/each}
-							{#each p.tags as tag}
-								<span class="tag">{tag}</span>
-							{/each}
-						</div>
-					</a>
-				{:else}
-					<p class="empty">No pipelines found.</p>
+		{#if totalPages > 1}
+			<div class="pagination">
+				{#if currentPage > 1}
+					<button class="page-btn" onclick={() => goToPage(currentPage - 1)}>&laquo;</button>
+				{/if}
+				{#each Array.from({ length: totalPages }, (_, i) => i + 1) as page}
+					<button
+						class="page-btn"
+						class:active={page === currentPage}
+						onclick={() => goToPage(page)}
+					>
+						{page}
+					</button>
 				{/each}
+				{#if currentPage < totalPages}
+					<button class="page-btn" onclick={() => goToPage(currentPage + 1)}>&raquo;</button>
+				{/if}
 			</div>
-			{#if totalPages > 1}
-				<div class="pagination">
-					{#if currentPage > 1}
-						<button class="page-btn" onclick={() => goToPage(currentPage - 1)}>&laquo;</button>
-					{/if}
-					{#each Array.from({ length: totalPages }, (_, i) => i + 1) as page}
-						<button
-							class="page-btn"
-							class:active={page === currentPage}
-							onclick={() => goToPage(page)}
-						>
-							{page}
-						</button>
-					{/each}
-					{#if currentPage < totalPages}
-						<button class="page-btn" onclick={() => goToPage(currentPage + 1)}>&raquo;</button>
-					{/if}
-				</div>
-			{/if}
-		</div>
-	</main>
-</div>
+		{/if}
+	</div>
+</main>
