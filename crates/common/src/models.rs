@@ -18,8 +18,6 @@ pub struct Pipeline {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<i32>,
-    #[serde(default)]
-    pub run_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -42,8 +40,6 @@ pub struct PipelineSummary {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<i32>,
-    #[serde(default)]
-    pub run_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
@@ -86,8 +82,6 @@ pub struct Plugin {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<i32>,
-    #[serde(default)]
-    pub run_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,8 +103,6 @@ pub struct PluginSummary {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<i32>,
-    #[serde(default)]
-    pub run_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }

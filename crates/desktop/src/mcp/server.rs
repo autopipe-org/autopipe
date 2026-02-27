@@ -116,6 +116,14 @@ struct ViewImageParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct DownloadResultsParams {
+    /// Remote file or directory path to download from the SSH server
+    remote_path: String,
+    /// Local directory to save the downloaded file(s). Ask the user for this path before calling.
+    local_dir: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct UploadWorkflowParams {
     /// Remote path to the pipeline directory on the SSH server
     pipeline_dir: String,
@@ -807,7 +815,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines. VERSION TRACKING: Each publish creates a new version entry. If the same name already exists, it is automatically linked as a new version. FORK TRACKING: If this pipeline is based on or similar to an existing registry pipeline, set forked_from to that pipeline_id to link them. If created from scratch with a new name, omit forked_from.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. The pipeline must be uploaded to GitHub first (via upload_workflow). This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines with both the pipeline name and key tool names. Compare the content (tools, description, analysis type) of search results against the new pipeline. FORK TRACKING: If 50%+ of tools overlap AND the analysis type is the same as an existing pipeline, set forked_from to that pipeline_id (version upgrade). If the pipeline is new or different, omit forked_from. The server does NOT auto-detect forked_from. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -969,7 +977,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins. VERSION TRACKING: Each publish creates a new version entry. If the same name already exists, it is automatically linked as a new version. FORK TRACKING: If this plugin is based on or similar to an existing registry plugin, set forked_from to that plugin_id to link them. If created from scratch with a new name, omit forked_from.")]
+    #[tool(description = "Publish a plugin from GitHub to the AutoPipe registry. The plugin repository must contain a metadata.json file with name, description, category, and tags. IMPORTANT: Before publishing, ALWAYS search the registry first using search_plugins with both the plugin name and key identifiers. Compare the content (description, category, functionality) of search results against the new plugin. FORK TRACKING: If the plugin is a clear upgrade or variant of an existing plugin, set forked_from to that plugin_id. If the plugin is new or different, omit forked_from. The server does NOT auto-detect forked_from. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
     async fn publish_plugin(
         &self,
         Parameters(params): Parameters<PublishPluginParams>,
@@ -1073,7 +1081,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask. NOTE: If the pipeline was downloaded from the registry, call the registry API POST /api/pipelines/{pipeline_id}/run to increment the run count after successful execution.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1226,7 +1234,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Read the contents of a file on the remote SSH server. Use this to view result files directly from the output directory.")]
+    #[tool(description = "Read the contents of a file on the remote SSH server. Use this to view result files directly from the output directory. IMPORTANT: After showing the file contents to the user, ALWAYS ask '이 파일을 로컬에 저장할까요?' (Do you want to save this file locally?). If the user says yes, use the download_results tool to download it.")]
     async fn read_file(
         &self,
         Parameters(params): Parameters<ReadFileParams>,
@@ -1237,6 +1245,106 @@ impl AutoPipeServer {
                 "Cannot read '{}': {}",
                 params.path, e
             ))])),
+        }
+    }
+
+    #[tool(description = "Download file(s) from the remote SSH server to the user's local machine via SCP. Use this when the user wants to save result files locally. Before calling, ask the user which local directory to save to. Supports single files and directories.")]
+    async fn download_results(
+        &self,
+        Parameters(params): Parameters<DownloadResultsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let remote_path = params.remote_path.clone();
+        let local_dir = params.local_dir.clone();
+
+        // Ensure local directory exists
+        if let Err(e) = std::fs::create_dir_all(&local_dir) {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Cannot create local directory '{}': {}",
+                local_dir, e
+            ))]));
+        }
+
+        // Check if remote path is a directory or file
+        let is_dir = match self.ssh_run(&format!("test -d '{}' && echo DIR || echo FILE", remote_path)).await {
+            Ok((output, 0)) => output.trim() == "DIR",
+            _ => false,
+        };
+
+        if is_dir {
+            // List files in the remote directory
+            let files = match self.ssh_run(&format!("find '{}' -maxdepth 1 -type f -printf '%f\\n'", remote_path)).await {
+                Ok((output, 0)) => output.trim().to_string(),
+                Ok((output, _)) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot list directory '{}': {}", remote_path, output.trim()
+                ))])),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
+
+            if files.is_empty() {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "No files found in '{}'", remote_path
+                ))]));
+            }
+
+            let file_list: Vec<&str> = files.lines().collect();
+            let mut downloaded = Vec::new();
+            let mut errors = Vec::new();
+
+            for file_name in &file_list {
+                let remote_file = format!("{}/{}", remote_path.trim_end_matches('/'), file_name);
+                let local_file = format!("{}/{}", local_dir.trim_end_matches('/'), file_name);
+
+                let config = self.config.clone();
+                let rf = remote_file.clone();
+                match tokio::task::spawn_blocking(move || ssh::scp_download(&config, &rf)).await {
+                    Ok(Ok(bytes)) => {
+                        match std::fs::write(&local_file, &bytes) {
+                            Ok(()) => downloaded.push(format!("  {} ({} bytes)", file_name, bytes.len())),
+                            Err(e) => errors.push(format!("  {}: write error: {}", file_name, e)),
+                        }
+                    }
+                    Ok(Err(e)) => errors.push(format!("  {}: {}", file_name, e)),
+                    Err(e) => errors.push(format!("  {}: task error: {}", file_name, e)),
+                }
+            }
+
+            let mut msg = format!("Downloaded to: {}\n\n", local_dir);
+            if !downloaded.is_empty() {
+                msg.push_str(&format!("✓ {} file(s) saved:\n{}\n", downloaded.len(), downloaded.join("\n")));
+            }
+            if !errors.is_empty() {
+                msg.push_str(&format!("\n✗ {} error(s):\n{}", errors.len(), errors.join("\n")));
+            }
+            Ok(CallToolResult::success(vec![Content::text(msg)]))
+        } else {
+            // Single file download
+            let file_name = std::path::Path::new(&remote_path)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "downloaded_file".to_string());
+            let local_file = format!("{}/{}", local_dir.trim_end_matches('/'), file_name);
+
+            let config = self.config.clone();
+            let rp = remote_path.clone();
+            match tokio::task::spawn_blocking(move || ssh::scp_download(&config, &rp)).await {
+                Ok(Ok(bytes)) => {
+                    match std::fs::write(&local_file, &bytes) {
+                        Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                            "Downloaded to: {}\n✓ {} ({} bytes)",
+                            local_file, file_name, bytes.len()
+                        ))])),
+                        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Cannot write local file '{}': {}", local_file, e
+                        ))])),
+                    }
+                }
+                Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SCP download failed for '{}': {}", remote_path, e
+                ))])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Task error: {}", e
+                ))])),
+            }
         }
     }
 
@@ -1762,12 +1870,6 @@ PYEOF"#,
 
         let run_output = self.ssh_run(&docker_cmd).await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        // 5. Increment run count (best-effort, ignore errors)
-        let _ = reqwest::Client::new()
-            .post(format!("{}/api/plugins/{}/run", base, plugin.plugin_id.unwrap_or(0)))
-            .send()
-            .await;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Plugin '{}' executed successfully.\n\nOutput:\n{}", plugin_name, run_output.0

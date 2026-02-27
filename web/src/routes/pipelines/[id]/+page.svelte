@@ -86,10 +86,6 @@
 						{#if p.output_formats.length === 0}—{/if}
 					</span>
 				</div>
-				<div class="detail-info-item">
-					<span class="label">RUNS</span>
-					<span class="value">{p.run_count ?? 0}</span>
-				</div>
 			</div>
 			<div class="detail-tags">
 				<span class="label">TOOLS</span>

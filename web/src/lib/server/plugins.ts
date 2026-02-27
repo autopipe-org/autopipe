@@ -14,7 +14,6 @@ export interface PluginSummary {
 	version: string;
 	verified: boolean;
 	forked_from: number | null;
-	run_count: number;
 	created_at: string | null;
 }
 
@@ -30,7 +29,6 @@ export interface Plugin {
 	version: string;
 	verified: boolean;
 	forked_from?: number | null;
-	run_count?: number;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -47,7 +45,6 @@ function rowToSummary(r: typeof userPlugins.$inferSelect): PluginSummary {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
-		run_count: r.runCount ?? 0,
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -65,7 +62,6 @@ function rowToPlugin(r: typeof userPlugins.$inferSelect): Plugin {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
-		run_count: r.runCount ?? 0,
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};
@@ -73,12 +69,19 @@ function rowToPlugin(r: typeof userPlugins.$inferSelect): Plugin {
 
 /** List plugins — only the latest version per name */
 export async function listPlugins(): Promise<PluginSummary[]> {
-	const rows = await db.execute(sql`
-		SELECT DISTINCT ON (name) *
-		FROM user_plugins
-		ORDER BY name, created_at DESC
-	`);
-	return (rows.rows as (typeof userPlugins.$inferSelect)[]).map(rowToSummary);
+	const allRows = await db
+		.select()
+		.from(userPlugins)
+		.orderBy(sql`${userPlugins.createdAt} DESC`);
+
+	// Deduplicate: keep only the latest per name
+	const seen = new Set<string>();
+	const deduped = allRows.filter((r) => {
+		if (seen.has(r.name)) return false;
+		seen.add(r.name);
+		return true;
+	});
+	return deduped.map(rowToSummary);
 }
 
 /** Search plugins — only the latest version per name */
@@ -135,6 +138,7 @@ export async function insertPlugin(p: Plugin): Promise<number> {
 	return row.pluginId;
 }
 
+/** Update mutable fields only. name/version are immutable — change via new publish. */
 export async function updatePlugin(id: number, p: Plugin): Promise<boolean> {
 	const result = await db
 		.update(userPlugins)
@@ -145,7 +149,6 @@ export async function updatePlugin(id: number, p: Plugin): Promise<boolean> {
 			githubUrl: p.github_url,
 			metadataJson: p.metadata_json,
 			author: p.author,
-			version: p.version,
 			verified: p.verified,
 			updatedAt: new Date()
 		})
@@ -173,13 +176,6 @@ export async function getPluginByName(name: string): Promise<Plugin | null> {
 	return rowToPlugin(rows[0]);
 }
 
-export async function incrementRunCount(pluginId: number): Promise<void> {
-	await db
-		.update(userPlugins)
-		.set({ runCount: sql`${userPlugins.runCount} + 1` })
-		.where(eq(userPlugins.pluginId, pluginId));
-}
-
 /** Get all versions related to this plugin: same name + forked_from chain */
 export async function getVersionChain(pluginId: number): Promise<PluginSummary[]> {
 	const allRows = await db.select().from(userPlugins);
@@ -197,20 +193,15 @@ export async function getVersionChain(pluginId: number): Promise<PluginSummary[]
 		}
 	}
 
-	// 2. Walk up forked_from chain (covers cross-name forks)
+	// 2. Walk up forked_from chain with cycle detection
+	const visited = new Set<number>();
 	let walkId: number | null = pluginId;
-	while (walkId !== null) {
-		if (chainIds.has(walkId)) {
-			const row = byId.get(walkId);
-			if (!row || row.forkedFrom === null) break;
-			walkId = row.forkedFrom;
-			chainIds.add(walkId);
-		} else {
-			chainIds.add(walkId);
-			const row = byId.get(walkId);
-			if (!row) break;
-			walkId = row.forkedFrom;
-		}
+	while (walkId !== null && !visited.has(walkId)) {
+		visited.add(walkId);
+		chainIds.add(walkId);
+		const row = byId.get(walkId);
+		if (!row || row.forkedFrom === null) break;
+		walkId = row.forkedFrom;
 	}
 
 	// 3. Walk down: find children of any chain member

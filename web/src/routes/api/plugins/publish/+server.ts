@@ -69,22 +69,34 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 
 		// 4. Always INSERT a new record (version tracking)
-		const name = metadata.name;
+		let name: string = metadata.name;
 
-		// Determine forked_from: explicit param > auto-detect same name > null
-		let resolvedForkedFrom: number | null = null;
-		if (typeof forked_from === 'number') {
-			resolvedForkedFrom = forked_from;
-		} else {
-			// Auto-detect: if same name exists, link to the most recent one
+		// forked_from: trust the value Claude sends (no auto-detection)
+		const resolvedForkedFrom: number | null =
+			typeof forked_from === 'number' ? forked_from : null;
+
+		// Name deduplication: if forked_from is NULL and same name exists, append suffix
+		if (resolvedForkedFrom === null) {
 			const existing = await db
 				.select({ pluginId: userPlugins.pluginId })
 				.from(userPlugins)
 				.where(eq(userPlugins.name, name))
-				.orderBy(sql`${userPlugins.createdAt} DESC`)
 				.limit(1);
 			if (existing.length > 0) {
-				resolvedForkedFrom = existing[0].pluginId;
+				let suffix = 2;
+				while (true) {
+					const candidate = `${metadata.name} ${suffix}`;
+					const dup = await db
+						.select({ pluginId: userPlugins.pluginId })
+						.from(userPlugins)
+						.where(eq(userPlugins.name, candidate))
+						.limit(1);
+					if (dup.length === 0) {
+						name = candidate;
+						break;
+					}
+					suffix++;
+				}
 			}
 		}
 
@@ -105,6 +117,14 @@ export const POST: RequestHandler = async ({ request }) => {
 			.returning({ pluginId: userPlugins.pluginId });
 
 		const pluginId = row.pluginId;
+
+		// Self-reference guard: should never happen, but ensure forked_from != self
+		if (resolvedForkedFrom === pluginId) {
+			await db
+				.update(userPlugins)
+				.set({ forkedFrom: null })
+				.where(eq(userPlugins.pluginId, pluginId));
+		}
 
 		return json({ plugin_id: pluginId, name, author }, { status: 200 });
 	} catch (e: unknown) {

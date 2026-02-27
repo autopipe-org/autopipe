@@ -16,7 +16,6 @@ export interface PipelineSummary {
 	version: string;
 	verified: boolean;
 	forked_from: number | null;
-	run_count: number;
 	created_at: string | null;
 }
 
@@ -34,7 +33,6 @@ export interface Pipeline {
 	version: string;
 	verified: boolean;
 	forked_from?: number | null;
-	run_count?: number;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -53,7 +51,6 @@ function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
-		run_count: r.runCount ?? 0,
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -73,7 +70,6 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
-		run_count: r.runCount ?? 0,
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};
@@ -81,12 +77,19 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 
 /** List pipelines — only the latest version per name */
 export async function listPipelines(): Promise<PipelineSummary[]> {
-	const rows = await db.execute(sql`
-		SELECT DISTINCT ON (name) *
-		FROM user_pipelines
-		ORDER BY name, created_at DESC
-	`);
-	return (rows.rows as (typeof userPipelines.$inferSelect)[]).map(rowToSummary);
+	const allRows = await db
+		.select()
+		.from(userPipelines)
+		.orderBy(sql`${userPipelines.createdAt} DESC`);
+
+	// Deduplicate: keep only the latest per name
+	const seen = new Set<string>();
+	const deduped = allRows.filter((r) => {
+		if (seen.has(r.name)) return false;
+		seen.add(r.name);
+		return true;
+	});
+	return deduped.map(rowToSummary);
 }
 
 /** Search pipelines — only the latest version per name */
@@ -146,6 +149,7 @@ export async function insertPipeline(p: Pipeline): Promise<number> {
 	return row.pipelineId;
 }
 
+/** Update mutable fields only. name/version are immutable — change via new publish. */
 export async function updatePipeline(id: number, p: Pipeline): Promise<boolean> {
 	const result = await db
 		.update(userPipelines)
@@ -158,7 +162,6 @@ export async function updatePipeline(id: number, p: Pipeline): Promise<boolean> 
 			githubUrl: p.github_url,
 			metadataJson: p.metadata_json,
 			author: p.author,
-			version: p.version,
 			verified: p.verified,
 			updatedAt: new Date()
 		})
@@ -173,13 +176,6 @@ export async function deletePipeline(id: number): Promise<boolean> {
 		.where(eq(userPipelines.pipelineId, id))
 		.returning({ pipelineId: userPipelines.pipelineId });
 	return result.length > 0;
-}
-
-export async function incrementRunCount(pipelineId: number): Promise<void> {
-	await db
-		.update(userPipelines)
-		.set({ runCount: sql`${userPipelines.runCount} + 1` })
-		.where(eq(userPipelines.pipelineId, pipelineId));
 }
 
 /** Get all versions related to this pipeline: same name + forked_from chain */
@@ -199,21 +195,15 @@ export async function getVersionChain(pipelineId: number): Promise<PipelineSumma
 		}
 	}
 
-	// 2. Walk up forked_from chain (covers cross-name forks)
+	// 2. Walk up forked_from chain with cycle detection
+	const visited = new Set<number>();
 	let walkId: number | null = pipelineId;
-	while (walkId !== null) {
-		if (chainIds.has(walkId)) {
-			// Already included, but keep walking up
-			const row = byId.get(walkId);
-			if (!row || row.forkedFrom === null) break;
-			walkId = row.forkedFrom;
-			chainIds.add(walkId);
-		} else {
-			chainIds.add(walkId);
-			const row = byId.get(walkId);
-			if (!row) break;
-			walkId = row.forkedFrom;
-		}
+	while (walkId !== null && !visited.has(walkId)) {
+		visited.add(walkId);
+		chainIds.add(walkId);
+		const row = byId.get(walkId);
+		if (!row || row.forkedFrom === null) break;
+		walkId = row.forkedFrom;
 	}
 
 	// 3. Walk down: find children of any chain member

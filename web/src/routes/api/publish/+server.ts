@@ -66,22 +66,35 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 
 		// 6. Always INSERT a new record (version tracking)
-		const name = metadata.name;
+		let name: string = metadata.name;
 
-		// Determine forked_from: explicit param > auto-detect same name > null
-		let resolvedForkedFrom: number | null = null;
-		if (typeof forked_from === 'number') {
-			resolvedForkedFrom = forked_from;
-		} else {
-			// Auto-detect: if same name exists, link to the most recent one
+		// forked_from: trust the value Claude sends (no auto-detection)
+		const resolvedForkedFrom: number | null =
+			typeof forked_from === 'number' ? forked_from : null;
+
+		// Name deduplication: if forked_from is NULL and same name exists, append suffix
+		if (resolvedForkedFrom === null) {
 			const existing = await db
 				.select({ pipelineId: userPipelines.pipelineId })
 				.from(userPipelines)
 				.where(eq(userPipelines.name, name))
-				.orderBy(sql`${userPipelines.createdAt} DESC`)
 				.limit(1);
 			if (existing.length > 0) {
-				resolvedForkedFrom = existing[0].pipelineId;
+				// Find the next available suffix
+				let suffix = 2;
+				while (true) {
+					const candidate = `${metadata.name} ${suffix}`;
+					const dup = await db
+						.select({ pipelineId: userPipelines.pipelineId })
+						.from(userPipelines)
+						.where(eq(userPipelines.name, candidate))
+						.limit(1);
+					if (dup.length === 0) {
+						name = candidate;
+						break;
+					}
+					suffix++;
+				}
 			}
 		}
 
@@ -104,6 +117,14 @@ export const POST: RequestHandler = async ({ request }) => {
 			.returning({ pipelineId: userPipelines.pipelineId });
 
 		const pipelineId = row.pipelineId;
+
+		// Self-reference guard: should never happen, but ensure forked_from != self
+		if (resolvedForkedFrom === pipelineId) {
+			await db
+				.update(userPipelines)
+				.set({ forkedFrom: null })
+				.where(eq(userPipelines.pipelineId, pipelineId));
+		}
 
 		const response: Record<string, unknown> = { pipeline_id: pipelineId, name, author };
 		if (issues.length > 0) {
