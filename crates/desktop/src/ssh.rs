@@ -113,29 +113,6 @@ pub fn ssh_exec(config: &AppConfig, command: &str) -> Result<(String, i32), Stri
     Err(format!("{} (after {} retries)", last_err, max_retries))
 }
 
-/// Download a file from the remote server via SCP.
-/// Returns the bytes of the downloaded file.
-pub fn scp_download(config: &AppConfig, remote_path: &str) -> Result<Vec<u8>, String> {
-    let sess = create_session(config)?;
-
-    let (mut channel, stat) = sess
-        .scp_recv(Path::new(remote_path))
-        .map_err(|e| format!("SCP recv error: {}", e))?;
-
-    let mut buf = Vec::with_capacity(stat.size() as usize);
-    channel
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("SCP read error: {}", e))?;
-
-    // Close the SCP channel
-    channel.send_eof().ok();
-    channel.wait_eof().ok();
-    channel.close().ok();
-    channel.wait_close().ok();
-
-    Ok(buf)
-}
-
 /// Test SSH connection.
 pub fn test_connection(config: &AppConfig) -> Result<String, String> {
     let (output, status) = ssh_exec(config, "echo 'AutoPipe SSH OK' && hostname")?;

@@ -119,8 +119,9 @@ struct ViewImageParams {
 struct DownloadResultsParams {
     /// Remote file or directory path to download from the SSH server
     remote_path: String,
-    /// Local directory to save the downloaded file(s). Ask the user for this path before calling.
-    local_dir: String,
+    /// Local directory to save the downloaded file(s). If omitted, uses the OS default Downloads folder (e.g., ~/Downloads on macOS/Linux, C:\Users\<user>\Downloads on Windows). Tell the user the default path and ask if they want to change it before calling.
+    #[serde(default)]
+    local_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -299,6 +300,26 @@ impl AutoPipeServer {
             Ok((output, _)) => Err(format!("Failed to read: {}", output.trim())),
             Err(e) => Err(e),
         }
+    }
+
+    /// Download a remote file via SSH exec + base64 encoding (more reliable than SCP).
+    /// Returns the file size in bytes on success.
+    async fn ssh_download_base64(&self, remote_path: &str, local_path: &str) -> Result<usize, String> {
+        use base64::Engine;
+        let cmd = format!("base64 '{}'", remote_path);
+        let (b64_output, code) = self.ssh_run(&cmd).await?;
+        if code != 0 {
+            return Err(format!("Remote base64 failed: {}", b64_output.trim()));
+        }
+        // Remove whitespace from base64 output (line breaks etc.)
+        let clean: String = b64_output.chars().filter(|c| !c.is_whitespace()).collect();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&clean)
+            .map_err(|e| format!("Base64 decode error: {}", e))?;
+        let size = bytes.len();
+        std::fs::write(local_path, &bytes)
+            .map_err(|e| format!("Cannot write '{}': {}", local_path, e))?;
+        Ok(size)
     }
 
     async fn ssh_write_file(&self, path: &str, content: &str) -> Result<(), String> {
@@ -1248,13 +1269,31 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Download file(s) from the remote SSH server to the user's local machine via SCP. Use this when the user wants to save result files locally. Before calling, ask the user which local directory to save to. Supports single files and directories.")]
+    #[tool(description = "Download file(s) from the remote SSH server to the user's local machine. Use this when the user wants to save result files locally. If local_dir is omitted, files are saved to the OS default Downloads folder. Tell the user the default path and ask if they want to change it. Supports single files and directories.")]
     async fn download_results(
         &self,
         Parameters(params): Parameters<DownloadResultsParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let remote_path = params.remote_path.clone();
-        let local_dir = params.local_dir.clone();
+
+        // Resolve local directory: user-specified or OS default Downloads folder
+        let local_dir = match &params.local_dir {
+            Some(dir) if !dir.is_empty() => dir.clone(),
+            _ => {
+                match dirs::download_dir() {
+                    Some(p) => p.to_string_lossy().to_string(),
+                    None => {
+                        // Fallback: ~/Downloads
+                        match dirs::home_dir() {
+                            Some(h) => format!("{}/Downloads", h.to_string_lossy()),
+                            None => return Ok(CallToolResult::error(vec![Content::text(
+                                "Cannot determine Downloads folder. Please specify local_dir explicitly."
+                            )])),
+                        }
+                    }
+                }
+            }
+        };
 
         // Ensure local directory exists
         if let Err(e) = std::fs::create_dir_all(&local_dir) {
@@ -1294,17 +1333,9 @@ impl AutoPipeServer {
                 let remote_file = format!("{}/{}", remote_path.trim_end_matches('/'), file_name);
                 let local_file = format!("{}/{}", local_dir.trim_end_matches('/'), file_name);
 
-                let config = self.config.clone();
-                let rf = remote_file.clone();
-                match tokio::task::spawn_blocking(move || ssh::scp_download(&config, &rf)).await {
-                    Ok(Ok(bytes)) => {
-                        match std::fs::write(&local_file, &bytes) {
-                            Ok(()) => downloaded.push(format!("  {} ({} bytes)", file_name, bytes.len())),
-                            Err(e) => errors.push(format!("  {}: write error: {}", file_name, e)),
-                        }
-                    }
-                    Ok(Err(e)) => errors.push(format!("  {}: {}", file_name, e)),
-                    Err(e) => errors.push(format!("  {}: task error: {}", file_name, e)),
+                match self.ssh_download_base64(&remote_file, &local_file).await {
+                    Ok(size) => downloaded.push(format!("  {} ({} bytes)", file_name, size)),
+                    Err(e) => errors.push(format!("  {}: {}", file_name, e)),
                 }
             }
 
@@ -1324,25 +1355,13 @@ impl AutoPipeServer {
                 .unwrap_or_else(|| "downloaded_file".to_string());
             let local_file = format!("{}/{}", local_dir.trim_end_matches('/'), file_name);
 
-            let config = self.config.clone();
-            let rp = remote_path.clone();
-            match tokio::task::spawn_blocking(move || ssh::scp_download(&config, &rp)).await {
-                Ok(Ok(bytes)) => {
-                    match std::fs::write(&local_file, &bytes) {
-                        Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
-                            "Downloaded to: {}\n✓ {} ({} bytes)",
-                            local_file, file_name, bytes.len()
-                        ))])),
-                        Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                            "Cannot write local file '{}': {}", local_file, e
-                        ))])),
-                    }
-                }
-                Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "SCP download failed for '{}': {}", remote_path, e
+            match self.ssh_download_base64(&remote_path, &local_file).await {
+                Ok(size) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Downloaded to: {}\n✓ {} ({} bytes)",
+                    local_file, file_name, size
                 ))])),
                 Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Task error: {}", e
+                    "Download failed for '{}': {}", remote_path, e
                 ))])),
             }
         }
