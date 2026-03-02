@@ -41,6 +41,7 @@ export const userPlugins = pgTable(
 		name: varchar('name', { length: 255 }).notNull(),
 		description: text('description'),
 		category: varchar('category', { length: 100 }),
+		extensions: text('extensions').array().default([]),
 		tags: text('tags').array(),
 		githubUrl: varchar('github_url', { length: 500 }).notNull(),
 		metadataJson: jsonb('metadata_json').notNull(),

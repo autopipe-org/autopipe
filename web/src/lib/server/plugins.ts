@@ -8,6 +8,7 @@ export interface PluginSummary {
 	name: string;
 	description: string;
 	category: string;
+	extensions: string[];
 	tags: string[];
 	github_url: string;
 	author: string;
@@ -22,6 +23,7 @@ export interface Plugin {
 	name: string;
 	description: string;
 	category: string;
+	extensions: string[];
 	tags: string[];
 	github_url: string;
 	metadata_json: unknown;
@@ -39,6 +41,7 @@ function rowToSummary(r: typeof userPlugins.$inferSelect): PluginSummary {
 		name: r.name,
 		description: r.description ?? '',
 		category: r.category ?? '',
+		extensions: r.extensions ?? [],
 		tags: r.tags ?? [],
 		github_url: r.githubUrl,
 		author: r.author ?? '',
@@ -55,6 +58,7 @@ function rowToPlugin(r: typeof userPlugins.$inferSelect): Plugin {
 		name: r.name,
 		description: r.description ?? '',
 		category: r.category ?? '',
+		extensions: r.extensions ?? [],
 		tags: r.tags ?? [],
 		github_url: r.githubUrl,
 		metadata_json: r.metadataJson,
@@ -127,6 +131,7 @@ export async function insertPlugin(p: Plugin): Promise<number> {
 			name: p.name,
 			description: p.description,
 			category: p.category,
+			extensions: p.extensions,
 			tags: p.tags,
 			githubUrl: p.github_url,
 			metadataJson: p.metadata_json,

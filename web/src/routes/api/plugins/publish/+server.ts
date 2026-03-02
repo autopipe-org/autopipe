@@ -5,7 +5,7 @@ import { eq, sql } from 'drizzle-orm';
 
 const { userPlugins } = schema;
 
-// POST /api/plugins/publish — Fetch metadata from GitHub, store URL + metadata
+// POST /api/plugins/publish — Fetch manifest from GitHub, store URL + metadata
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
@@ -28,7 +28,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		const githubUser = await userResp.json();
 		const author = githubUser.login as string;
 
-		// 2. Parse GitHub URL to fetch metadata.json
+		// 2. Parse GitHub URL to fetch manifest
 		const urlMatch = github_url
 			.replace(/\/$/, '')
 			.match(/github\.com\/([^/]+)\/([^/]+)(?:\/tree\/[^/]+\/(.+))?/);
@@ -36,42 +36,49 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'Invalid GitHub URL format' }, { status: 400 });
 		}
 		const [, owner, repo, subpath] = urlMatch;
-		const metaPath = subpath
-			? `${subpath}/metadata.json`
-			: 'metadata.json';
 
-		const metaResp = await fetch(
-			`https://api.github.com/repos/${owner}/${repo}/contents/${metaPath}`,
-			{
-				headers: {
-					Accept: 'application/vnd.github.raw',
-					'User-Agent': 'autopipe-registry'
+		// Try manifest.json first, fall back to metadata.json
+		let metadata: Record<string, unknown> | null = null;
+		for (const filename of ['manifest.json', 'metadata.json']) {
+			const metaPath = subpath ? `${subpath}/${filename}` : filename;
+			const metaResp = await fetch(
+				`https://api.github.com/repos/${owner}/${repo}/contents/${metaPath}`,
+				{
+					headers: {
+						Accept: 'application/vnd.github.raw',
+						'User-Agent': 'autopipe-registry'
+					}
+				}
+			);
+			if (metaResp.ok) {
+				try {
+					metadata = await metaResp.json();
+					break;
+				} catch {
+					continue;
 				}
 			}
-		);
-		if (!metaResp.ok) {
+		}
+
+		if (!metadata) {
 			return json(
-				{ error: 'Cannot fetch metadata.json from GitHub repository' },
+				{ error: 'Cannot fetch manifest.json (or metadata.json) from GitHub repository' },
 				{ status: 400 }
 			);
 		}
 
-		// 3. Parse metadata
-		let metadata;
-		try {
-			metadata = await metaResp.json();
-		} catch {
-			return json({ error: 'metadata.json is not valid JSON' }, { status: 400 });
-		}
-
+		// 3. Validate required fields
 		if (!metadata.name) {
-			return json({ error: 'metadata.json must contain a "name" field' }, { status: 400 });
+			return json({ error: 'manifest.json must contain a "name" field' }, { status: 400 });
 		}
 
 		// 4. Always INSERT a new record (version tracking)
-		let name: string = metadata.name;
+		let name = metadata.name as string;
+		const extensions = Array.isArray(metadata.extensions)
+			? (metadata.extensions as string[])
+			: [];
 
-		// forked_from: trust the value Claude sends (no auto-detection)
+		// forked_from: trust the value the client sends (no auto-detection)
 		const resolvedForkedFrom: number | null =
 			typeof forked_from === 'number' ? forked_from : null;
 
@@ -104,13 +111,14 @@ export const POST: RequestHandler = async ({ request }) => {
 			.insert(userPlugins)
 			.values({
 				name,
-				description: metadata.description || '',
-				category: metadata.category || '',
-				tags: metadata.tags || [],
+				description: (metadata.description as string) || '',
+				category: (metadata.category as string) || '',
+				extensions,
+				tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
 				githubUrl: github_url,
 				metadataJson: metadata,
 				author,
-				version: metadata.version || '1.0.0',
+				version: (metadata.version as string) || '1.0.0',
 				verified: false,
 				forkedFrom: resolvedForkedFrom
 			})

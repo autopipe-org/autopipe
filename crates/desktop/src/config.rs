@@ -42,7 +42,7 @@ pub struct AppConfig {
     /// GitHub repository name for uploads (default: "autopipe-hub").
     #[serde(default = "default_github_repo")]
     pub github_repo: String,
-    /// Remote directory for plugins (default: "plugins").
+    /// Local directory for viewer plugins (default: platform-specific data dir).
     #[serde(default = "default_plugins_dir")]
     pub plugins_dir: String,
 }
@@ -60,7 +60,24 @@ fn default_github_repo() -> String {
 }
 
 fn default_plugins_dir() -> String {
-    "plugins".into()
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_default();
+        if appdata.is_empty() {
+            "plugins".into()
+        } else {
+            format!("{}\\autopipe\\plugins", appdata)
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() {
+            "plugins".into()
+        } else {
+            format!("{}/.local/share/autopipe/plugins", home)
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -126,9 +143,9 @@ impl AppConfig {
         self.resolve_path(&self.output_dir)
     }
 
-    /// Full path to plugins directory on remote server.
+    /// Full path to local plugins directory.
     pub fn full_plugins_dir(&self) -> String {
-        self.resolve_path(&self.plugins_dir)
+        self.plugins_dir.clone()
     }
 
     /// Save config to file.
