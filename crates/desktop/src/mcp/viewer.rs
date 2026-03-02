@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 #[derive(Clone)]
 struct ViewerState {
     files: Arc<Mutex<HashMap<String, FileEntry>>>,
-    plugins: Arc<Vec<PluginManifest>>,
+    plugins: Arc<Mutex<Arc<Vec<PluginManifest>>>>,
 }
 
 struct FileEntry {
@@ -135,24 +135,19 @@ fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
 }
 
 /// Start the viewer server (or reuse existing one).
-/// Kills any existing server first if plugins/files changed.
+/// Files and plugins are shared via Arc so the running server sees updates.
 async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
     let lock = get_viewer_lock().await;
     let mut handle = lock.lock().await;
 
-    // Always restart to pick up new files/plugins
-    if let Some(h) = handle.take() {
-        h.shutdown();
-        // Brief pause to let the old server release the port
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Reuse existing server — files/plugins are shared via Arc<Mutex>
+    if let Some(ref h) = *handle {
+        return Ok(h.port());
     }
 
     let files = get_file_store().await.clone();
-    let plugins_data = get_plugins_lock().await.lock().await.clone();
-    let state = ViewerState {
-        files,
-        plugins: plugins_data,
-    };
+    let plugins = get_plugins_lock().await.clone();
+    let state = ViewerState { files, plugins };
 
     // Store the plugins_dir for serving plugin assets
     {
@@ -302,8 +297,9 @@ async fn plugin_asset_handler(Path((name, path)): Path<(String, String)>) -> imp
 }
 
 async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
-    // Serialize plugins to JSON for embedding in HTML
-    let plugins_json = serde_json::to_string(&*state.plugins).unwrap_or_else(|_| "[]".into());
+    // Read plugins dynamically so updates are visible without server restart
+    let plugins = state.plugins.lock().await.clone();
+    let plugins_json = serde_json::to_string(&*plugins).unwrap_or_else(|_| "[]".into());
 
     Html(format!(
         r##"<!DOCTYPE html>
@@ -795,6 +791,11 @@ function renderNoPreview(name, ext, actions, content) {{
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>' +
     '</div>';
 }}
+
+// Auto-refresh file list when tab gets focus (e.g. after new show_results call)
+window.addEventListener('focus', function() {{
+  loadFiles();
+}});
 
 // Initialize
 loadFiles();
