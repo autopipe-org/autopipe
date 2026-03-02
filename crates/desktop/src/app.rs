@@ -303,57 +303,59 @@ impl AutoPipeApp {
 
 impl AutoPipeApp {
     fn draw_setup_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("AutoPipe Setup Guide");
-        ui.add_space(15.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("AutoPipe Setup Guide");
+            ui.add_space(15.0);
 
-        // Step 1
-        ui.heading("Step 1: Install an MCP-Compatible AI App");
-        ui.add_space(5.0);
-        ui.label("AutoPipe works with any MCP-compatible AI application.");
-        ui.label("For example, Claude Desktop:");
-        ui.hyperlink_to(
-            "https://claude.ai/download",
-            "https://claude.ai/download",
-        );
+            // Step 1
+            ui.heading("Step 1: Install an MCP-Compatible AI App");
+            ui.add_space(5.0);
+            ui.label("AutoPipe works with any MCP-compatible AI application.");
+            ui.label("For example, Claude Desktop:");
+            ui.hyperlink_to(
+                "https://claude.ai/download",
+                "https://claude.ai/download",
+            );
 
-        ui.add_space(15.0);
-        ui.separator();
-        ui.add_space(10.0);
+            ui.add_space(15.0);
+            ui.separator();
+            ui.add_space(10.0);
 
-        // Step 2
-        ui.heading("Step 2: Configure Settings");
-        ui.add_space(5.0);
-        ui.label("Go to the Connection tab to set the registry server URL.");
-        ui.label("Go to the SSH tab to configure the remote server connection.");
+            // Step 2
+            ui.heading("Step 2: Configure Settings");
+            ui.add_space(5.0);
+            ui.label("Go to the Connection tab to set the registry server URL.");
+            ui.label("Go to the SSH tab to configure the remote server connection.");
 
-        ui.add_space(15.0);
-        ui.separator();
-        ui.add_space(10.0);
+            ui.add_space(15.0);
+            ui.separator();
+            ui.add_space(10.0);
 
-        // Step 3
-        ui.heading("Step 3: Register MCP Tools");
-        ui.add_space(5.0);
-        ui.label("Click 'Register & Minimize to Tray' at the bottom.");
-        ui.label("This auto-registers autopipe tools in Claude Desktop.");
-        ui.label("For other MCP apps, add the MCP server config manually:");
-        ui.add_space(3.0);
-        ui.code("desktop --mcp-server");
-        ui.add_space(3.0);
-        ui.label("After registration, restart your AI app to load the tools.");
+            // Step 3
+            ui.heading("Step 3: Register MCP Tools");
+            ui.add_space(5.0);
+            ui.label("Click 'Register & Minimize to Tray' at the bottom.");
+            ui.label("This auto-registers autopipe tools in Claude Desktop.");
+            ui.label("For other MCP apps, add the MCP server config manually:");
+            ui.add_space(3.0);
+            ui.code("desktop --mcp-server");
+            ui.add_space(3.0);
+            ui.label("After registration, restart your AI app to load the tools.");
 
-        ui.add_space(15.0);
-        ui.separator();
-        ui.add_space(10.0);
+            ui.add_space(15.0);
+            ui.separator();
+            ui.add_space(10.0);
 
-        // Step 4
-        ui.heading("Step 4: Use Your AI App");
-        ui.add_space(5.0);
-        ui.label("Open your MCP-compatible AI app and start a conversation.");
-        ui.label("You can ask the AI to:");
-        ui.label("  - Search for existing workflows and plugins");
-        ui.label("  - Create new bioinformatics pipelines");
-        ui.label("  - Build, run, and monitor pipelines");
-        ui.label("  - Upload and publish workflows to the registry");
+            // Step 4
+            ui.heading("Step 4: Use Your AI App");
+            ui.add_space(5.0);
+            ui.label("Open your MCP-compatible AI app and start a conversation.");
+            ui.label("You can ask the AI to:");
+            ui.label("  - Search for existing workflows and plugins");
+            ui.label("  - Create new bioinformatics pipelines");
+            ui.label("  - Build, run, and monitor pipelines");
+            ui.label("  - Upload and publish workflows to the registry");
+        });
     }
 
     fn draw_connection_tab(&mut self, ui: &mut egui::Ui) {
@@ -568,48 +570,6 @@ impl AutoPipeApp {
             });
 
             ui.add_space(10.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // --- Installed Plugins ---
-            ui.horizontal(|ui| {
-                ui.heading("Installed Plugins");
-                if ui.button("Refresh").clicked() {
-                    self.installed_plugins =
-                        scan_installed_plugins(&self.config.full_plugins_dir());
-                }
-            });
-            ui.add_space(5.0);
-
-            if self.installed_plugins.is_empty() {
-                ui.label("No plugins installed.");
-            } else {
-                for plugin in &self.installed_plugins {
-                    egui::Frame::group(ui.style()).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong(&plugin.name);
-                            ui.label(format!("v{}", plugin.version));
-                        });
-                        if !plugin.description.is_empty() {
-                            ui.label(&plugin.description);
-                        }
-                        if !plugin.extensions.is_empty() {
-                            ui.label(format!(
-                                "Formats: {}",
-                                plugin
-                                    .extensions
-                                    .iter()
-                                    .map(|e| format!(".{}", e))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ));
-                        }
-                    });
-                    ui.add_space(3.0);
-                }
-            }
-
-            ui.add_space(15.0);
             ui.separator();
             ui.add_space(10.0);
 

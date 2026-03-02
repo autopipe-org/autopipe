@@ -112,14 +112,21 @@ impl AppConfig {
     /// Load config from file, or return default.
     pub fn load() -> Self {
         let path = Self::config_path();
-        if path.exists() {
+        let mut config = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                 Err(_) => Self::default(),
             }
         } else {
             Self::default()
+        };
+
+        // Migrate old relative "plugins" default to platform-specific path
+        if config.plugins_dir == "plugins" {
+            config.plugins_dir = default_plugins_dir();
         }
+
+        config
     }
 
     /// Resolve a path: if absolute, return as-is; if relative, join with repo_path.
