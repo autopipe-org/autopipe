@@ -75,6 +75,7 @@ async fn ensure_server() -> Result<u16, String> {
 
     let app = Router::new()
         .route("/", get(index_handler))
+        .route("/logo.png", get(logo_handler))
         .route("/file/{filename}", get(file_handler))
         .with_state(state);
 
@@ -126,6 +127,16 @@ pub async fn show_files(files: Vec<(String, Vec<u8>, String)>) -> Result<String,
 
 // ── Handlers ────────────────────────────────────────────────────────
 
+const LOGO_PNG: &[u8] = include_bytes!("../../../../web/static/logo.png");
+
+async fn logo_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/png".to_string())],
+        LOGO_PNG.to_vec(),
+    )
+}
+
 async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
     let files = state.files.lock().await;
     let mut items = String::new();
@@ -140,15 +151,26 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
         if is_image {
             items.push_str(&format!(
                 r#"<div class="item">
-                    <h3>{name}</h3>
-                    <img src="/file/{name}" alt="{name}">
+                    <div class="item-header">
+                        <h3>{name}</h3>
+                        <div class="item-actions">
+                            <button class="zoom-btn" onclick="zoom(this,-1)">−</button>
+                            <button class="zoom-btn zoom-reset" onclick="zoom(this,0)">100%</button>
+                            <button class="zoom-btn" onclick="zoom(this,1)">+</button>
+                            <a class="dl-btn" href="/file/{name}" download>Download</a>
+                        </div>
+                    </div>
+                    <div class="img-wrap"><img src="/file/{name}" alt="{name}" data-scale="1"></div>
                 </div>"#,
                 name = name
             ));
         } else if is_pdf {
             items.push_str(&format!(
                 r#"<div class="item">
-                    <h3>{name}</h3>
+                    <div class="item-header">
+                        <h3>{name}</h3>
+                        <a class="dl-btn" href="/file/{name}" download>Download</a>
+                    </div>
                     <embed src="/file/{name}" type="application/pdf" width="100%" height="600px">
                 </div>"#,
                 name = name
@@ -156,7 +178,10 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
         } else if is_text {
             items.push_str(&format!(
                 r#"<div class="item">
-                    <h3>{name}</h3>
+                    <div class="item-header">
+                        <h3>{name}</h3>
+                        <a class="dl-btn" href="/file/{name}" download>Download</a>
+                    </div>
                     <iframe src="/file/{name}" width="100%" height="400px" style="border:1px solid #ddd;border-radius:8px;"></iframe>
                 </div>"#,
                 name = name
@@ -164,8 +189,10 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
         } else {
             items.push_str(&format!(
                 r#"<div class="item">
-                    <h3>{name}</h3>
-                    <a href="/file/{name}" download>Download {name}</a>
+                    <div class="item-header">
+                        <h3>{name}</h3>
+                        <a class="dl-btn" href="/file/{name}" download>Download</a>
+                    </div>
                 </div>"#,
                 name = name
             ));
@@ -185,21 +212,49 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <title>AutoPipe Results</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fafafa; color: #111; }}
-  header {{ padding: 16px 32px; border-bottom: 1px solid #eee; background: #fff; }}
-  header h1 {{ font-size: 18px; font-weight: 600; }}
-  header span {{ font-size: 13px; color: #999; margin-left: 12px; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif; background: #fafafa; color: #111; line-height: 1.5; }}
+  header {{ padding: 14px 40px; border-bottom: 1px solid #eee; background: #fff; }}
+  .header-top {{ display: flex; align-items: baseline; gap: 12px; }}
+  .logo {{ font-size: 1.15rem; font-weight: 700; color: #111; text-decoration: none; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }}
+  .logo-icon {{ height: 24px; width: auto; }}
+  .header-sub {{ font-size: 14px; color: #999; font-weight: 400; }}
   .container {{ max-width: 1000px; margin: 24px auto; padding: 0 24px; }}
   .item {{ background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 20px; margin-bottom: 16px; }}
-  .item h3 {{ font-size: 14px; color: #333; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #f0f0f0; }}
-  .item img {{ max-width: 100%; height: auto; border-radius: 6px; }}
+  .item h3 {{ font-size: 14px; color: #333; margin: 0; padding: 0; border: none; }}
+  .item-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #f0f0f0; }}
+  .item-actions {{ display: flex; align-items: center; gap: 6px; }}
+  .zoom-btn {{ width: 32px; height: 28px; border: 1px solid #ddd; border-radius: 6px; background: #f8f8f8; color: #555; font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; }}
+  .zoom-btn:hover {{ background: #eee; border-color: #ccc; }}
+  .zoom-reset {{ width: auto; padding: 0 8px; font-size: 12px; }}
+  .dl-btn {{ display: inline-block; padding: 4px 12px; border: 1px solid #ddd; border-radius: 6px; background: #f8f8f8; color: #555; font-size: 12px; font-weight: 500; text-decoration: none; }}
+  .dl-btn:hover {{ background: #eee; border-color: #ccc; text-decoration: none; }}
+  .img-wrap {{ overflow: auto; border-radius: 6px; }}
+  .img-wrap img {{ max-width: 100%; height: auto; transition: transform 0.2s; transform-origin: top left; }}
   .item a {{ color: #0366d6; text-decoration: none; font-size: 14px; }}
   .item a:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body>
-<header><h1>AutoPipe</h1><span>Results Viewer</span></header>
+<header>
+  <div class="header-top">
+    <span class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</span>
+    <span class="header-sub">Results Viewer</span>
+  </div>
+</header>
 <div class="container">{items}</div>
+<script>
+function zoom(btn, dir) {{
+  var wrap = btn.closest('.item').querySelector('.img-wrap');
+  var img = wrap.querySelector('img');
+  var scale = parseFloat(img.dataset.scale || '1');
+  if (dir === 0) scale = 1;
+  else scale = Math.max(0.25, Math.min(3, scale + dir * 0.25));
+  img.dataset.scale = scale;
+  img.style.transform = 'scale(' + scale + ')';
+  if (scale > 1) {{ img.style.maxWidth = 'none'; }} else {{ img.style.maxWidth = '100%'; }}
+  btn.closest('.item-actions').querySelector('.zoom-reset').textContent = Math.round(scale * 100) + '%';
+}}
+</script>
 </body>
 </html>"#,
         items = items
