@@ -8,31 +8,33 @@
 
 		<h1 class="guide-title">Plugin Creation Guide</h1>
 		<p class="guide-intro">
-			AutoPipe 플러그인은 Results Viewer를 확장하여 추가 파일 형식의 미리보기를 제공합니다.
-			플러그인은 HTML/JavaScript 기반으로 동작하며, 브라우저에서 실행됩니다.
+			AutoPipe plugins extend the Results Viewer with custom file previews.
+			Plugins are HTML/JavaScript-based and run directly in the browser.
 		</p>
 
 		<!-- Section 1: What is a Plugin -->
 		<section class="guide-section">
-			<h2>1. 플러그인이란?</h2>
+			<h2>1. What is a Plugin?</h2>
 			<p>
-				AutoPipe의 Results Viewer에는 이미지, PDF, 텍스트, BAM/VCF(igv.js), h5ad(jsfive) 등의
-				내장 뷰어가 있습니다. 플러그인을 사용하면 이 외에도 사용자 정의 파일 형식을 지원할 수 있습니다.
+				The AutoPipe Results Viewer includes built-in viewers for images, PDFs, text files,
+				BAM/VCF/BED (via igv.js), and h5ad (via jsfive). Plugins let you add support
+				for additional file formats beyond what's built in.
 			</p>
 			<p>
-				예를 들어, <code>.xyz</code> 형식의 커스텀 시각화가 필요한 경우 해당 형식을 위한 플러그인을 만들 수 있습니다.
+				For example, if you need a custom visualization for <code>.xyz</code> files,
+				you can create a plugin that handles that format.
 			</p>
 		</section>
 
 		<!-- Section 2: Plugin Structure -->
 		<section class="guide-section">
-			<h2>2. 플러그인 구조</h2>
+			<h2>2. Plugin Structure</h2>
 			<div class="code-block">
 				<pre>{`my-viewer-plugin/
-├── manifest.json    # 플러그인 메타데이터 (필수)
-├── index.js         # 메인 진입점 (필수)
-├── style.css        # 스타일시트 (선택)
-└── lib/             # 추가 라이브러리 (선택)`}</pre>
+├── manifest.json    # Plugin metadata (required)
+├── index.js         # Main entry point (required)
+├── style.css        # Stylesheet (optional)
+└── lib/             # Additional libraries (optional)`}</pre>
 			</div>
 
 			<h3>manifest.json</h3>
@@ -49,15 +51,15 @@
 			</div>
 			<table class="field-table">
 				<thead>
-					<tr><th>필드</th><th>필수</th><th>설명</th></tr>
+					<tr><th>Field</th><th>Required</th><th>Description</th></tr>
 				</thead>
 				<tbody>
-					<tr><td><code>name</code></td><td>O</td><td>플러그인 고유 이름</td></tr>
-					<tr><td><code>version</code></td><td>O</td><td>시맨틱 버전 (예: 1.0.0)</td></tr>
-					<tr><td><code>description</code></td><td></td><td>플러그인 설명</td></tr>
-					<tr><td><code>extensions</code></td><td>O</td><td>지원하는 파일 확장자 배열</td></tr>
-					<tr><td><code>entry</code></td><td>O</td><td>메인 JavaScript 파일 경로</td></tr>
-					<tr><td><code>style</code></td><td></td><td>CSS 파일 경로 (선택)</td></tr>
+					<tr><td><code>name</code></td><td>Yes</td><td>Unique plugin name</td></tr>
+					<tr><td><code>version</code></td><td>Yes</td><td>Semantic version (e.g., 1.0.0)</td></tr>
+					<tr><td><code>description</code></td><td></td><td>Plugin description</td></tr>
+					<tr><td><code>extensions</code></td><td>Yes</td><td>Array of supported file extensions</td></tr>
+					<tr><td><code>entry</code></td><td>Yes</td><td>Path to main JavaScript file</td></tr>
+					<tr><td><code>style</code></td><td></td><td>Path to CSS file (optional)</td></tr>
 				</tbody>
 			</table>
 		</section>
@@ -66,15 +68,15 @@
 		<section class="guide-section">
 			<h2>3. Plugin JavaScript API</h2>
 			<p>
-				플러그인의 entry 파일(<code>index.js</code>)에서 <code>window.AutoPipePlugin</code> 객체를 정의합니다:
+				In your entry file (<code>index.js</code>), define the <code>window.AutoPipePlugin</code> object:
 			</p>
 			<div class="code-block">
 				<pre>{`window.AutoPipePlugin = {
-  // 필수: 파일 렌더링
+  // Required: render the file
   render: function(container, fileUrl, filename) {
-    // container: 렌더링할 DOM element
-    // fileUrl: 파일 데이터 URL (예: "/file/result.xyz")
-    // filename: 파일명 (예: "result.xyz")
+    // container: DOM element to render into
+    // fileUrl: URL to fetch file data (e.g., "/file/result.xyz")
+    // filename: the file name (e.g., "result.xyz")
 
     fetch(fileUrl)
       .then(resp => resp.text())
@@ -83,80 +85,80 @@
       });
   },
 
-  // 선택: 정리 (다른 파일 선택 시 호출)
+  // Optional: cleanup when switching to another file
   destroy: function() {
-    // 이벤트 리스너 해제 등
+    // Remove event listeners, timers, etc.
   }
 };`}</pre>
 			</div>
 			<p>
-				<code>render()</code>는 사용자가 해당 확장자의 파일을 선택할 때 호출됩니다.
-				<code>container</code>에 원하는 HTML을 렌더링하면 됩니다.
-				<code>fileUrl</code>로 파일 데이터를 <code>fetch()</code>해서 사용할 수 있습니다.
+				<code>render()</code> is called when the user selects a file with a matching extension.
+				Render your content into <code>container</code>.
+				Use <code>fetch(fileUrl)</code> to retrieve the file data.
 			</p>
 		</section>
 
 		<!-- Section 4: Development & Testing -->
 		<section class="guide-section">
-			<h2>4. 개발 & 테스트</h2>
+			<h2>4. Development & Testing</h2>
 			<ol class="step-list">
 				<li>
-					<strong>플러그인 디렉토리에 파일 생성</strong>
+					<strong>Create files in the plugins directory</strong>
 					<p>
-						기본 위치: <code>~/.local/share/autopipe/plugins/my-plugin/</code>
-						(앱 설정에서 변경 가능)
+						Default location: <code>~/.local/share/autopipe/plugins/my-plugin/</code>
+						(configurable in app settings)
 					</p>
 				</li>
 				<li>
-					<strong><code>manifest.json</code>과 <code>index.js</code> 작성</strong>
+					<strong>Write <code>manifest.json</code> and <code>index.js</code></strong>
 				</li>
 				<li>
-					<strong>AutoPipe에서 <code>show_results</code> 실행</strong>
-					<p>결과 뷰어에서 해당 확장자의 파일이 플러그인으로 렌더링되는지 확인합니다.</p>
+					<strong>Run <code>show_results</code> in AutoPipe</strong>
+					<p>Verify that files with the matching extension are rendered by your plugin in the viewer.</p>
 				</li>
 			</ol>
 		</section>
 
 		<!-- Section 5: GitHub Account -->
 		<section class="guide-section">
-			<h2>5. GitHub 계정 준비</h2>
+			<h2>5. GitHub Account</h2>
 			<p>
-				플러그인을 레지스트리에 등록하려면 GitHub 계정이 필요합니다.
-				계정이 없으면 <a href="https://github.com/signup" target="_blank" rel="noopener">github.com/signup</a>에서 생성하세요.
+				A GitHub account is required to publish plugins to the registry.
+				If you don't have one, sign up at <a href="https://github.com/signup" target="_blank" rel="noopener">github.com/signup</a>.
 			</p>
 		</section>
 
 		<!-- Section 6: GitHub Token -->
 		<section class="guide-section">
-			<h2>6. GitHub Personal Access Token 발급</h2>
+			<h2>6. GitHub Personal Access Token</h2>
 			<ol class="step-list">
 				<li>
-					<a href="https://github.com/settings/tokens" target="_blank" rel="noopener">GitHub Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic)</a> 접속
+					Go to <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">GitHub Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic)</a>
 				</li>
-				<li><strong>Generate new token (classic)</strong> 클릭</li>
+				<li>Click <strong>Generate new token (classic)</strong></li>
 				<li>
-					설정:
+					Configure:
 					<ul>
 						<li>Note: <code>autopipe-plugin</code></li>
-						<li>Expiration: 90일 권장</li>
-						<li>Scopes: <code>public_repo</code>만 체크</li>
+						<li>Expiration: 90 days recommended</li>
+						<li>Scopes: check <code>public_repo</code> only</li>
 					</ul>
 				</li>
-				<li><strong>Generate token</strong> 클릭</li>
-				<li><code>ghp_...</code>로 시작하는 토큰을 복사 (한 번만 표시됨)</li>
+				<li>Click <strong>Generate token</strong></li>
+				<li>Copy the token starting with <code>ghp_...</code> (shown only once)</li>
 			</ol>
 			<div class="callout">
-				이 토큰은 레지스트리에 플러그인을 등록할 때 작성자 확인 및 GitHub 저장소 접근에 사용됩니다.
-				토큰은 서버에 저장되지 않습니다.
+				This token is used to verify authorship and access the GitHub repository when publishing.
+				The token is not stored on the server.
 			</div>
 		</section>
 
 		<!-- Section 7: GitHub Repository -->
 		<section class="guide-section">
-			<h2>7. GitHub 저장소 생성</h2>
+			<h2>7. Create a GitHub Repository</h2>
 			<ol class="step-list">
-				<li>GitHub에서 새 public 저장소를 생성합니다.</li>
-				<li>플러그인 파일들을 push합니다:
+				<li>Create a new public repository on GitHub.</li>
+				<li>Push your plugin files:
 					<div class="code-block">
 						<pre>{`cd my-viewer-plugin
 git init
@@ -171,36 +173,36 @@ git push -u origin main`}</pre>
 
 		<!-- Section 8: Packaging & Publishing -->
 		<section class="guide-section">
-			<h2>8. 패키징 & 퍼블리시</h2>
+			<h2>8. Packaging & Publishing</h2>
 			<ol class="step-list">
 				<li>
-					<strong>CLI 도구 설치</strong>
+					<strong>Install the CLI tool</strong>
 					<div class="code-block">
 						<pre>npm install -g @pnucolab/autopipe-ext</pre>
 					</div>
 				</li>
 				<li>
-					<strong>검증</strong>
+					<strong>Validate</strong>
 					<div class="code-block">
 						<pre>autopipe-ext package</pre>
 					</div>
-					<p>manifest.json 유효성, entry 파일 존재, AutoPipePlugin 패턴 확인</p>
+					<p>Checks manifest.json validity, entry file existence, and AutoPipePlugin pattern.</p>
 				</li>
 				<li>
-					<strong>퍼블리시</strong>
+					<strong>Publish</strong>
 					<div class="code-block">
 						<pre>{`autopipe-ext publish --token ghp_xxx
-# 또는 환경변수: GITHUB_TOKEN=ghp_xxx autopipe-ext publish
-# 또는 대화형 입력: autopipe-ext publish`}</pre>
+# Or via environment variable: GITHUB_TOKEN=ghp_xxx autopipe-ext publish
+# Or interactive prompt: autopipe-ext publish`}</pre>
 					</div>
-					<p>git remote에서 GitHub URL을 자동 감지하여 레지스트리에 등록합니다.</p>
+					<p>Automatically detects the GitHub URL from git remote and registers the plugin in the registry.</p>
 				</li>
 			</ol>
 		</section>
 
 		<!-- Section 9: Example -->
 		<section class="guide-section">
-			<h2>9. 예제: CSV Heatmap 플러그인</h2>
+			<h2>9. Example: CSV Heatmap Plugin</h2>
 			<h3>manifest.json</h3>
 			<div class="code-block">
 				<pre>{`{
