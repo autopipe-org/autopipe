@@ -1293,7 +1293,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "View result files (images, plots, figures, PDFs, text, CSV) from the remote SSH server by opening them in a browser tab. This is the ONLY way to display files visually. Use this whenever the user asks to 'show', 'view', 'display', or 'see' any file. For directories, all viewable files are shown. For a single file, that file is displayed. Supports PNG, JPG, GIF, SVG, WebP, PDF, TXT, CSV, JSON, HTML.")]
+    #[tool(description = "Open the Results Viewer in a browser to display files from the remote SSH server. ALWAYS pass a DIRECTORY path (not individual files). The viewer shows ALL files in a sidebar list — the user clicks each file to preview it. NEVER call this tool multiple times for the same directory. Supports: images (PNG/JPG/GIF/SVG/WebP/BMP/TIFF), PDF, text (TXT/LOG/CSV/TSV/JSON/YAML/XML/MD/FASTQ), genomics via igv.js (BAM/CRAM/VCF/BED/GFF/GTF/FASTA/BigWig), HDF5 (h5ad/h5), and all other files with Download. Use this whenever the user asks to 'show', 'view', 'display', 'see', or 'check' results or files.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,

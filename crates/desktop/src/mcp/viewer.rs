@@ -195,6 +195,13 @@ pub async fn show_files(
     files: Vec<(String, Vec<u8>, String)>,
     plugins_dir: String,
 ) -> Result<String, String> {
+    // Check if server is already running (to decide whether to open a new tab)
+    let already_running = {
+        let lock = get_viewer_lock().await;
+        let handle = lock.lock().await;
+        handle.is_some()
+    };
+
     // Update file store
     let store = get_file_store().await;
     {
@@ -215,7 +222,12 @@ pub async fn show_files(
     let port = ensure_server(&plugins_dir).await?;
 
     let url = format!("http://127.0.0.1:{}", port);
-    open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))?;
+
+    // Only open a new browser tab on first call; subsequent calls
+    // update files in-place and the existing tab auto-refreshes on focus.
+    if !already_running {
+        open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))?;
+    }
 
     Ok(url)
 }
