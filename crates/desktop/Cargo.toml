@@ -6,6 +6,7 @@ edition.workspace = true
 [features]
 default = []
 gui = ["eframe", "tray-icon", "image", "gtk"]
+portable = ["dep:openssl"]
 
 [dependencies]
 common = { path = "../common" }
@@ -22,6 +23,7 @@ ssh2 = "0.9"
 base64 = "0.22"
 open = "5"
 axum = "0.8"
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 
 # GUI dependencies (optional, requires GTK on Linux)
 eframe = { version = "0.31", optional = true }
