@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::config::AppConfig;
+use crate::mcp::viewer;
 use crate::ssh;
 
 // ── Parameter structs ───────────────────────────────────────────────
@@ -112,6 +113,14 @@ struct WriteFileParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ViewImageParams {
     /// Remote path to an image file (PNG, JPG, SVG, PDF, etc.)
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ShowResultsParams {
+    /// Remote file or directory path to display in the browser.
+    /// For a directory, all viewable files (images, text, CSV, PDF) will be shown.
+    /// For a single file, that file will be displayed.
     path: String,
 }
 
@@ -1493,6 +1502,164 @@ PYEOF"#,
                 clean_content(&output).trim()
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
+
+    // ── Browser viewer ─────────────────────────────────────────
+
+    #[tool(description = "Open result files in a browser tab for viewing. Shows images, plots, PDFs, text, and CSV files in a clean web page. Use this when the user asks to 'show results', 'view plots', or 'display output'. For directories, all viewable files are shown. For a single file, that file is displayed.")]
+    async fn show_results(
+        &self,
+        Parameters(params): Parameters<ShowResultsParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Check if path is a directory or file
+        let is_dir = match self
+            .ssh_run(&format!(
+                "test -d '{}' && echo DIR || echo FILE",
+                params.path
+            ))
+            .await
+        {
+            Ok((output, 0)) => clean_content(&output).trim() == "DIR",
+            _ => false,
+        };
+
+        let file_paths: Vec<String> = if is_dir {
+            // List files in directory (non-recursive, max 50)
+            match self
+                .ssh_run(&format!(
+                    "find '{}' -maxdepth 1 -type f | head -50",
+                    params.path
+                ))
+                .await
+            {
+                Ok((output, 0)) => clean_content(&output)
+                    .trim()
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect(),
+                Ok((output, _)) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot list directory '{}': {}",
+                        params.path,
+                        clean_content(&output).trim()
+                    ))]));
+                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        } else {
+            // Check file exists
+            match self
+                .ssh_run(&format!(
+                    "test -f '{}' && echo OK || echo NOT_FOUND",
+                    params.path
+                ))
+                .await
+            {
+                Ok((output, 0)) if clean_content(&output).trim() == "OK" => {
+                    vec![params.path.clone()]
+                }
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "File not found: {}",
+                        params.path
+                    ))]));
+                }
+            }
+        };
+
+        if file_paths.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "No files found in '{}'",
+                params.path
+            ))]));
+        }
+
+        // Download each file via base64
+        let mut files: Vec<(String, Vec<u8>, String)> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+
+        for path in &file_paths {
+            let ext = path
+                .rsplit('.')
+                .next()
+                .map(|e| e.to_lowercase())
+                .unwrap_or_default();
+            let mime = match ext.as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "gif" => "image/gif",
+                "svg" => "image/svg+xml",
+                "webp" => "image/webp",
+                "pdf" => "application/pdf",
+                "txt" | "log" => "text/plain",
+                "csv" | "tsv" => "text/csv",
+                "json" => "application/json",
+                "html" | "htm" => "text/html",
+                _ => continue, // Skip unsupported types
+            };
+
+            let filename = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+
+            match self
+                .ssh_run(&format!("base64 -w 0 '{}'", path))
+                .await
+            {
+                Ok((b64, 0)) => {
+                    let trimmed = clean_content(&b64).trim().to_string();
+                    match base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &trimmed,
+                    ) {
+                        Ok(data) => files.push((filename, data, mime.to_string())),
+                        Err(e) => errors.push(format!("{}: decode error: {}", filename, e)),
+                    }
+                }
+                Ok((output, _)) => {
+                    errors.push(format!("{}: {}", filename, clean_content(&output).trim()));
+                }
+                Err(e) => errors.push(format!("{}: {}", filename, e)),
+            }
+        }
+
+        if files.is_empty() {
+            let msg = if errors.is_empty() {
+                format!("No viewable files found in '{}'", params.path)
+            } else {
+                format!("Failed to load files:\n{}", errors.join("\n"))
+            };
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
+        }
+
+        // Open in browser
+        match viewer::show_files(files.clone()).await {
+            Ok(url) => {
+                let mut msg = format!(
+                    "Opened results in browser: {}\n\nDisplaying {} file(s):",
+                    url,
+                    files.len()
+                );
+                for (name, data, _) in &files {
+                    msg.push_str(&format!("\n  {} ({} bytes)", name, data.len()));
+                }
+                if !errors.is_empty() {
+                    msg.push_str(&format!(
+                        "\n\nSkipped {} file(s):\n{}",
+                        errors.len(),
+                        errors.join("\n")
+                    ));
+                }
+                Ok(CallToolResult::success(vec![Content::text(msg)]))
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to open browser: {}",
+                e
+            ))])),
         }
     }
 

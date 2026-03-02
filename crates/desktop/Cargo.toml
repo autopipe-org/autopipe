@@ -21,6 +21,7 @@ reqwest = { version = "0.12", features = ["json"] }
 ssh2 = "0.9"
 base64 = "0.22"
 open = "5"
+axum = "0.8"
 
 # GUI dependencies (optional, requires GTK on Linux)
 eframe = { version = "0.31", optional = true }
