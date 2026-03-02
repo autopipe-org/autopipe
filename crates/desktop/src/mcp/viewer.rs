@@ -633,19 +633,43 @@ function loadJsfive() {{
   return new Promise(function(resolve, reject) {{
     if (jsfiveLoaded) {{ resolve(); return; }}
     var s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/jsfive@0.3.10/dist/browser/hdf5.js';
-    s.onload = function() {{ jsfiveLoaded = true; resolve(); }};
-    s.onerror = function() {{ reject(new Error('Failed to load jsfive')); }};
+    s.src = 'https://cdn.jsdelivr.net/npm/jsfive@0.3.13/dist/browser/hdf5.js';
+    s.onload = function() {{
+      jsfiveLoaded = true;
+      // jsfive exposes as window.jsfive or window.hdf5
+      if (!window.jsfive && window.hdf5) window.jsfive = window.hdf5;
+      resolve();
+    }};
+    s.onerror = function() {{ reject(new Error('Failed to load jsfive CDN')); }};
     document.head.appendChild(s);
   }});
 }}
 
 async function renderHdf5Viewer(name, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 viewer...</div>';
+
+  // Check file size first
+  var fileInfo = FILES.find(function(f) {{ return f.name === name; }});
+  var sizeMB = fileInfo ? (fileInfo.size / 1048576).toFixed(0) : 0;
+
+  if (fileInfo && fileInfo.size > 100 * 1048576) {{
+    // >100MB: too large for browser
+    content.innerHTML =
+      '<div class="no-preview">' +
+        '<div class="no-preview-icon">🔬</div>' +
+        '<p class="no-preview-title">' + name + '</p>' +
+        '<p class="no-preview-msg">HDF5 file size: ' + sizeMB + ' MB<br>Files over 100 MB cannot be previewed in the browser.<br>Download and inspect with Python (scanpy/anndata).</p>' +
+        '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download (' + sizeMB + ' MB)</a>' +
+      '</div>';
+    return;
+  }}
+
+  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 viewer (' + sizeMB + ' MB)...</div>';
 
   try {{
     await loadJsfive();
+    if (!window.jsfive) throw new Error('jsfive library not available');
+
     var resp = await fetch('/file/' + encodeURIComponent(name));
     var buf = await resp.arrayBuffer();
     var f = new jsfive.File(buf);
@@ -728,7 +752,7 @@ async function renderHdf5Viewer(name, actions, content) {{
   }} catch(e) {{
     content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
       '<p class="no-preview-title">HDF5 Load Error</p>' +
-      '<p class="no-preview-msg">' + e.message + '</p>' +
+      '<p class="no-preview-msg">' + e.message + '<br><br>Download and inspect with Python:<br><code>import anndata; ad = anndata.read_h5ad("' + name + '")</code></p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
   }}
 }}
@@ -787,7 +811,7 @@ function renderNoPreview(name, ext, actions, content) {{
     '<div class="no-preview">' +
       '<div class="no-preview-icon">📄</div>' +
       '<p class="no-preview-title">' + name + '</p>' +
-      '<p class="no-preview-msg">.' + ext + ' 형식은 내장 뷰어가 제공되지 않습니다.<br>이 형식을 지원하는 플러그인을 설치하면 미리보기가 가능합니다.</p>' +
+      '<p class="no-preview-msg">No built-in viewer for .' + ext + ' files.<br>Install a plugin that supports this format to enable preview.</p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>' +
     '</div>';
 }}

@@ -1314,7 +1314,7 @@ impl AutoPipeServer {
             // List files in directory (non-recursive, max 50)
             match self
                 .ssh_run(&format!(
-                    "find '{}' -maxdepth 1 -type f | head -50",
+                    "find '{}' -maxdepth 1 -type f ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
                     params.path
                 ))
                 .await
