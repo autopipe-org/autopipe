@@ -113,9 +113,12 @@ struct WriteFileParams {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ShowResultsParams {
     /// Remote file or directory path to display in the browser.
-    /// For a directory, all viewable files (images, text, CSV, PDF) will be shown.
-    /// For a single file, that file will be displayed.
     path: String,
+    /// Optional filter: "image", "text", "genomics", "pdf", "hdf5".
+    /// When set, only files matching this type are loaded into the viewer.
+    /// Omit to load all files.
+    #[serde(default)]
+    filter: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1335,7 +1338,7 @@ impl AutoPipeServer {
                 Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             }
         } else {
-            // Check file exists
+            // Single file: check it exists, then load ALL files from parent directory
             match self
                 .ssh_run(&format!(
                     "test -f '{}' && echo OK || echo NOT_FOUND",
@@ -1344,7 +1347,37 @@ impl AutoPipeServer {
                 .await
             {
                 Ok((output, 0)) if clean_content(&output).trim() == "OK" => {
-                    vec![params.path.clone()]
+                    // Get parent directory and list all files from it
+                    let parent = std::path::Path::new(&params.path)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    if !parent.is_empty() {
+                        match self
+                            .ssh_run(&format!(
+                                "find '{}' -maxdepth 1 -type f ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
+                                parent
+                            ))
+                            .await
+                        {
+                            Ok((dir_output, 0)) => {
+                                let dir_files: Vec<String> = clean_content(&dir_output)
+                                    .trim()
+                                    .lines()
+                                    .filter(|l| !l.is_empty())
+                                    .map(|l| l.to_string())
+                                    .collect();
+                                if dir_files.is_empty() {
+                                    vec![params.path.clone()]
+                                } else {
+                                    dir_files
+                                }
+                            }
+                            _ => vec![params.path.clone()],
+                        }
+                    } else {
+                        vec![params.path.clone()]
+                    }
                 }
                 _ => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1355,10 +1388,36 @@ impl AutoPipeServer {
             }
         };
 
+        // Apply file type filter if specified
+        let file_paths: Vec<String> = if let Some(ref filter) = params.filter {
+            let allowed_exts: Vec<&str> = match filter.to_lowercase().as_str() {
+                "image" | "images" => vec!["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "tiff", "tif"],
+                "text" => vec!["txt", "log", "csv", "tsv", "json", "yaml", "yml", "xml", "md"],
+                "genomics" => vec!["bam", "cram", "vcf", "bcf", "bed", "gff", "gtf", "gff3", "fasta", "fa", "fastq", "fq", "bigwig", "bw", "bigbed", "bb"],
+                "pdf" => vec!["pdf"],
+                "hdf5" => vec!["h5ad", "h5", "hdf5"],
+                _ => vec![],
+            };
+            if allowed_exts.is_empty() {
+                file_paths
+            } else {
+                file_paths
+                    .into_iter()
+                    .filter(|p| {
+                        let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+                        allowed_exts.contains(&ext.as_str())
+                    })
+                    .collect()
+            }
+        } else {
+            file_paths
+        };
+
         if file_paths.is_empty() {
+            let filter_msg = params.filter.as_deref().unwrap_or("any");
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "No files found in '{}'",
-                params.path
+                "No {} files found in '{}'",
+                filter_msg, params.path
             ))]));
         }
 
