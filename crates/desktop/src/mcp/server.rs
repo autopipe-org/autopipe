@@ -111,12 +111,6 @@ struct WriteFileParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct ViewImageParams {
-    /// Remote path to an image file (PNG, JPG, SVG, PDF, etc.)
-    path: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 struct ShowResultsParams {
     /// Remote file or directory path to display in the browser.
     /// For a directory, all viewable files (images, text, CSV, PDF) will be shown.
@@ -1403,111 +1397,9 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "View an image file (plot, figure, chart) from the remote SSH server. Returns the image inline so it can be displayed directly. Large images are automatically resized. Supports PNG, JPG, SVG, GIF, and PDF.")]
-    async fn view_image(
-        &self,
-        Parameters(params): Parameters<ViewImageParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let ext = params.path.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-        let mime_type = match ext.as_str() {
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "gif" => "image/gif",
-            "svg" => "image/svg+xml",
-            "pdf" => "application/pdf",
-            "webp" => "image/webp",
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Unsupported file type: {}. Supported: png, jpg, gif, svg, pdf, webp",
-                    params.path
-                ))]));
-            }
-        };
-
-        let size_check = format!("stat -c%s '{}' 2>/dev/null || echo 'NOT_FOUND'", params.path);
-        let file_size: u64 = match self.ssh_run(&size_check).await {
-            Ok((output, _)) => {
-                let cleaned = clean_content(&output);
-                let val = cleaned.trim();
-                if val == "NOT_FOUND" || val.is_empty() {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "File not found: {}",
-                        params.path
-                    ))]));
-                }
-                val.parse().unwrap_or(0)
-            }
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot check file: {}", e
-                ))]));
-            }
-        };
-
-        let needs_resize = file_size > 500 * 1024
-            && matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp");
-
-        let base64_result = if needs_resize {
-            let ensure_image = r#"docker image inspect autopipe-resizer >/dev/null 2>&1 || docker build -t autopipe-resizer - << 'DOCKERFILE'
-FROM python:3.11-slim
-RUN pip install --no-cache-dir Pillow
-DOCKERFILE"#;
-            let _ = self.ssh_run(ensure_image).await;
-
-            let parent_dir = params.path.rsplitn(2, '/').nth(1).unwrap_or("/");
-            let filename = params.path.rsplitn(2, '/').next().unwrap_or(&params.path);
-            let resize_cmd = format!(
-                r#"docker run --rm -i -v '{parent_dir}:/img:ro' autopipe-resizer python3 << 'PYEOF'
-import sys, base64, io
-from PIL import Image
-img = Image.open('/img/{filename}')
-img.thumbnail((1200, 1200), Image.LANCZOS)
-buf = io.BytesIO()
-fmt = 'PNG' if '{ext}' in ('png', 'gif', 'webp') else 'JPEG'
-img.save(buf, format=fmt, quality=85)
-buf.seek(0)
-sys.stdout.write(base64.b64encode(buf.read()).decode())
-PYEOF"#,
-                parent_dir = parent_dir,
-                filename = filename,
-                ext = ext,
-            );
-            self.ssh_run(&resize_cmd).await
-        } else {
-            let cmd = format!("base64 -w 0 '{}'", params.path);
-            self.ssh_run(&cmd).await
-        };
-
-        match base64_result {
-            Ok((base64_data, 0)) => {
-                let trimmed = clean_content(&base64_data).trim().to_string();
-                if trimmed.is_empty() {
-                    return Ok(CallToolResult::error(vec![Content::text(
-                        "Failed to encode image: empty output",
-                    )]));
-                }
-                let final_mime = if needs_resize && matches!(ext.as_str(), "png" | "gif" | "webp") {
-                    "image/png"
-                } else if needs_resize {
-                    "image/jpeg"
-                } else {
-                    mime_type
-                };
-                Ok(CallToolResult::success(vec![Content::image(
-                    trimmed, final_mime,
-                )]))
-            }
-            Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to read image: {}",
-                clean_content(&output).trim()
-            ))])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-        }
-    }
-
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open result files in a browser tab for viewing. Shows images, plots, PDFs, text, and CSV files in a clean web page. Use this when the user asks to 'show results', 'view plots', or 'display output'. For directories, all viewable files are shown. For a single file, that file is displayed.")]
+    #[tool(description = "View result files (images, plots, figures, PDFs, text, CSV) from the remote SSH server by opening them in a browser tab. This is the ONLY way to display files visually. Use this whenever the user asks to 'show', 'view', 'display', or 'see' any file. For directories, all viewable files are shown. For a single file, that file is displayed. Supports PNG, JPG, GIF, SVG, WebP, PDF, TXT, CSV, JSON, HTML.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
