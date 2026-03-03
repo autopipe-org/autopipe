@@ -367,8 +367,25 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   /* PDF viewer */
   .pdf-viewer {{ width: 100%; height: 100%; border: none; border-radius: 8px; }}
 
-  /* IGV viewer */
+  /* IGV viewer (CRAM/BCF only) */
   .igv-viewer {{ width: 100%; min-height: 500px; }}
+
+  /* Genomics table viewer */
+  .genomics-viewer {{ overflow: auto; }}
+  .genomics-viewer table {{ width: 100%; border-collapse: collapse; font-size: 13px; table-layout: auto; }}
+  .genomics-viewer th {{ background: #f5f5f5; padding: 8px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #e5e5e5; position: sticky; top: 0; white-space: nowrap; }}
+  .genomics-viewer td {{ padding: 6px 12px; border-bottom: 1px solid #f0f0f0; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 12px; white-space: nowrap; }}
+  .genomics-viewer tr:hover td {{ background: #f0f7ff; }}
+  .genomics-viewer .section-title {{ font-size: 14px; font-weight: 600; margin: 16px 0 8px; color: #333; }}
+  .genomics-viewer .meta {{ font-size: 12px; color: #666; margin-bottom: 12px; }}
+  .genomics-viewer .seq {{ font-family: 'SF Mono', monospace; font-size: 11px; letter-spacing: 1px; }}
+  .genomics-viewer .base-A {{ color: #2ecc71; font-weight: 600; }}
+  .genomics-viewer .base-T {{ color: #e74c3c; font-weight: 600; }}
+  .genomics-viewer .base-C {{ color: #3498db; font-weight: 600; }}
+  .genomics-viewer .base-G {{ color: #f39c12; font-weight: 600; }}
+  .fasta-viewer {{ overflow: auto; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.6; }}
+  .fasta-viewer .seq-header {{ font-weight: 700; color: #2c3e50; margin-top: 12px; margin-bottom: 4px; }}
+  .fasta-viewer .seq-line {{ letter-spacing: 1px; word-break: break-all; }}
 
   /* HDF5 viewer */
   .hdf5-viewer {{ overflow: auto; }}
@@ -482,7 +499,12 @@ function selectFile(name) {{
   // Determine viewer type
   var imageExts = ['png','jpg','jpeg','gif','svg','webp','bmp','tiff','tif'];
   var textExts = ['txt','log','csv','tsv','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq'];
-  var igvExts = ['bam','cram','vcf','bcf','bed','gff','gtf','gff3','fasta','fa','bigwig','bw','bigbed','bb'];
+  var igvExts = ['cram','bcf'];
+  var vcfExts = ['vcf'];
+  var bedExts = ['bed'];
+  var gffExts = ['gff','gtf','gff3'];
+  var fastaExts = ['fasta','fa'];
+  var bamExts = ['bam'];
   var hdf5Exts = ['h5ad','h5','hdf5'];
 
   if (imageExts.indexOf(ext) >= 0) {{
@@ -491,6 +513,16 @@ function selectFile(name) {{
     renderPdfViewer(name, actions, content);
   }} else if (textExts.indexOf(ext) >= 0) {{
     renderTextViewer(name, actions, content);
+  }} else if (vcfExts.indexOf(ext) >= 0) {{
+    renderVcfViewer(name, actions, content);
+  }} else if (bedExts.indexOf(ext) >= 0) {{
+    renderBedViewer(name, actions, content);
+  }} else if (gffExts.indexOf(ext) >= 0) {{
+    renderGffViewer(name, actions, content);
+  }} else if (fastaExts.indexOf(ext) >= 0) {{
+    renderFastaViewer(name, actions, content);
+  }} else if (bamExts.indexOf(ext) >= 0) {{
+    renderBamViewer(name, actions, content);
   }} else if (igvExts.indexOf(ext) >= 0) {{
     renderIgvViewer(name, ext, actions, content);
   }} else if (hdf5Exts.indexOf(ext) >= 0) {{
@@ -547,7 +579,369 @@ async function renderTextViewer(name, actions, content) {{
   }}
 }}
 
-// ── IGV.js Viewer ──
+// ── VCF Viewer (text parse → table) ──
+async function renderVcfViewer(name, actions, content) {{
+  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+  content.innerHTML = '<div class="genomics-viewer" id="vcfDiv">Loading VCF...</div>';
+  try {{
+    var resp = await fetch('/file/' + encodeURIComponent(name));
+    var text = await resp.text();
+    var lines = text.split('\n');
+    var div = document.getElementById('vcfDiv');
+    if (!div) return;
+
+    var metaLines = [];
+    var headerCols = [];
+    var records = [];
+
+    lines.forEach(function(line) {{
+      if (line.startsWith('##')) {{
+        metaLines.push(line);
+      }} else if (line.startsWith('#CHROM')) {{
+        headerCols = line.substring(1).split('\t');
+      }} else if (line.trim()) {{
+        records.push(line.split('\t'));
+      }}
+    }});
+
+    var html = '<p class="meta">' + records.length + ' variant(s) &middot; ' + metaLines.length + ' metadata lines</p>';
+
+    // Metadata (collapsible)
+    if (metaLines.length > 0) {{
+      html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show metadata (' + metaLines.length + ' lines)</summary>';
+      html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + metaLines.join('\n').replace(/</g,'&lt;') + '</pre></details>';
+    }}
+
+    // Variant table
+    html += '<table><tr>';
+    headerCols.forEach(function(col) {{ html += '<th>' + col + '</th>'; }});
+    html += '</tr>';
+    records.forEach(function(rec) {{
+      html += '<tr>';
+      rec.forEach(function(val, i) {{
+        if (headerCols[i] === 'REF' || headerCols[i] === 'ALT') {{
+          html += '<td class="seq">' + colorBases(val) + '</td>';
+        }} else {{
+          html += '<td>' + val + '</td>';
+        }}
+      }});
+      html += '</tr>';
+    }});
+    html += '</table>';
+    div.innerHTML = html;
+  }} catch(e) {{
+    document.getElementById('vcfDiv').innerHTML = 'Error: ' + e.message;
+  }}
+}}
+
+// ── BED Viewer (text parse → table) ──
+async function renderBedViewer(name, actions, content) {{
+  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+  content.innerHTML = '<div class="genomics-viewer" id="bedDiv">Loading BED...</div>';
+  try {{
+    var resp = await fetch('/file/' + encodeURIComponent(name));
+    var text = await resp.text();
+    var lines = text.split('\n').filter(function(l) {{ return l.trim() && !l.startsWith('#') && !l.startsWith('track') && !l.startsWith('browser'); }});
+    var div = document.getElementById('bedDiv');
+    if (!div) return;
+
+    // Detect BED format (3-12 columns)
+    var ncols = lines.length > 0 ? lines[0].split('\t').length : 3;
+    var colNames = ['chrom','chromStart','chromEnd','name','score','strand','thickStart','thickEnd','itemRgb','blockCount','blockSizes','blockStarts'];
+
+    var html = '<p class="meta">' + lines.length + ' region(s) &middot; BED' + Math.min(ncols, 12) + ' format</p>';
+    html += '<table><tr>';
+    for (var i = 0; i < Math.min(ncols, colNames.length); i++) {{
+      html += '<th>' + colNames[i] + '</th>';
+    }}
+    html += '</tr>';
+    lines.forEach(function(line) {{
+      var cols = line.split('\t');
+      html += '<tr>';
+      cols.forEach(function(val) {{ html += '<td>' + val + '</td>'; }});
+      html += '</tr>';
+    }});
+    html += '</table>';
+    div.innerHTML = html;
+  }} catch(e) {{
+    document.getElementById('bedDiv').innerHTML = 'Error: ' + e.message;
+  }}
+}}
+
+// ── GFF/GTF Viewer (text parse → table) ──
+async function renderGffViewer(name, actions, content) {{
+  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+  content.innerHTML = '<div class="genomics-viewer" id="gffDiv">Loading GFF...</div>';
+  try {{
+    var resp = await fetch('/file/' + encodeURIComponent(name));
+    var text = await resp.text();
+    var lines = text.split('\n');
+    var div = document.getElementById('gffDiv');
+    if (!div) return;
+
+    var comments = [];
+    var records = [];
+    lines.forEach(function(line) {{
+      if (line.startsWith('#')) comments.push(line);
+      else if (line.trim()) records.push(line.split('\t'));
+    }});
+
+    var colNames = ['seqid','source','type','start','end','score','strand','phase','attributes'];
+    var html = '<p class="meta">' + records.length + ' feature(s)</p>';
+
+    if (comments.length > 0) {{
+      html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show comments (' + comments.length + ' lines)</summary>';
+      html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + comments.join('\n').replace(/</g,'&lt;') + '</pre></details>';
+    }}
+
+    html += '<table><tr>';
+    colNames.forEach(function(col) {{ html += '<th>' + col + '</th>'; }});
+    html += '</tr>';
+    records.forEach(function(rec) {{
+      html += '<tr>';
+      rec.forEach(function(val, i) {{
+        if (i === 8) {{
+          // Parse attributes for readability
+          var pretty = val.replace(/;/g, '; ');
+          html += '<td style="white-space:normal;max-width:400px;word-break:break-all;font-size:11px">' + pretty + '</td>';
+        }} else {{
+          html += '<td>' + val + '</td>';
+        }}
+      }});
+      html += '</tr>';
+    }});
+    html += '</table>';
+    div.innerHTML = html;
+  }} catch(e) {{
+    document.getElementById('gffDiv').innerHTML = 'Error: ' + e.message;
+  }}
+}}
+
+// ── FASTA Viewer ──
+async function renderFastaViewer(name, actions, content) {{
+  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+  content.innerHTML = '<div class="fasta-viewer" id="fastaDiv">Loading FASTA...</div>';
+  try {{
+    var resp = await fetch('/file/' + encodeURIComponent(name));
+    var text = await resp.text();
+    var div = document.getElementById('fastaDiv');
+    if (!div) return;
+
+    var lines = text.split('\n');
+    var seqCount = 0;
+    var totalBp = 0;
+    var html = '';
+
+    lines.forEach(function(line) {{
+      if (line.startsWith('>')) {{
+        seqCount++;
+        html += '<div class="seq-header">' + line.replace(/</g,'&lt;') + '</div>';
+      }} else if (line.trim()) {{
+        totalBp += line.trim().length;
+        html += '<div class="seq-line">' + colorBases(line.trim()) + '</div>';
+      }}
+    }});
+
+    var meta = '<p class="meta" style="margin-bottom:12px">' + seqCount + ' sequence(s) &middot; ' + totalBp.toLocaleString() + ' bp total</p>';
+    div.innerHTML = meta + html;
+  }} catch(e) {{
+    document.getElementById('fastaDiv').innerHTML = 'Error: ' + e.message;
+  }}
+}}
+
+// ── BAM Viewer (parse header + reads as table) ──
+async function renderBamViewer(name, actions, content) {{
+  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+  content.innerHTML = '<div class="genomics-viewer" id="bamDiv">Loading BAM...</div>';
+  try {{
+    var resp = await fetch('/file/' + encodeURIComponent(name));
+    var buf = await resp.arrayBuffer();
+    var div = document.getElementById('bamDiv');
+    if (!div) return;
+
+    // BAM is BGZF compressed. Decompress first block(s) to read header + reads.
+    var data = new Uint8Array(buf);
+    var decompressed = [];
+
+    // Parse BGZF blocks
+    var offset = 0;
+    while (offset < data.length) {{
+      // BGZF block header: 18 bytes minimum
+      if (offset + 18 > data.length) break;
+      // Check gzip magic
+      if (data[offset] !== 0x1f || data[offset+1] !== 0x8b) break;
+      // BSIZE is at offset+16 (2 bytes LE) = total block size - 1
+      var bsize = data[offset+16] | (data[offset+17] << 8);
+      var blockEnd = offset + bsize + 1;
+      if (blockEnd > data.length) break;
+
+      // Compressed data starts at offset+18, ends at blockEnd-8 (8 bytes for CRC32+ISIZE)
+      var cdata = data.slice(offset + 18, blockEnd - 8);
+      try {{
+        var inflated = await asyncInflate(cdata);
+        decompressed.push(inflated);
+      }} catch(e) {{ break; }}
+      offset = blockEnd;
+      // Limit: decompress max 2MB to avoid hanging
+      var totalLen = 0;
+      decompressed.forEach(function(d) {{ totalLen += d.length; }});
+      if (totalLen > 2 * 1024 * 1024) break;
+    }}
+
+    // Concatenate decompressed data
+    var totalSize = 0;
+    decompressed.forEach(function(d) {{ totalSize += d.length; }});
+    var raw = new Uint8Array(totalSize);
+    var pos = 0;
+    decompressed.forEach(function(d) {{
+      raw.set(d, pos);
+      pos += d.length;
+    }});
+
+    // Parse BAM header
+    var view = new DataView(raw.buffer);
+    if (raw[0] !== 66 || raw[1] !== 65 || raw[2] !== 77 || raw[3] !== 1) {{
+      throw new Error('Not a valid BAM file');
+    }}
+    var headerLen = view.getInt32(4, true);
+    var headerText = new TextDecoder().decode(raw.slice(8, 8 + headerLen));
+    var refOffset = 8 + headerLen;
+    var nRef = view.getInt32(refOffset, true);
+    refOffset += 4;
+
+    // Parse reference sequences
+    var refs = [];
+    for (var r = 0; r < nRef; r++) {{
+      var nameLen = view.getInt32(refOffset, true);
+      refOffset += 4;
+      var refName = new TextDecoder().decode(raw.slice(refOffset, refOffset + nameLen - 1));
+      refOffset += nameLen;
+      var refLen = view.getInt32(refOffset, true);
+      refOffset += 4;
+      refs.push({{ name: refName, length: refLen }});
+    }}
+
+    // Parse alignment records
+    var reads = [];
+    var readOffset = refOffset;
+    var maxReads = 500;
+    var seqLookup = 'NACMGRSVTWYHKDBN';
+
+    while (readOffset + 4 < raw.length && reads.length < maxReads) {{
+      var blockSize = view.getInt32(readOffset, true);
+      if (blockSize <= 0 || readOffset + 4 + blockSize > raw.length) break;
+      var rStart = readOffset + 4;
+
+      var refID = view.getInt32(rStart, true);
+      var posn = view.getInt32(rStart + 4, true);
+      var nameLen2 = raw[rStart + 8];
+      var mapq = raw[rStart + 9];
+      var nCigarOp = view.getUint16(rStart + 12, true);
+      var flag = view.getUint16(rStart + 14, true);
+      var seqLen = view.getInt32(rStart + 16, true);
+
+      var readName = new TextDecoder().decode(raw.slice(rStart + 32, rStart + 32 + nameLen2 - 1));
+
+      // Parse CIGAR
+      var cigarOff = rStart + 32 + nameLen2;
+      var cigar = '';
+      var cigarOps = 'MIDNSHP=X';
+      for (var c = 0; c < nCigarOp; c++) {{
+        var cigarVal = view.getUint32(cigarOff + c * 4, true);
+        cigar += (cigarVal >> 4) + cigarOps[cigarVal & 0xf];
+      }}
+
+      // Parse sequence
+      var seqOff = cigarOff + nCigarOp * 4;
+      var seq = '';
+      for (var s = 0; s < seqLen; s++) {{
+        var b = raw[seqOff + (s >> 1)];
+        seq += seqLookup[(s & 1) ? (b & 0x0f) : ((b >> 4) & 0x0f)];
+      }}
+
+      var refName2 = (refID >= 0 && refID < refs.length) ? refs[refID].name : '*';
+      reads.push({{
+        name: readName,
+        flag: flag,
+        chr: refName2,
+        pos: posn + 1,
+        mapq: mapq,
+        cigar: cigar || '*',
+        seq: seq
+      }});
+
+      readOffset += 4 + blockSize;
+    }}
+
+    // Build HTML
+    var html = '<p class="meta">' + refs.length + ' reference(s) &middot; ' + reads.length + ' read(s) shown' + (reads.length >= maxReads ? ' (limited to ' + maxReads + ')' : '') + '</p>';
+
+    // Reference info
+    if (refs.length > 0) {{
+      html += '<details style="margin-bottom:12px" open><summary style="cursor:pointer;font-size:13px;font-weight:600">References</summary>';
+      html += '<table><tr><th>Name</th><th>Length</th></tr>';
+      refs.forEach(function(ref) {{
+        html += '<tr><td>' + ref.name + '</td><td>' + ref.length.toLocaleString() + ' bp</td></tr>';
+      }});
+      html += '</table></details>';
+    }}
+
+    // Header (collapsible)
+    if (headerText.trim()) {{
+      html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">SAM header</summary>';
+      html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + headerText.replace(/</g,'&lt;') + '</pre></details>';
+    }}
+
+    // Reads table
+    html += '<table><tr><th>Read Name</th><th>Flag</th><th>Chr</th><th>Pos</th><th>MAPQ</th><th>CIGAR</th><th>Sequence</th></tr>';
+    reads.forEach(function(rd) {{
+      html += '<tr><td>' + rd.name + '</td><td>' + rd.flag + '</td><td>' + rd.chr + '</td><td>' + rd.pos + '</td><td>' + rd.mapq + '</td><td>' + rd.cigar + '</td><td class="seq">' + colorBases(rd.seq) + '</td></tr>';
+    }});
+    html += '</table>';
+    div.innerHTML = html;
+  }} catch(e) {{
+    document.getElementById('bamDiv').innerHTML =
+      '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
+      '<p class="no-preview-title">BAM Parse Error</p>' +
+      '<p class="no-preview-msg">' + e.message + '</p>' +
+      '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
+  }}
+}}
+
+// ── BGZF decompression using browser DecompressionStream ──
+async function asyncInflate(data) {{
+  var ds = new DecompressionStream('deflate-raw');
+  var writer = ds.writable.getWriter();
+  writer.write(data);
+  writer.close();
+  var reader = ds.readable.getReader();
+  var chunks = [];
+  while (true) {{
+    var result = await reader.read();
+    if (result.done) break;
+    chunks.push(result.value);
+  }}
+  var totalLen = 0;
+  chunks.forEach(function(c) {{ totalLen += c.length; }});
+  var out = new Uint8Array(totalLen);
+  var off = 0;
+  chunks.forEach(function(c) {{ out.set(c, off); off += c.length; }});
+  return out;
+}}
+
+// ── Color bases helper ──
+function colorBases(seq) {{
+  return seq.replace(/[ATCGN]/gi, function(base) {{
+    var upper = base.toUpperCase();
+    if (upper === 'A') return '<span class="base-A">' + base + '</span>';
+    if (upper === 'T') return '<span class="base-T">' + base + '</span>';
+    if (upper === 'C') return '<span class="base-C">' + base + '</span>';
+    if (upper === 'G') return '<span class="base-G">' + base + '</span>';
+    return base;
+  }});
+}}
+
+// ── IGV.js Viewer (CRAM/BCF only) ──
 var igvLoaded = false;
 function loadIgv() {{
   return new Promise(function(resolve, reject) {{
@@ -562,8 +956,7 @@ function loadIgv() {{
 
 async function renderIgvViewer(name, ext, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-  content.innerHTML = '<div class="igv-viewer" id="igvDiv">Loading IGV.js...</div>';
-
+  content.innerHTML = '<div class="igv-viewer" id="igvDiv">Loading IGV.js (CRAM/BCF requires reference genome)...</div>';
   try {{
     await loadIgv();
     var div = document.getElementById('igvDiv');
@@ -573,58 +966,10 @@ async function renderIgvViewer(name, ext, actions, content) {{
     var fileUrl = '/file/' + encodeURIComponent(name);
     var tracks = [];
 
-    // Determine track type based on extension
-    if (ext === 'bam' || ext === 'cram') {{
-      tracks.push({{
-        type: 'alignment',
-        format: ext,
-        url: fileUrl,
-        name: name
-      }});
-    }} else if (ext === 'vcf' || ext === 'bcf') {{
-      tracks.push({{
-        type: 'variant',
-        format: ext === 'bcf' ? 'vcf' : ext,
-        url: fileUrl,
-        name: name
-      }});
-    }} else if (ext === 'bed') {{
-      tracks.push({{
-        type: 'annotation',
-        format: 'bed',
-        url: fileUrl,
-        name: name
-      }});
-    }} else if (ext === 'gff' || ext === 'gtf' || ext === 'gff3') {{
-      tracks.push({{
-        type: 'annotation',
-        format: ext,
-        url: fileUrl,
-        name: name
-      }});
-    }} else if (ext === 'fasta' || ext === 'fa') {{
-      // FASTA as reference
-      igv.createBrowser(div, {{
-        reference: {{
-          fastaURL: fileUrl,
-          indexed: false
-        }}
-      }});
-      return;
-    }} else if (ext === 'bigwig' || ext === 'bw') {{
-      tracks.push({{
-        type: 'wig',
-        format: 'bigwig',
-        url: fileUrl,
-        name: name
-      }});
-    }} else if (ext === 'bigbed' || ext === 'bb') {{
-      tracks.push({{
-        type: 'annotation',
-        format: 'bigbed',
-        url: fileUrl,
-        name: name
-      }});
+    if (ext === 'cram') {{
+      tracks.push({{ type: 'alignment', format: 'cram', url: fileUrl, name: name }});
+    }} else if (ext === 'bcf') {{
+      tracks.push({{ type: 'variant', format: 'vcf', url: fileUrl, name: name }});
     }}
 
     igv.createBrowser(div, {{
@@ -634,7 +979,7 @@ async function renderIgvViewer(name, ext, actions, content) {{
   }} catch(e) {{
     content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
       '<p class="no-preview-title">IGV.js Load Error</p>' +
-      '<p class="no-preview-msg">' + e.message + '</p>' +
+      '<p class="no-preview-msg">' + e.message + '<br><br>CRAM and BCF files require IGV.js with a reference genome.<br>Download and inspect with command-line tools.</p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
   }}
 }}
