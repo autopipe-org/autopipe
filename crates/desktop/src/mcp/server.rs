@@ -363,7 +363,108 @@ impl AutoPipeServer {
         mounts
     }
 
-    /// Find the pipeline directory for a given Docker image name.
+    /// Extract chromosome/contig names from any IGV-compatible file via SSH.
+    /// Supports: BAM, CRAM, VCF, BCF, BED, GFF, GTF, GFF3.
+    async fn detect_chroms_from_headers(&self, file_paths: &[String]) -> Vec<String> {
+        for path in file_paths {
+            let ext = path.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            let cmd = match ext.as_str() {
+                // BAM/CRAM: read @SQ header lines for sequence names
+                "bam" | "cram" => format!(
+                    "samtools view -H '{}' 2>/dev/null | grep '^@SQ' | head -10 | sed 's/.*SN:\\([^\\t]*\\).*/\\1/'",
+                    path
+                ),
+                // VCF/BCF: read ##contig header lines
+                "vcf" => format!(
+                    "grep '^##contig' '{}' 2>/dev/null | head -10 | sed 's/.*ID=\\([^,>]*\\).*/\\1/'",
+                    path
+                ),
+                "bcf" => format!(
+                    "bcftools view -h '{}' 2>/dev/null | grep '^##contig' | head -10 | sed 's/.*ID=\\([^,>]*\\).*/\\1/'",
+                    path
+                ),
+                // BED/GFF/GTF/GFF3: first column is chromosome name
+                "bed" | "gff" | "gff3" | "gtf" => format!(
+                    "grep -v '^#' '{}' 2>/dev/null | head -50 | cut -f1 | sort -u | head -10",
+                    path
+                ),
+                _ => continue,
+            };
+
+            if let Ok((output, 0)) = self.ssh_run(&cmd).await {
+                let cleaned = clean_content(&output);
+                let chroms: Vec<String> = cleaned
+                    .trim()
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect();
+                if !chroms.is_empty() {
+                    return chroms;
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Read contig names from a FASTA file (lines starting with '>').
+    async fn read_fasta_contigs(&self, fasta_path: &str) -> Vec<String> {
+        let cmd = format!(
+            "grep '^>' '{}' 2>/dev/null | head -20 | sed 's/^>\\([^ \\t]*\\).*/\\1/'",
+            fasta_path
+        );
+        if let Ok((output, 0)) = self.ssh_run(&cmd).await {
+            let cleaned = clean_content(&output);
+            cleaned
+                .trim()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Map chromosome naming patterns to IGV genome IDs.
+    fn chroms_to_genome_id(chroms: &[String]) -> Option<String> {
+        if chroms.is_empty() {
+            return None;
+        }
+
+        let has_chr_prefix = chroms.iter().any(|c| c.starts_with("chr"));
+        let first = chroms[0].as_str();
+
+        if has_chr_prefix {
+            // Human: chr1-chr22, chrX, chrY
+            if chroms.iter().any(|c| c == "chr1" || c == "chrX") {
+                return Some("hg38".to_string());
+            }
+            // Mouse: chr1-chr19, chrX, chrY (no chr20+)
+            if chroms.iter().any(|c| c == "chr19") && !chroms.iter().any(|c| c == "chr20") {
+                return Some("mm39".to_string());
+            }
+            // Default with chr prefix: assume human
+            return Some("hg38".to_string());
+        }
+
+        // Without chr prefix
+        // Drosophila: 2L, 2R, 3L, 3R, X, 4
+        if chroms.iter().any(|c| c == "2L" || c == "2R") {
+            return Some("dm6".to_string());
+        }
+        // C. elegans: I, II, III, IV, V, X
+        if chroms.iter().any(|c| c == "I" || c == "II" || c == "III") {
+            return Some("ce11".to_string());
+        }
+        // Numeric chromosomes (1, 2, ... X) — likely human (Ensembl-style)
+        if first == "1" || first == "X" {
+            return Some("hg38".to_string());
+        }
+
+        None
+    }
+
     /// Parse h5ad/h5/hdf5 file on the SSH server using Docker + h5py.
     /// Returns JSON string with file structure, obs, var metadata.
     async fn parse_h5ad_on_server(&self, remote_path: &str) -> Result<String, String> {
@@ -378,7 +479,7 @@ DOCKERFILE"#;
         let filename = remote_path.rsplitn(2, '/').next().unwrap_or(remote_path);
 
         let parse_cmd = format!(
-            r#"docker run --rm -v '{parent_dir}:/data:ro' autopipe-h5parser python3 << 'PYEOF'
+            r#"docker run --rm --memory=2g -v '{parent_dir}:/data:ro' autopipe-h5parser python3 << 'PYEOF'
 import h5py, json, sys, os
 
 path = '/data/{filename}'
@@ -387,7 +488,9 @@ size = os.path.getsize(path)
 f = h5py.File(path, 'r')
 items = []
 
-def walk(group, prefix=''):
+def walk(group, prefix='', depth=0):
+    if depth > 3:
+        return
     for key in group.keys():
         full = prefix + '/' + key if prefix else key
         obj = group[key]
@@ -395,7 +498,7 @@ def walk(group, prefix=''):
             items.append({{"key": full, "type": "Dataset", "shape": str(list(obj.shape)), "dtype": str(obj.dtype)}})
         elif isinstance(obj, h5py.Group):
             items.append({{"key": full + "/", "type": "Group", "shape": "-", "dtype": "-"}})
-            walk(obj, full)
+            walk(obj, full, depth + 1)
 
 walk(f)
 
@@ -403,25 +506,39 @@ obs_cols = []
 if 'obs' in f:
     obs = f['obs']
     for k in obs.keys():
-        dtype = str(obs[k].dtype) if isinstance(obs[k], h5py.Dataset) else 'group'
-        n_cats = 0
-        if isinstance(obs[k], h5py.Dataset) and obs[k].dtype.kind == 'O':
-            try:
-                n_cats = len(set(obs[k][()].astype(str)))
-            except:
-                pass
-        elif k in obs and isinstance(obs[k], h5py.Group) and 'categories' in obs[k]:
-            try:
-                n_cats = len(obs[k]['categories'][()])
-            except:
-                pass
-        obs_cols.append({{"name": k, "dtype": dtype, "n_categories": n_cats}})
+        obj = obs[k]
+        if isinstance(obj, h5py.Dataset):
+            dtype = str(obj.dtype)
+            n_cats = 0
+            # For categorical data stored as codes + categories (anndata format)
+            if obj.dtype.kind in ('i', 'u') and k in obs and isinstance(obs.get(k), h5py.Group):
+                pass  # handled below
+        elif isinstance(obj, h5py.Group):
+            dtype = 'categorical'
+            n_cats = 0
+            if 'categories' in obj:
+                try:
+                    n_cats = obj['categories'].shape[0]
+                except:
+                    pass
+            obs_cols.append({{"name": k, "dtype": dtype, "n_categories": n_cats}})
+            continue
+        else:
+            dtype = 'unknown'
+            n_cats = 0
+        obs_cols.append({{"name": k, "dtype": dtype, "n_categories": 0}})
 
 var_cols = []
 if 'var' in f:
     var = f['var']
     for k in var.keys():
-        dtype = str(var[k].dtype) if isinstance(var[k], h5py.Dataset) else 'group'
+        obj = var[k]
+        if isinstance(obj, h5py.Dataset):
+            dtype = str(obj.dtype)
+        elif isinstance(obj, h5py.Group):
+            dtype = 'categorical'
+        else:
+            dtype = 'unknown'
         var_cols.append({{"name": k, "dtype": dtype}})
 
 n_obs = 0
@@ -429,14 +546,29 @@ n_var = 0
 if 'X' in f:
     x = f['X']
     if isinstance(x, h5py.Dataset):
-        n_obs, n_var = x.shape[0], x.shape[1] if len(x.shape) > 1 else 0
+        n_obs = x.shape[0]
+        n_var = x.shape[1] if len(x.shape) > 1 else 0
     elif isinstance(x, h5py.Group):
-        if 'data' in x:
-            attrs = dict(x.attrs)
-            if 'shape' in attrs:
-                import numpy as np
-                sh = list(attrs['shape'])
-                n_obs, n_var = int(sh[0]), int(sh[1]) if len(sh) > 1 else 0
+        attrs = dict(x.attrs)
+        if 'shape' in attrs:
+            sh = list(attrs['shape'])
+            n_obs = int(sh[0])
+            n_var = int(sh[1]) if len(sh) > 1 else 0
+elif 'obs' in f:
+    obs = f['obs']
+    attrs = dict(obs.attrs)
+    if '_index' in attrs:
+        idx_key = attrs['_index']
+        if isinstance(idx_key, bytes):
+            idx_key = idx_key.decode()
+        if idx_key in obs and isinstance(obs[idx_key], h5py.Dataset):
+            n_obs = obs[idx_key].shape[0]
+    if n_obs == 0:
+        for k in obs.keys():
+            obj = obs[k]
+            if isinstance(obj, h5py.Dataset) and len(obj.shape) == 1:
+                n_obs = obj.shape[0]
+                break
 
 obsm_keys = []
 if 'obsm' in f:
@@ -1626,8 +1758,65 @@ impl AutoPipeServer {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
+        // Auto-detect reference genome if not explicitly provided
+        let reference = if params.reference.is_some() {
+            params.reference.clone()
+        } else {
+            // Check if any genomics files need a reference
+            let genomics_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf"];
+            let has_genomics = file_paths.iter().any(|p| {
+                let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+                genomics_exts.contains(&ext.as_str())
+            });
+
+            if has_genomics {
+                // 1) Detect chromosome names from BAM/VCF headers
+                let detected_chroms = self.detect_chroms_from_headers(&file_paths).await;
+
+                // 2) Check for local FASTA files and verify species match
+                let fasta_path = file_paths.iter().find(|p| {
+                    let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+                    matches!(ext.as_str(), "fasta" | "fa" | "fna")
+                });
+
+                if let Some(fasta) = fasta_path {
+                    if detected_chroms.is_empty() {
+                        // No BAM/VCF to compare — just use the FASTA
+                        std::path::Path::new(fasta)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        // Read FASTA contig names and compare with BAM/VCF chromosomes
+                        let fasta_contigs = self.read_fasta_contigs(fasta).await;
+                        let matched = if fasta_contigs.is_empty() {
+                            false
+                        } else {
+                            // Check if any BAM/VCF chromosome exists in FASTA contigs
+                            detected_chroms.iter().any(|c| fasta_contigs.contains(c))
+                        };
+
+                        if matched {
+                            std::path::Path::new(fasta)
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.to_string())
+                        } else {
+                            // Species mismatch — fall back to online genome ID
+                            Self::chroms_to_genome_id(&detected_chroms)
+                        }
+                    }
+                } else {
+                    // 3) No FASTA file — use online genome ID from chromosome patterns
+                    Self::chroms_to_genome_id(&detected_chroms)
+                }
+            } else {
+                None
+            }
+        };
+
         // Open in browser
-        match viewer::show_files(files.clone(), self.config.full_plugins_dir(), params.reference.clone()).await {
+        match viewer::show_files(files.clone(), self.config.full_plugins_dir(), reference).await {
             Ok(url) => {
                 let mut msg = format!(
                     "Opened results in browser: {}\n\nDisplaying {} file(s):",

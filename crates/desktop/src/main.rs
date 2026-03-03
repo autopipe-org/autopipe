@@ -23,43 +23,44 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.iter().any(|a| a == "--register") {
-        // Auto-register MCP server in Claude Desktop config
+        // Auto-register MCP server in all supported clients
         let config_path = config::AppConfig::config_path();
-        match claude_config::register_mcp_server(&config_path.to_string_lossy()) {
-            Ok(_) => {
-                let dest = claude_config::claude_desktop_config_path();
-                println!("MCP server registered in Claude Desktop config:");
-                println!("  {}", dest.display());
-                println!();
-                println!("Restart Claude Desktop to load autopipe tools.");
-                println!();
-                println!("For other MCP-compatible apps (ChatGPT Desktop, Gemini CLI, etc.),");
-                println!("add this command to their MCP server configuration:");
-                println!("  desktop --mcp-server");
-            }
-            Err(e) => {
-                eprintln!("Failed to register: {}", e);
-                std::process::exit(1);
+        let results = claude_config::register_all(&config_path.to_string_lossy());
+        let mut any_ok = false;
+        for (client, result) in &results {
+            match result {
+                Ok(_) => {
+                    println!("Registered in {}: {}", client.name(), client.config_path().display());
+                    any_ok = true;
+                }
+                Err(e) => {
+                    eprintln!("Failed to register in {}: {}", client.name(), e);
+                }
             }
         }
+        if any_ok {
+            println!();
+            println!("Restart your AI app to load autopipe tools.");
+        } else {
+            std::process::exit(1);
+        }
     } else if args.iter().any(|a| a == "--unregister") {
-        // Unregister MCP server from Claude Desktop config
-        match claude_config::unregister_mcp_server() {
-            Ok(_) => println!("MCP server unregistered from Claude Desktop."),
-            Err(e) => {
-                eprintln!("Failed to unregister: {}", e);
-                std::process::exit(1);
+        // Unregister MCP server from all supported clients
+        let results = claude_config::unregister_all();
+        for (client, result) in &results {
+            match result {
+                Ok(_) => println!("Unregistered from {}.", client.name()),
+                Err(e) => eprintln!("Failed to unregister from {}: {}", client.name(), e),
             }
         }
     } else if args.iter().any(|a| a == "--status") {
-        // Check registration status
-        let dest = claude_config::claude_desktop_config_path();
-        println!("Config path: {}", dest.display());
-        if claude_config::is_registered() {
-            println!("MCP server: registered (Claude Desktop)");
-        } else {
-            println!("MCP server: not registered");
+        // Check registration status for all clients
+        println!("MCP Registration Status:");
+        for (client, registered) in claude_config::status_all() {
+            let status = if registered { "registered" } else { "not registered" };
+            println!("  {}: {} ({})", client.name(), status, client.config_path().display());
         }
+        println!();
         let config = config::AppConfig::load();
         println!("Registry URLs: {:?}", config.registry_urls);
     } else {
@@ -72,13 +73,12 @@ fn main() {
             println!("AutoPipe Desktop");
             println!();
             println!("MCP server for bioinformatics pipeline management.");
-            println!("Compatible with Claude Desktop, ChatGPT Desktop, Gemini CLI,");
-            println!("OpenAI Codex CLI, and any other MCP-compatible AI application.");
+            println!("Compatible with Claude Desktop, Gemini CLI, and any MCP-compatible app.");
             println!();
             println!("Usage:");
-            println!("  desktop --mcp-server    Run as MCP server (for any MCP-compatible app)");
-            println!("  desktop --register      Auto-register MCP in Claude Desktop");
-            println!("  desktop --unregister    Unregister MCP from Claude Desktop");
+            println!("  desktop --mcp-server    Run as MCP server (stdio transport)");
+            println!("  desktop --register      Auto-register in Claude Desktop & Gemini CLI");
+            println!("  desktop --unregister    Unregister from all supported clients");
             println!("  desktop --status        Check registration status");
             println!();
             println!("GUI mode requires: cargo build --features gui");

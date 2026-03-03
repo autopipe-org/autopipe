@@ -256,20 +256,28 @@ impl eframe::App for AutoPipeApp {
                 if ui.button("Register & Minimize to Tray").clicked() {
                     self.save_config();
                     let config_path = AppConfig::config_path();
-                    match claude_config::register_mcp_server(
+                    let results = claude_config::register_all(
                         &config_path.to_string_lossy(),
-                    ) {
-                        Ok(_) => {
-                            self.config.mcp_registered = true;
-                            let _ = self.config.save();
-                            self.status_message =
-                                "MCP server registered in Claude Desktop. You can now use autopipe tools in Claude Desktop.".into();
-                            self.should_minimize = true;
+                    );
+                    let mut ok_names: Vec<&str> = Vec::new();
+                    let mut any_err = false;
+                    for (client, result) in &results {
+                        match result {
+                            Ok(_) => ok_names.push(client.name()),
+                            Err(_) => any_err = true,
                         }
-                        Err(e) => {
-                            self.status_message =
-                                format!("Failed to register MCP: {}", e);
-                        }
+                    }
+                    if !ok_names.is_empty() {
+                        self.config.mcp_registered = true;
+                        let _ = self.config.save();
+                        self.status_message = format!(
+                            "MCP registered in {}. Restart your AI app to load tools.",
+                            ok_names.join(", ")
+                        );
+                        self.should_minimize = true;
+                    }
+                    if any_err && ok_names.is_empty() {
+                        self.status_message = "Failed to register MCP in any client.".into();
                     }
                 }
                 if !self.status_message.is_empty() {
@@ -335,11 +343,8 @@ impl AutoPipeApp {
             ui.heading("Step 3: Register MCP Tools");
             ui.add_space(5.0);
             ui.label("Click 'Register & Minimize to Tray' at the bottom.");
-            ui.label("This auto-registers autopipe tools in Claude Desktop.");
-            ui.label("For other MCP apps, add the MCP server config manually:");
-            ui.add_space(3.0);
-            ui.code("desktop --mcp-server");
-            ui.add_space(3.0);
+            ui.label("This auto-registers autopipe tools in supported MCP clients");
+            ui.label("(Claude Desktop, Gemini CLI, etc.).");
             ui.label("After registration, restart your AI app to load the tools.");
 
             ui.add_space(15.0);
@@ -694,22 +699,24 @@ impl AutoPipeApp {
         ui.heading("Status");
         ui.add_space(10.0);
 
-        // MCP registration
-        let registered = claude_config::is_registered();
-        ui.horizontal(|ui| {
-            ui.label("MCP Server:");
-            if registered {
-                ui.colored_label(egui::Color32::GREEN, "Registered in Claude Desktop");
-            } else {
-                ui.colored_label(egui::Color32::RED, "Not registered");
-            }
-        });
+        // Per-client MCP registration status
+        ui.label("MCP Registration:");
+        ui.add_space(5.0);
+        let statuses = claude_config::status_all();
+        let any_registered = statuses.iter().any(|(_, r)| *r);
+        for (client, registered) in &statuses {
+            ui.horizontal(|ui| {
+                ui.label(format!("  {}:", client.name()));
+                if *registered {
+                    ui.colored_label(egui::Color32::GREEN, "Registered");
+                } else {
+                    ui.colored_label(egui::Color32::GRAY, "Not registered");
+                }
+                ui.label(format!("({})", client.config_path().display()));
+            });
+        }
 
-        // Config path
-        ui.horizontal(|ui| {
-            ui.label("Config path:");
-            ui.label(claude_config::claude_desktop_config_path().to_string_lossy().to_string());
-        });
+        ui.add_space(5.0);
 
         // Registry URLs
         ui.label("Registry URLs:");
@@ -721,31 +728,43 @@ impl AutoPipeApp {
         }
 
         ui.add_space(10.0);
-        if registered {
-            if ui.button("Unregister MCP Server").clicked() {
-                match claude_config::unregister_mcp_server() {
-                    Ok(_) => {
-                        self.config.mcp_registered = false;
-                        let _ = self.config.save();
-                        self.status_message = "MCP server unregistered from Claude Desktop.".into();
+        if any_registered {
+            if ui.button("Unregister from All").clicked() {
+                let results = claude_config::unregister_all();
+                let mut ok_names: Vec<&str> = Vec::new();
+                for (client, result) in &results {
+                    if result.is_ok() {
+                        ok_names.push(client.name());
                     }
-                    Err(e) => {
-                        self.status_message = format!("Unregister failed: {}", e);
-                    }
+                }
+                if !ok_names.is_empty() {
+                    self.config.mcp_registered = false;
+                    let _ = self.config.save();
+                    self.status_message = format!(
+                        "Unregistered from {}.",
+                        ok_names.join(", ")
+                    );
                 }
             }
         } else if ui.button("Register MCP Server").clicked() {
             self.save_config();
             let config_path = AppConfig::config_path();
-            match claude_config::register_mcp_server(&config_path.to_string_lossy()) {
-                Ok(_) => {
-                    self.config.mcp_registered = true;
-                    let _ = self.config.save();
-                    self.status_message = "MCP server registered. Restart Claude Desktop to load tools.".into();
+            let results = claude_config::register_all(&config_path.to_string_lossy());
+            let mut ok_names: Vec<&str> = Vec::new();
+            for (client, result) in &results {
+                if result.is_ok() {
+                    ok_names.push(client.name());
                 }
-                Err(e) => {
-                    self.status_message = format!("Register failed: {}", e);
-                }
+            }
+            if !ok_names.is_empty() {
+                self.config.mcp_registered = true;
+                let _ = self.config.save();
+                self.status_message = format!(
+                    "Registered in {}. Restart your AI app to load tools.",
+                    ok_names.join(", ")
+                );
+            } else {
+                self.status_message = "Failed to register in any client.".into();
             }
         }
     }

@@ -5,3 +5,4 @@
 .DS_Store
 /docker-libs
 /desktop-linux
+node_modules/
