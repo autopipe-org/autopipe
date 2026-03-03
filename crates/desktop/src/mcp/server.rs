@@ -119,6 +119,16 @@ struct ShowResultsParams {
     /// Omit to load all files.
     #[serde(default)]
     filter: Option<String>,
+    /// Optional reference genome for IGV viewer. Can be:
+    /// - A genome ID string like "hg38", "hg19", "mm10", "mm39", "dm6", "ce11", "danRer11", "sacCer3", "rn7", "galGal6"
+    /// - A FASTA filename that exists among the result files (e.g., "reference.fasta")
+    /// When provided, the IGV tab becomes available for genomics files (BAM, VCF, BED, GFF, FASTA).
+    /// Without reference, only the Data tab is shown for these formats.
+    /// CRAM and BCF files require a reference for viewing.
+    /// If the user has a local reference FASTA in the results directory, pass its filename.
+    /// Otherwise, determine the organism from context and pass the appropriate genome ID.
+    #[serde(default)]
+    reference: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -354,6 +364,125 @@ impl AutoPipeServer {
     }
 
     /// Find the pipeline directory for a given Docker image name.
+    /// Parse h5ad/h5/hdf5 file on the SSH server using Docker + h5py.
+    /// Returns JSON string with file structure, obs, var metadata.
+    async fn parse_h5ad_on_server(&self, remote_path: &str) -> Result<String, String> {
+        // Ensure the h5ad parser Docker image exists
+        let ensure_cmd = r#"docker image inspect autopipe-h5parser >/dev/null 2>&1 || docker build -t autopipe-h5parser - << 'DOCKERFILE'
+FROM python:3.11-slim
+RUN pip install --no-cache-dir h5py numpy
+DOCKERFILE"#;
+        let _ = self.ssh_run(ensure_cmd).await;
+
+        let parent_dir = remote_path.rsplitn(2, '/').nth(1).unwrap_or("/");
+        let filename = remote_path.rsplitn(2, '/').next().unwrap_or(remote_path);
+
+        let parse_cmd = format!(
+            r#"docker run --rm -v '{parent_dir}:/data:ro' autopipe-h5parser python3 << 'PYEOF'
+import h5py, json, sys, os
+
+path = '/data/{filename}'
+size = os.path.getsize(path)
+
+f = h5py.File(path, 'r')
+items = []
+
+def walk(group, prefix=''):
+    for key in group.keys():
+        full = prefix + '/' + key if prefix else key
+        obj = group[key]
+        if isinstance(obj, h5py.Dataset):
+            items.append({{"key": full, "type": "Dataset", "shape": str(list(obj.shape)), "dtype": str(obj.dtype)}})
+        elif isinstance(obj, h5py.Group):
+            items.append({{"key": full + "/", "type": "Group", "shape": "-", "dtype": "-"}})
+            walk(obj, full)
+
+walk(f)
+
+obs_cols = []
+if 'obs' in f:
+    obs = f['obs']
+    for k in obs.keys():
+        dtype = str(obs[k].dtype) if isinstance(obs[k], h5py.Dataset) else 'group'
+        n_cats = 0
+        if isinstance(obs[k], h5py.Dataset) and obs[k].dtype.kind == 'O':
+            try:
+                n_cats = len(set(obs[k][()].astype(str)))
+            except:
+                pass
+        elif k in obs and isinstance(obs[k], h5py.Group) and 'categories' in obs[k]:
+            try:
+                n_cats = len(obs[k]['categories'][()])
+            except:
+                pass
+        obs_cols.append({{"name": k, "dtype": dtype, "n_categories": n_cats}})
+
+var_cols = []
+if 'var' in f:
+    var = f['var']
+    for k in var.keys():
+        dtype = str(var[k].dtype) if isinstance(var[k], h5py.Dataset) else 'group'
+        var_cols.append({{"name": k, "dtype": dtype}})
+
+n_obs = 0
+n_var = 0
+if 'X' in f:
+    x = f['X']
+    if isinstance(x, h5py.Dataset):
+        n_obs, n_var = x.shape[0], x.shape[1] if len(x.shape) > 1 else 0
+    elif isinstance(x, h5py.Group):
+        if 'data' in x:
+            attrs = dict(x.attrs)
+            if 'shape' in attrs:
+                import numpy as np
+                sh = list(attrs['shape'])
+                n_obs, n_var = int(sh[0]), int(sh[1]) if len(sh) > 1 else 0
+
+obsm_keys = []
+if 'obsm' in f:
+    for k in f['obsm'].keys():
+        obj = f['obsm'][k]
+        shape = str(list(obj.shape)) if isinstance(obj, h5py.Dataset) else '-'
+        obsm_keys.append({{"key": k, "shape": shape}})
+
+uns_keys = []
+if 'uns' in f:
+    for k in f['uns'].keys():
+        uns_keys.append(k)
+
+result = {{
+    "file_size": size,
+    "n_obs": n_obs,
+    "n_var": n_var,
+    "items": items,
+    "obs_columns": obs_cols,
+    "var_columns": var_cols,
+    "obsm_keys": obsm_keys,
+    "uns_keys": uns_keys
+}}
+
+json.dump(result, sys.stdout)
+f.close()
+PYEOF"#,
+            parent_dir = parent_dir,
+            filename = filename,
+        );
+
+        match self.ssh_run(&parse_cmd).await {
+            Ok((output, 0)) => {
+                let cleaned = clean_content(&output).trim().to_string();
+                // Verify it's valid JSON
+                if cleaned.starts_with('{') {
+                    Ok(cleaned)
+                } else {
+                    Err(format!("Invalid JSON output: {}", &cleaned[..cleaned.len().min(200)]))
+                }
+            }
+            Ok((output, _)) => Err(format!("Docker h5py parse failed: {}", clean_content(&output).trim())),
+            Err(e) => Err(format!("SSH error: {}", e)),
+        }
+    }
+
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
 
@@ -1296,7 +1425,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser to display files from the remote SSH server. ALWAYS pass a DIRECTORY path (not individual files). The viewer shows ALL files in a sidebar list — the user clicks each file to preview it. NEVER call this tool multiple times for the same directory. Supports: images (PNG/JPG/GIF/SVG/WebP/BMP/TIFF), PDF, text (TXT/LOG/CSV/TSV/JSON/YAML/XML/MD/FASTQ), genomics via igv.js (BAM/CRAM/VCF/BED/GFF/GTF/FASTA/BigWig), HDF5 (h5ad/h5), and all other files with Download. Use this whenever the user asks to 'show', 'view', 'display', 'see', or 'check' results or files.")]
+    #[tool(description = "Open the Results Viewer in a browser to display files from the remote SSH server. ALWAYS pass a DIRECTORY path (not individual files). The viewer shows ALL files in a sidebar list — the user clicks each file to preview it. NEVER call this tool multiple times for the same directory. Supports: images (PNG/JPG/GIF/SVG/WebP/BMP/TIFF), PDF, text (TXT/LOG/CSV/TSV/JSON/YAML/XML/MD/FASTQ), genomics with Data tab (VCF/BED/GFF/BAM/FASTA parsed as tables) and optional IGV tab (requires reference), HDF5 (h5ad/h5). For genomics files: the Data tab always works without reference. The IGV tab requires a reference genome — pass it via the 'reference' parameter as a genome ID (e.g., 'hg38', 'mm10') or a FASTA filename in the results directory. CRAM and BCF files are IGV-only and need a reference to view. If the results contain genomics files, determine the organism and pass the appropriate reference.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -1456,6 +1585,17 @@ impl AutoPipeServer {
                 .unwrap_or("file")
                 .to_string();
 
+            // h5ad/h5/hdf5: parse on server via Docker + h5py (no size limit)
+            if matches!(ext.as_str(), "h5ad" | "h5" | "hdf5") {
+                match self.parse_h5ad_on_server(path).await {
+                    Ok(json_str) => {
+                        files.push((filename, json_str.into_bytes(), "application/x-h5ad-parsed".to_string()));
+                    }
+                    Err(e) => errors.push(format!("{}: h5ad parse error: {}", filename, e)),
+                }
+                continue;
+            }
+
             match self
                 .ssh_run(&format!("base64 -w 0 '{}'", path))
                 .await
@@ -1487,7 +1627,7 @@ impl AutoPipeServer {
         }
 
         // Open in browser
-        match viewer::show_files(files.clone(), self.config.full_plugins_dir()).await {
+        match viewer::show_files(files.clone(), self.config.full_plugins_dir(), params.reference.clone()).await {
             Ok(url) => {
                 let mut msg = format!(
                     "Opened results in browser: {}\n\nDisplaying {} file(s):",

@@ -92,6 +92,16 @@ async fn get_plugins_dir_lock() -> &'static Arc<Mutex<String>> {
         .await
 }
 
+/// Shared reference info (genome ID or FASTA filename).
+static REFERENCE: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_reference_lock() -> &'static Arc<Mutex<Option<String>>> {
+    REFERENCE
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
 /// Scan local plugins directory, reading manifest.json from each subdirectory.
 fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
     let mut plugins = Vec::new();
@@ -159,6 +169,7 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
         .route("/", get(index_handler))
         .route("/logo.png", get(logo_handler))
         .route("/api/files", get(files_list_handler))
+        .route("/api/reference", get(reference_handler))
         .route("/file/{filename}", get(file_handler))
         .route("/plugin/{name}/{*path}", get(plugin_asset_handler))
         .with_state(state);
@@ -191,9 +202,11 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
 }
 
 /// Add files and open browser. Returns the URL.
+/// `reference` can be a local FASTA filename (present in files), or a genome ID like "hg38", "mm10".
 pub async fn show_files(
     files: Vec<(String, Vec<u8>, String)>,
     plugins_dir: String,
+    reference: Option<String>,
 ) -> Result<String, String> {
     // Check if server is already running (to decide whether to open a new tab)
     let already_running = {
@@ -217,6 +230,12 @@ pub async fn show_files(
     {
         let mut p = get_plugins_lock().await.lock().await;
         *p = Arc::new(scanned);
+    }
+
+    // Store reference info
+    {
+        let mut r = get_reference_lock().await.lock().await;
+        *r = reference;
     }
 
     let port = ensure_server(&plugins_dir).await?;
@@ -264,6 +283,15 @@ struct FileListItem {
     name: String,
     mime: String,
     size: usize,
+}
+
+/// API: return reference info as JSON.
+async fn reference_handler() -> Json<serde_json::Value> {
+    let r = get_reference_lock().await.lock().await;
+    match &*r {
+        Some(ref_val) => Json(serde_json::json!({ "reference": ref_val })),
+        None => Json(serde_json::json!({ "reference": null })),
+    }
 }
 
 /// Serve plugin assets from the local plugins directory.
@@ -367,7 +395,20 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   /* PDF viewer */
   .pdf-viewer {{ width: 100%; height: 100%; border: none; border-radius: 8px; }}
 
-  /* IGV viewer (CRAM/BCF only) */
+  /* View mode tabs */
+  .view-tabs {{ display: flex; gap: 2px; margin-right: 12px; background: #eee; border-radius: 6px; padding: 2px; }}
+  .view-tab {{ padding: 4px 14px; border: none; border-radius: 4px; background: transparent; color: #666; font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s; }}
+  .view-tab:hover {{ color: #333; }}
+  .view-tab.active {{ background: #fff; color: #0366d6; box-shadow: 0 1px 2px rgba(0,0,0,0.08); }}
+  .view-tab.disabled {{ color: #bbb; cursor: not-allowed; }}
+
+  /* Pagination */
+  .pagination {{ display: flex; align-items: center; gap: 8px; padding: 10px 0; justify-content: center; font-size: 13px; color: #666; }}
+  .pagination button {{ padding: 4px 12px; border: 1px solid #ddd; border-radius: 4px; background: #f8f8f8; cursor: pointer; font-size: 12px; }}
+  .pagination button:hover {{ background: #eee; }}
+  .pagination button:disabled {{ color: #ccc; cursor: not-allowed; background: #fafafa; }}
+
+  /* IGV viewer */
   .igv-viewer {{ width: 100%; min-height: 500px; }}
 
   /* Genomics table viewer */
@@ -430,8 +471,10 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <script>
 var PLUGINS = {plugins_json};
 var FILES = [];
+var REFERENCE = null;
 var currentFile = null;
 var currentScale = 1;
+var currentViewMode = 'data';
 var loadedPlugins = {{}};
 
 // File icon mapping
@@ -455,12 +498,25 @@ function formatSize(bytes) {{
   return (bytes / 1048576).toFixed(1) + ' MB';
 }}
 
-// Load file list
+// Index file extensions to hide from sidebar
+var indexExts = ['bai','crai','fai','csi','tbi','idx'];
+
+// Load file list and reference info
 async function loadFiles() {{
   var resp = await fetch('/api/files');
-  FILES = await resp.json();
+  var allFiles = await resp.json();
+  FILES = allFiles.filter(function(f) {{
+    var ext = f.name.split('.').pop().toLowerCase();
+    return indexExts.indexOf(ext) < 0;
+  }});
+  // Fetch reference info
+  try {{
+    var refResp = await fetch('/api/reference');
+    var refData = await refResp.json();
+    REFERENCE = refData.reference || null;
+  }} catch(e) {{ REFERENCE = null; }}
   renderSidebar();
-  if (FILES.length > 0) selectFile(FILES[0].name);
+  if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name);
 }}
 
 function renderSidebar() {{
@@ -478,9 +534,42 @@ function renderSidebar() {{
   }});
 }}
 
+// IGV-compatible extensions (can show Data tab, IGV tab, or both)
+var igvDualExts = ['bam','vcf','bed','gff','gtf','gff3','fasta','fa'];
+var igvOnlyExts = ['cram','bcf'];
+
+function hasReference() {{
+  return !!REFERENCE;
+}}
+
+function getIgvReference() {{
+  // If reference is a filename in our files → use local URL
+  if (REFERENCE && FILES.some(function(f) {{ return f.name === REFERENCE; }})) {{
+    return {{ fastaURL: '/file/' + encodeURIComponent(REFERENCE), indexed: false }};
+  }}
+  // Otherwise treat as genome ID (hg38, mm10, etc.)
+  return null;
+}}
+
+function getIgvGenomeId() {{
+  if (!REFERENCE) return null;
+  // If it's a known genome ID
+  var knownGenomes = ['hg38','hg19','hg18','mm39','mm10','mm9','rn7','rn6','dm6','dm3','ce11','danRer11','sacCer3','tair10'];
+  if (knownGenomes.indexOf(REFERENCE) >= 0) return REFERENCE;
+  // If it's a file in our list, not a genome ID
+  if (FILES.some(function(f) {{ return f.name === REFERENCE; }})) return null;
+  // Treat unknown strings as genome IDs
+  return REFERENCE;
+}}
+
 function selectFile(name) {{
+  selectFileWithMode(name, 'data');
+}}
+
+function selectFileWithMode(name, mode) {{
   currentFile = name;
   currentScale = 1;
+  currentViewMode = mode;
 
   // Update sidebar active state
   document.querySelectorAll('.file-item').forEach(function(el) {{
@@ -496,39 +585,56 @@ function selectFile(name) {{
   toolbar.style.display = 'flex';
   title.textContent = name;
 
-  // Determine viewer type
   var imageExts = ['png','jpg','jpeg','gif','svg','webp','bmp','tiff','tif'];
   var textExts = ['txt','log','csv','tsv','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq'];
-  var igvExts = ['cram','bcf'];
-  var vcfExts = ['vcf'];
-  var bedExts = ['bed'];
-  var gffExts = ['gff','gtf','gff3'];
-  var fastaExts = ['fasta','fa'];
-  var bamExts = ['bam'];
   var hdf5Exts = ['h5ad','h5','hdf5'];
 
+  // Dual-tab files: Data + IGV
+  if (igvDualExts.indexOf(ext) >= 0) {{
+    var ref = hasReference();
+    var tabsHtml = '<div class="view-tabs">';
+    tabsHtml += '<button class="view-tab' + (mode === 'data' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'data\')">Data</button>';
+    tabsHtml += '<button class="view-tab' + (mode === 'igv' ? ' active' : '') + (ref ? '' : ' disabled') + '"' +
+      (ref ? ' onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'igv\')"' : ' title="No reference genome available"') +
+      '>IGV</button>';
+    tabsHtml += '</div>';
+    actions.innerHTML = tabsHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+
+    if (mode === 'igv' && ref) {{
+      renderIgvViewer(name, ext, content);
+    }} else {{
+      renderDataViewer(name, ext, content);
+    }}
+    return;
+  }}
+
+  // IGV-only files: CRAM/BCF
+  if (igvOnlyExts.indexOf(ext) >= 0) {{
+    actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+    if (hasReference()) {{
+      renderIgvViewer(name, ext, content);
+    }} else {{
+      content.innerHTML =
+        '<div class="no-preview">' +
+          '<div class="no-preview-icon">🧬</div>' +
+          '<p class="no-preview-title">' + name + '</p>' +
+          '<p class="no-preview-msg">.' + ext + ' files require a reference genome for IGV viewer.<br>Provide a reference path or genome ID (e.g., hg38) when calling show_results.</p>' +
+          '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>' +
+        '</div>';
+    }}
+    return;
+  }}
+
+  // Other file types (no tabs)
   if (imageExts.indexOf(ext) >= 0) {{
     renderImageViewer(name, actions, content);
   }} else if (ext === 'pdf') {{
     renderPdfViewer(name, actions, content);
   }} else if (textExts.indexOf(ext) >= 0) {{
     renderTextViewer(name, actions, content);
-  }} else if (vcfExts.indexOf(ext) >= 0) {{
-    renderVcfViewer(name, actions, content);
-  }} else if (bedExts.indexOf(ext) >= 0) {{
-    renderBedViewer(name, actions, content);
-  }} else if (gffExts.indexOf(ext) >= 0) {{
-    renderGffViewer(name, actions, content);
-  }} else if (fastaExts.indexOf(ext) >= 0) {{
-    renderFastaViewer(name, actions, content);
-  }} else if (bamExts.indexOf(ext) >= 0) {{
-    renderBamViewer(name, actions, content);
-  }} else if (igvExts.indexOf(ext) >= 0) {{
-    renderIgvViewer(name, ext, actions, content);
   }} else if (hdf5Exts.indexOf(ext) >= 0) {{
     renderHdf5Viewer(name, actions, content);
   }} else {{
-    // Check plugins
     var plugin = findPlugin(ext);
     if (plugin) {{
       renderPluginViewer(name, plugin, actions, content);
@@ -536,6 +642,15 @@ function selectFile(name) {{
       renderNoPreview(name, ext, actions, content);
     }}
   }}
+}}
+
+// Route to the correct Data viewer based on extension
+function renderDataViewer(name, ext, content) {{
+  if (ext === 'vcf') renderVcfViewer(name, content);
+  else if (ext === 'bed') renderBedViewer(name, content);
+  else if (ext === 'gff' || ext === 'gtf' || ext === 'gff3') renderGffViewer(name, content);
+  else if (ext === 'fasta' || ext === 'fa') renderFastaViewer(name, content);
+  else if (ext === 'bam') renderBamViewer(name, content);
 }}
 
 // ── Image Viewer ──
@@ -579,369 +694,275 @@ async function renderTextViewer(name, actions, content) {{
   }}
 }}
 
-// ── VCF Viewer (text parse → table) ──
-async function renderVcfViewer(name, actions, content) {{
-  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+// ── Pagination helper ──
+var PAGE_SIZE = 100;
+function renderPaginatedTable(divId, headers, allRows, page, renderRow) {{
+  var totalPages = Math.ceil(allRows.length / PAGE_SIZE) || 1;
+  if (page < 0) page = 0;
+  if (page >= totalPages) page = totalPages - 1;
+  var start = page * PAGE_SIZE;
+  var pageRows = allRows.slice(start, start + PAGE_SIZE);
+
+  var html = '<table><tr>';
+  headers.forEach(function(h) {{ html += '<th>' + h + '</th>'; }});
+  html += '</tr>';
+  pageRows.forEach(function(row, i) {{ html += renderRow(row, start + i); }});
+  html += '</table>';
+
+  if (totalPages > 1) {{
+    html += '<div class="pagination">';
+    html += '<button onclick="window._paginate(\'' + divId + '\',' + (page-1) + ')"' + (page <= 0 ? ' disabled' : '') + '>&laquo; Prev</button>';
+    html += '<span>Page ' + (page+1) + ' / ' + totalPages + ' (' + allRows.length.toLocaleString() + ' rows)</span>';
+    html += '<button onclick="window._paginate(\'' + divId + '\',' + (page+1) + ')"' + (page >= totalPages-1 ? ' disabled' : '') + '>Next &raquo;</button>';
+    html += '</div>';
+  }}
+  return html;
+}}
+
+// ── VCF Viewer ──
+var _vcfCache = {{}};
+async function renderVcfViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="vcfDiv">Loading VCF...</div>';
   try {{
-    var resp = await fetch('/file/' + encodeURIComponent(name));
-    var text = await resp.text();
-    var lines = text.split('\n');
-    var div = document.getElementById('vcfDiv');
-    if (!div) return;
-
-    var metaLines = [];
-    var headerCols = [];
-    var records = [];
-
-    lines.forEach(function(line) {{
-      if (line.startsWith('##')) {{
-        metaLines.push(line);
-      }} else if (line.startsWith('#CHROM')) {{
-        headerCols = line.substring(1).split('\t');
-      }} else if (line.trim()) {{
-        records.push(line.split('\t'));
-      }}
-    }});
-
-    var html = '<p class="meta">' + records.length + ' variant(s) &middot; ' + metaLines.length + ' metadata lines</p>';
-
-    // Metadata (collapsible)
-    if (metaLines.length > 0) {{
-      html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show metadata (' + metaLines.length + ' lines)</summary>';
-      html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + metaLines.join('\n').replace(/</g,'&lt;') + '</pre></details>';
-    }}
-
-    // Variant table
-    html += '<table><tr>';
-    headerCols.forEach(function(col) {{ html += '<th>' + col + '</th>'; }});
-    html += '</tr>';
-    records.forEach(function(rec) {{
-      html += '<tr>';
-      rec.forEach(function(val, i) {{
-        if (headerCols[i] === 'REF' || headerCols[i] === 'ALT') {{
-          html += '<td class="seq">' + colorBases(val) + '</td>';
-        }} else {{
-          html += '<td>' + val + '</td>';
-        }}
+    if (!_vcfCache[name]) {{
+      var resp = await fetch('/file/' + encodeURIComponent(name));
+      var text = await resp.text();
+      var meta = [], hdr = [], recs = [];
+      text.split('\n').forEach(function(l) {{
+        if (l.startsWith('##')) meta.push(l);
+        else if (l.startsWith('#CHROM')) hdr = l.substring(1).split('\t');
+        else if (l.trim()) recs.push(l.split('\t'));
       }});
-      html += '</tr>';
-    }});
-    html += '</table>';
-    div.innerHTML = html;
+      _vcfCache[name] = {{ meta: meta, hdr: hdr, recs: recs }};
+    }}
+    _renderVcfPage(name, 0);
   }} catch(e) {{
     document.getElementById('vcfDiv').innerHTML = 'Error: ' + e.message;
   }}
 }}
+function _renderVcfPage(name, page) {{
+  var c = _vcfCache[name]; if (!c) return;
+  var div = document.getElementById('vcfDiv'); if (!div) return;
+  var html = '<p class="meta">' + c.recs.length + ' variant(s) &middot; ' + c.meta.length + ' metadata lines</p>';
+  if (c.meta.length > 0) {{
+    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show metadata (' + c.meta.length + ' lines)</summary>';
+    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + c.meta.join('\n').replace(/</g,'&lt;') + '</pre></details>';
+  }}
+  html += renderPaginatedTable('vcfDiv', c.hdr, c.recs, page, function(rec) {{
+    var r = '<tr>';
+    rec.forEach(function(val, i) {{
+      r += (c.hdr[i]==='REF'||c.hdr[i]==='ALT') ? '<td class="seq">'+colorBases(val)+'</td>' : '<td>'+val+'</td>';
+    }});
+    return r + '</tr>';
+  }});
+  div.innerHTML = html;
+  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
+}}
 
-// ── BED Viewer (text parse → table) ──
-async function renderBedViewer(name, actions, content) {{
-  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+// ── BED Viewer ──
+var _bedCache = {{}};
+async function renderBedViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="bedDiv">Loading BED...</div>';
   try {{
-    var resp = await fetch('/file/' + encodeURIComponent(name));
-    var text = await resp.text();
-    var lines = text.split('\n').filter(function(l) {{ return l.trim() && !l.startsWith('#') && !l.startsWith('track') && !l.startsWith('browser'); }});
-    var div = document.getElementById('bedDiv');
-    if (!div) return;
-
-    // Detect BED format (3-12 columns)
-    var ncols = lines.length > 0 ? lines[0].split('\t').length : 3;
-    var colNames = ['chrom','chromStart','chromEnd','name','score','strand','thickStart','thickEnd','itemRgb','blockCount','blockSizes','blockStarts'];
-
-    var html = '<p class="meta">' + lines.length + ' region(s) &middot; BED' + Math.min(ncols, 12) + ' format</p>';
-    html += '<table><tr>';
-    for (var i = 0; i < Math.min(ncols, colNames.length); i++) {{
-      html += '<th>' + colNames[i] + '</th>';
+    if (!_bedCache[name]) {{
+      var resp = await fetch('/file/' + encodeURIComponent(name));
+      var text = await resp.text();
+      var lines = text.split('\n').filter(function(l) {{ return l.trim() && !l.startsWith('#') && !l.startsWith('track') && !l.startsWith('browser'); }});
+      var recs = lines.map(function(l) {{ return l.split('\t'); }});
+      var ncols = recs.length > 0 ? recs[0].length : 3;
+      _bedCache[name] = {{ recs: recs, ncols: ncols }};
     }}
-    html += '</tr>';
-    lines.forEach(function(line) {{
-      var cols = line.split('\t');
-      html += '<tr>';
-      cols.forEach(function(val) {{ html += '<td>' + val + '</td>'; }});
-      html += '</tr>';
-    }});
-    html += '</table>';
-    div.innerHTML = html;
+    _renderBedPage(name, 0);
   }} catch(e) {{
     document.getElementById('bedDiv').innerHTML = 'Error: ' + e.message;
   }}
 }}
+function _renderBedPage(name, page) {{
+  var c = _bedCache[name]; if (!c) return;
+  var div = document.getElementById('bedDiv'); if (!div) return;
+  var colNames = ['chrom','chromStart','chromEnd','name','score','strand','thickStart','thickEnd','itemRgb','blockCount','blockSizes','blockStarts'];
+  var hdrs = colNames.slice(0, Math.min(c.ncols, 12));
+  var html = '<p class="meta">' + c.recs.length + ' region(s) &middot; BED' + Math.min(c.ncols,12) + ' format</p>';
+  html += renderPaginatedTable('bedDiv', hdrs, c.recs, page, function(rec) {{
+    var r = '<tr>'; rec.forEach(function(v) {{ r += '<td>'+v+'</td>'; }}); return r + '</tr>';
+  }});
+  div.innerHTML = html;
+  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
+}}
 
-// ── GFF/GTF Viewer (text parse → table) ──
-async function renderGffViewer(name, actions, content) {{
-  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+// ── GFF/GTF Viewer ──
+var _gffCache = {{}};
+async function renderGffViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="gffDiv">Loading GFF...</div>';
   try {{
-    var resp = await fetch('/file/' + encodeURIComponent(name));
-    var text = await resp.text();
-    var lines = text.split('\n');
-    var div = document.getElementById('gffDiv');
-    if (!div) return;
-
-    var comments = [];
-    var records = [];
-    lines.forEach(function(line) {{
-      if (line.startsWith('#')) comments.push(line);
-      else if (line.trim()) records.push(line.split('\t'));
-    }});
-
-    var colNames = ['seqid','source','type','start','end','score','strand','phase','attributes'];
-    var html = '<p class="meta">' + records.length + ' feature(s)</p>';
-
-    if (comments.length > 0) {{
-      html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show comments (' + comments.length + ' lines)</summary>';
-      html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + comments.join('\n').replace(/</g,'&lt;') + '</pre></details>';
-    }}
-
-    html += '<table><tr>';
-    colNames.forEach(function(col) {{ html += '<th>' + col + '</th>'; }});
-    html += '</tr>';
-    records.forEach(function(rec) {{
-      html += '<tr>';
-      rec.forEach(function(val, i) {{
-        if (i === 8) {{
-          // Parse attributes for readability
-          var pretty = val.replace(/;/g, '; ');
-          html += '<td style="white-space:normal;max-width:400px;word-break:break-all;font-size:11px">' + pretty + '</td>';
-        }} else {{
-          html += '<td>' + val + '</td>';
-        }}
+    if (!_gffCache[name]) {{
+      var resp = await fetch('/file/' + encodeURIComponent(name));
+      var text = await resp.text();
+      var comments = [], recs = [];
+      text.split('\n').forEach(function(l) {{
+        if (l.startsWith('#')) comments.push(l);
+        else if (l.trim()) recs.push(l.split('\t'));
       }});
-      html += '</tr>';
-    }});
-    html += '</table>';
-    div.innerHTML = html;
+      _gffCache[name] = {{ comments: comments, recs: recs }};
+    }}
+    _renderGffPage(name, 0);
   }} catch(e) {{
     document.getElementById('gffDiv').innerHTML = 'Error: ' + e.message;
   }}
 }}
+function _renderGffPage(name, page) {{
+  var c = _gffCache[name]; if (!c) return;
+  var div = document.getElementById('gffDiv'); if (!div) return;
+  var colNames = ['seqid','source','type','start','end','score','strand','phase','attributes'];
+  var html = '<p class="meta">' + c.recs.length + ' feature(s)</p>';
+  if (c.comments.length > 0) {{
+    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show comments (' + c.comments.length + ' lines)</summary>';
+    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + c.comments.join('\n').replace(/</g,'&lt;') + '</pre></details>';
+  }}
+  html += renderPaginatedTable('gffDiv', colNames, c.recs, page, function(rec) {{
+    var r = '<tr>';
+    rec.forEach(function(v, i) {{
+      r += (i===8) ? '<td style="white-space:normal;max-width:400px;word-break:break-all;font-size:11px">'+v.replace(/;/g,'; ')+'</td>' : '<td>'+v+'</td>';
+    }});
+    return r + '</tr>';
+  }});
+  div.innerHTML = html;
+  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
+}}
 
 // ── FASTA Viewer ──
-async function renderFastaViewer(name, actions, content) {{
-  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+async function renderFastaViewer(name, content) {{
   content.innerHTML = '<div class="fasta-viewer" id="fastaDiv">Loading FASTA...</div>';
   try {{
     var resp = await fetch('/file/' + encodeURIComponent(name));
     var text = await resp.text();
-    var div = document.getElementById('fastaDiv');
-    if (!div) return;
-
+    var div = document.getElementById('fastaDiv'); if (!div) return;
     var lines = text.split('\n');
-    var seqCount = 0;
-    var totalBp = 0;
-    var html = '';
-
+    var seqCount = 0, totalBp = 0, html = '';
     lines.forEach(function(line) {{
-      if (line.startsWith('>')) {{
-        seqCount++;
-        html += '<div class="seq-header">' + line.replace(/</g,'&lt;') + '</div>';
-      }} else if (line.trim()) {{
-        totalBp += line.trim().length;
-        html += '<div class="seq-line">' + colorBases(line.trim()) + '</div>';
-      }}
+      if (line.startsWith('>')) {{ seqCount++; html += '<div class="seq-header">' + line.replace(/</g,'&lt;') + '</div>'; }}
+      else if (line.trim()) {{ totalBp += line.trim().length; html += '<div class="seq-line">' + colorBases(line.trim()) + '</div>'; }}
     }});
-
-    var meta = '<p class="meta" style="margin-bottom:12px">' + seqCount + ' sequence(s) &middot; ' + totalBp.toLocaleString() + ' bp total</p>';
-    div.innerHTML = meta + html;
+    div.innerHTML = '<p class="meta" style="margin-bottom:12px">' + seqCount + ' sequence(s) &middot; ' + totalBp.toLocaleString() + ' bp total</p>' + html;
   }} catch(e) {{
     document.getElementById('fastaDiv').innerHTML = 'Error: ' + e.message;
   }}
 }}
 
-// ── BAM Viewer (parse header + reads as table) ──
-async function renderBamViewer(name, actions, content) {{
-  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+// ── BAM Viewer ──
+var _bamCache = {{}};
+async function renderBamViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="bamDiv">Loading BAM...</div>';
   try {{
-    var resp = await fetch('/file/' + encodeURIComponent(name));
-    var buf = await resp.arrayBuffer();
-    var div = document.getElementById('bamDiv');
-    if (!div) return;
-
-    // BAM is BGZF compressed. Decompress first block(s) to read header + reads.
-    var data = new Uint8Array(buf);
-    var decompressed = [];
-
-    // Parse BGZF blocks
-    var offset = 0;
-    while (offset < data.length) {{
-      // BGZF block header: 18 bytes minimum
-      if (offset + 18 > data.length) break;
-      // Check gzip magic
-      if (data[offset] !== 0x1f || data[offset+1] !== 0x8b) break;
-      // BSIZE is at offset+16 (2 bytes LE) = total block size - 1
-      var bsize = data[offset+16] | (data[offset+17] << 8);
-      var blockEnd = offset + bsize + 1;
-      if (blockEnd > data.length) break;
-
-      // Compressed data starts at offset+18, ends at blockEnd-8 (8 bytes for CRC32+ISIZE)
-      var cdata = data.slice(offset + 18, blockEnd - 8);
-      try {{
-        var inflated = await asyncInflate(cdata);
-        decompressed.push(inflated);
-      }} catch(e) {{ break; }}
-      offset = blockEnd;
-      // Limit: decompress max 2MB to avoid hanging
-      var totalLen = 0;
-      decompressed.forEach(function(d) {{ totalLen += d.length; }});
-      if (totalLen > 2 * 1024 * 1024) break;
+    if (!_bamCache[name]) {{
+      var resp = await fetch('/file/' + encodeURIComponent(name));
+      var buf = await resp.arrayBuffer();
+      var parsed = await parseBam(buf);
+      _bamCache[name] = parsed;
     }}
-
-    // Concatenate decompressed data
-    var totalSize = 0;
-    decompressed.forEach(function(d) {{ totalSize += d.length; }});
-    var raw = new Uint8Array(totalSize);
-    var pos = 0;
-    decompressed.forEach(function(d) {{
-      raw.set(d, pos);
-      pos += d.length;
-    }});
-
-    // Parse BAM header
-    var view = new DataView(raw.buffer);
-    if (raw[0] !== 66 || raw[1] !== 65 || raw[2] !== 77 || raw[3] !== 1) {{
-      throw new Error('Not a valid BAM file');
-    }}
-    var headerLen = view.getInt32(4, true);
-    var headerText = new TextDecoder().decode(raw.slice(8, 8 + headerLen));
-    var refOffset = 8 + headerLen;
-    var nRef = view.getInt32(refOffset, true);
-    refOffset += 4;
-
-    // Parse reference sequences
-    var refs = [];
-    for (var r = 0; r < nRef; r++) {{
-      var nameLen = view.getInt32(refOffset, true);
-      refOffset += 4;
-      var refName = new TextDecoder().decode(raw.slice(refOffset, refOffset + nameLen - 1));
-      refOffset += nameLen;
-      var refLen = view.getInt32(refOffset, true);
-      refOffset += 4;
-      refs.push({{ name: refName, length: refLen }});
-    }}
-
-    // Parse alignment records
-    var reads = [];
-    var readOffset = refOffset;
-    var maxReads = 500;
-    var seqLookup = 'NACMGRSVTWYHKDBN';
-
-    while (readOffset + 4 < raw.length && reads.length < maxReads) {{
-      var blockSize = view.getInt32(readOffset, true);
-      if (blockSize <= 0 || readOffset + 4 + blockSize > raw.length) break;
-      var rStart = readOffset + 4;
-
-      var refID = view.getInt32(rStart, true);
-      var posn = view.getInt32(rStart + 4, true);
-      var nameLen2 = raw[rStart + 8];
-      var mapq = raw[rStart + 9];
-      var nCigarOp = view.getUint16(rStart + 12, true);
-      var flag = view.getUint16(rStart + 14, true);
-      var seqLen = view.getInt32(rStart + 16, true);
-
-      var readName = new TextDecoder().decode(raw.slice(rStart + 32, rStart + 32 + nameLen2 - 1));
-
-      // Parse CIGAR
-      var cigarOff = rStart + 32 + nameLen2;
-      var cigar = '';
-      var cigarOps = 'MIDNSHP=X';
-      for (var c = 0; c < nCigarOp; c++) {{
-        var cigarVal = view.getUint32(cigarOff + c * 4, true);
-        cigar += (cigarVal >> 4) + cigarOps[cigarVal & 0xf];
-      }}
-
-      // Parse sequence
-      var seqOff = cigarOff + nCigarOp * 4;
-      var seq = '';
-      for (var s = 0; s < seqLen; s++) {{
-        var b = raw[seqOff + (s >> 1)];
-        seq += seqLookup[(s & 1) ? (b & 0x0f) : ((b >> 4) & 0x0f)];
-      }}
-
-      var refName2 = (refID >= 0 && refID < refs.length) ? refs[refID].name : '*';
-      reads.push({{
-        name: readName,
-        flag: flag,
-        chr: refName2,
-        pos: posn + 1,
-        mapq: mapq,
-        cigar: cigar || '*',
-        seq: seq
-      }});
-
-      readOffset += 4 + blockSize;
-    }}
-
-    // Build HTML
-    var html = '<p class="meta">' + refs.length + ' reference(s) &middot; ' + reads.length + ' read(s) shown' + (reads.length >= maxReads ? ' (limited to ' + maxReads + ')' : '') + '</p>';
-
-    // Reference info
-    if (refs.length > 0) {{
-      html += '<details style="margin-bottom:12px" open><summary style="cursor:pointer;font-size:13px;font-weight:600">References</summary>';
-      html += '<table><tr><th>Name</th><th>Length</th></tr>';
-      refs.forEach(function(ref) {{
-        html += '<tr><td>' + ref.name + '</td><td>' + ref.length.toLocaleString() + ' bp</td></tr>';
-      }});
-      html += '</table></details>';
-    }}
-
-    // Header (collapsible)
-    if (headerText.trim()) {{
-      html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">SAM header</summary>';
-      html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + headerText.replace(/</g,'&lt;') + '</pre></details>';
-    }}
-
-    // Reads table
-    html += '<table><tr><th>Read Name</th><th>Flag</th><th>Chr</th><th>Pos</th><th>MAPQ</th><th>CIGAR</th><th>Sequence</th></tr>';
-    reads.forEach(function(rd) {{
-      html += '<tr><td>' + rd.name + '</td><td>' + rd.flag + '</td><td>' + rd.chr + '</td><td>' + rd.pos + '</td><td>' + rd.mapq + '</td><td>' + rd.cigar + '</td><td class="seq">' + colorBases(rd.seq) + '</td></tr>';
-    }});
-    html += '</table>';
-    div.innerHTML = html;
+    _renderBamPage(name, 0);
   }} catch(e) {{
     document.getElementById('bamDiv').innerHTML =
-      '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
-      '<p class="no-preview-title">BAM Parse Error</p>' +
-      '<p class="no-preview-msg">' + e.message + '</p>' +
+      '<div class="no-preview"><p class="no-preview-icon">⚠️</p><p class="no-preview-title">BAM Parse Error</p><p class="no-preview-msg">' + e.message + '</p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
   }}
 }}
+function _renderBamPage(name, page) {{
+  var c = _bamCache[name]; if (!c) return;
+  var div = document.getElementById('bamDiv'); if (!div) return;
+  var html = '<p class="meta">' + c.refs.length + ' reference(s) &middot; ' + c.reads.length + ' read(s)</p>';
+  if (c.refs.length > 0) {{
+    html += '<details style="margin-bottom:12px" open><summary style="cursor:pointer;font-size:13px;font-weight:600">References</summary><table><tr><th>Name</th><th>Length</th></tr>';
+    c.refs.forEach(function(r) {{ html += '<tr><td>'+r.name+'</td><td>'+r.length.toLocaleString()+' bp</td></tr>'; }});
+    html += '</table></details>';
+  }}
+  if (c.header) {{
+    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">SAM header</summary>';
+    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + c.header.replace(/</g,'&lt;') + '</pre></details>';
+  }}
+  var bamHdrs = ['Read Name','Flag','Chr','Pos','MAPQ','CIGAR','Sequence'];
+  html += renderPaginatedTable('bamDiv', bamHdrs, c.reads, page, function(rd) {{
+    return '<tr><td>'+rd.name+'</td><td>'+rd.flag+'</td><td>'+rd.chr+'</td><td>'+rd.pos+'</td><td>'+rd.mapq+'</td><td>'+rd.cigar+'</td><td class="seq">'+colorBases(rd.seq)+'</td></tr>';
+  }});
+  div.innerHTML = html;
+  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
+}}
 
-// ── BGZF decompression using browser DecompressionStream ──
+async function parseBam(buf) {{
+  var data = new Uint8Array(buf);
+  var decompressed = [];
+  var offset = 0;
+  while (offset < data.length) {{
+    if (offset + 18 > data.length) break;
+    if (data[offset] !== 0x1f || data[offset+1] !== 0x8b) break;
+    var bsize = data[offset+16] | (data[offset+17] << 8);
+    var blockEnd = offset + bsize + 1;
+    if (blockEnd > data.length) break;
+    try {{ var inflated = await asyncInflate(data.slice(offset+18, blockEnd-8)); decompressed.push(inflated); }} catch(e) {{ break; }}
+    offset = blockEnd;
+    var tl = 0; decompressed.forEach(function(d){{ tl += d.length; }}); if (tl > 4*1024*1024) break;
+  }}
+  var ts = 0; decompressed.forEach(function(d){{ ts += d.length; }});
+  var raw = new Uint8Array(ts); var p = 0;
+  decompressed.forEach(function(d) {{ raw.set(d, p); p += d.length; }});
+  var view = new DataView(raw.buffer);
+  if (raw[0]!==66||raw[1]!==65||raw[2]!==77||raw[3]!==1) throw new Error('Not a valid BAM file');
+  var hLen = view.getInt32(4,true);
+  var header = new TextDecoder().decode(raw.slice(8, 8+hLen));
+  var ro = 8+hLen;
+  var nRef = view.getInt32(ro,true); ro += 4;
+  var refs = [];
+  for (var r=0; r<nRef; r++) {{
+    var nl = view.getInt32(ro,true); ro += 4;
+    var rn = new TextDecoder().decode(raw.slice(ro, ro+nl-1)); ro += nl;
+    var rl = view.getInt32(ro,true); ro += 4;
+    refs.push({{ name: rn, length: rl }});
+  }}
+  var reads = [], maxR = 2000, seqLU = 'NACMGRSVTWYHKDBN';
+  while (ro + 4 < raw.length && reads.length < maxR) {{
+    var bs = view.getInt32(ro,true);
+    if (bs<=0 || ro+4+bs>raw.length) break;
+    var rs = ro+4;
+    var refID=view.getInt32(rs,true), pos2=view.getInt32(rs+4,true), nl2=raw[rs+8], mq=raw[rs+9];
+    var nCig=view.getUint16(rs+12,true), fl=view.getUint16(rs+14,true), sl=view.getInt32(rs+16,true);
+    var rName=new TextDecoder().decode(raw.slice(rs+32, rs+32+nl2-1));
+    var co=rs+32+nl2, cig='', cops='MIDNSHP=X';
+    for (var c2=0;c2<nCig;c2++) {{ var cv=view.getUint32(co+c2*4,true); cig += (cv>>4)+cops[cv&0xf]; }}
+    var so=co+nCig*4, sq='';
+    for (var s2=0;s2<sl;s2++) {{ var b2=raw[so+(s2>>1)]; sq += seqLU[(s2&1)?(b2&0x0f):((b2>>4)&0x0f)]; }}
+    reads.push({{ name:rName, flag:fl, chr:(refID>=0&&refID<refs.length)?refs[refID].name:'*', pos:pos2+1, mapq:mq, cigar:cig||'*', seq:sq }});
+    ro += 4+bs;
+  }}
+  return {{ refs:refs, reads:reads, header:header }};
+}}
+
+// ── BGZF decompression ──
 async function asyncInflate(data) {{
   var ds = new DecompressionStream('deflate-raw');
   var writer = ds.writable.getWriter();
-  writer.write(data);
-  writer.close();
+  writer.write(data); writer.close();
   var reader = ds.readable.getReader();
   var chunks = [];
-  while (true) {{
-    var result = await reader.read();
-    if (result.done) break;
-    chunks.push(result.value);
-  }}
-  var totalLen = 0;
-  chunks.forEach(function(c) {{ totalLen += c.length; }});
-  var out = new Uint8Array(totalLen);
-  var off = 0;
+  while (true) {{ var r = await reader.read(); if (r.done) break; chunks.push(r.value); }}
+  var tl = 0; chunks.forEach(function(c) {{ tl += c.length; }});
+  var out = new Uint8Array(tl); var off = 0;
   chunks.forEach(function(c) {{ out.set(c, off); off += c.length; }});
   return out;
 }}
 
 // ── Color bases helper ──
 function colorBases(seq) {{
-  return seq.replace(/[ATCGN]/gi, function(base) {{
-    var upper = base.toUpperCase();
-    if (upper === 'A') return '<span class="base-A">' + base + '</span>';
-    if (upper === 'T') return '<span class="base-T">' + base + '</span>';
-    if (upper === 'C') return '<span class="base-C">' + base + '</span>';
-    if (upper === 'G') return '<span class="base-G">' + base + '</span>';
-    return base;
+  return seq.replace(/[ATCGN]/gi, function(b) {{
+    var u = b.toUpperCase();
+    if (u==='A') return '<span class="base-A">'+b+'</span>';
+    if (u==='T') return '<span class="base-T">'+b+'</span>';
+    if (u==='C') return '<span class="base-C">'+b+'</span>';
+    if (u==='G') return '<span class="base-G">'+b+'</span>';
+    return b;
   }});
 }}
 
-// ── IGV.js Viewer (CRAM/BCF only) ──
+// ── IGV.js Viewer (dual-tab or CRAM/BCF) ──
 var igvLoaded = false;
 function loadIgv() {{
   return new Promise(function(resolve, reject) {{
@@ -954,164 +975,145 @@ function loadIgv() {{
   }});
 }}
 
-async function renderIgvViewer(name, ext, actions, content) {{
-  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-  content.innerHTML = '<div class="igv-viewer" id="igvDiv">Loading IGV.js (CRAM/BCF requires reference genome)...</div>';
+async function renderIgvViewer(name, ext, content) {{
+  content.innerHTML = '<div class="igv-viewer" id="igvDiv">Loading IGV.js...</div>';
   try {{
     await loadIgv();
-    var div = document.getElementById('igvDiv');
-    if (!div) return;
+    var div = document.getElementById('igvDiv'); if (!div) return;
     div.innerHTML = '';
 
     var fileUrl = '/file/' + encodeURIComponent(name);
-    var tracks = [];
+    var trackType = 'annotation';
+    var trackFormat = ext;
+    if (ext === 'bam' || ext === 'cram') {{ trackType = 'alignment'; }}
+    else if (ext === 'vcf' || ext === 'bcf') {{ trackType = 'variant'; trackFormat = 'vcf'; }}
+    else if (ext === 'bed') {{ trackType = 'annotation'; trackFormat = 'bed'; }}
+    else if (ext === 'gff' || ext === 'gtf' || ext === 'gff3') {{ trackType = 'annotation'; }}
 
-    if (ext === 'cram') {{
-      tracks.push({{ type: 'alignment', format: 'cram', url: fileUrl, name: name }});
-    }} else if (ext === 'bcf') {{
-      tracks.push({{ type: 'variant', format: 'vcf', url: fileUrl, name: name }});
+    var opts = {{}};
+    var localRef = getIgvReference();
+    var genomeId = getIgvGenomeId();
+
+    if (ext === 'fasta' || ext === 'fa') {{
+      // FASTA is the reference itself
+      opts.reference = {{ fastaURL: fileUrl, indexed: false }};
+    }} else if (localRef) {{
+      opts.reference = localRef;
+      opts.tracks = [{{ type: trackType, format: trackFormat, url: fileUrl, name: name }}];
+    }} else if (genomeId) {{
+      opts.genome = genomeId;
+      opts.tracks = [{{ type: trackType, format: trackFormat, url: fileUrl, name: name }}];
+    }} else {{
+      throw new Error('No reference genome available');
     }}
 
-    igv.createBrowser(div, {{
-      genome: 'hg38',
-      tracks: tracks
-    }});
+    igv.createBrowser(div, opts);
   }} catch(e) {{
     content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
-      '<p class="no-preview-title">IGV.js Load Error</p>' +
-      '<p class="no-preview-msg">' + e.message + '<br><br>CRAM and BCF files require IGV.js with a reference genome.<br>Download and inspect with command-line tools.</p>' +
+      '<p class="no-preview-title">IGV.js Error</p>' +
+      '<p class="no-preview-msg">' + e.message + '<br><br>Provide a reference genome path or ID (e.g., hg38) when calling show_results.</p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
   }}
 }}
 
-// ── HDF5 (h5ad) Viewer ──
-var jsfiveLoaded = false;
-function loadJsfive() {{
-  return new Promise(function(resolve, reject) {{
-    if (jsfiveLoaded) {{ resolve(); return; }}
-    var s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/jsfive@0.3.13/dist/browser/hdf5.js';
-    s.onload = function() {{
-      jsfiveLoaded = true;
-      // jsfive exposes as window.jsfive or window.hdf5
-      if (!window.jsfive && window.hdf5) window.jsfive = window.hdf5;
-      resolve();
-    }};
-    s.onerror = function() {{ reject(new Error('Failed to load jsfive CDN')); }};
-    document.head.appendChild(s);
-  }});
-}}
-
+// ── HDF5 (h5ad) Viewer — server-side parsed ──
+var _hdf5Cache = {{}};
 async function renderHdf5Viewer(name, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
 
-  // Check file size first
   var fileInfo = FILES.find(function(f) {{ return f.name === name; }});
-  var sizeMB = fileInfo ? (fileInfo.size / 1048576).toFixed(0) : 0;
 
-  if (fileInfo && fileInfo.size > 500 * 1048576) {{
-    // >500MB: too large for browser
-    content.innerHTML =
-      '<div class="no-preview">' +
-        '<div class="no-preview-icon">🔬</div>' +
-        '<p class="no-preview-title">' + name + '</p>' +
-        '<p class="no-preview-msg">HDF5 file size: ' + sizeMB + ' MB<br>Files over 500 MB cannot be previewed in the browser.<br>Download and inspect with Python (scanpy/anndata).</p>' +
-        '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download (' + sizeMB + ' MB)</a>' +
-      '</div>';
-    return;
-  }}
-
-  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 viewer (' + sizeMB + ' MB)...</div>';
+  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 metadata...</div>';
 
   try {{
-    await loadJsfive();
-    if (!window.jsfive) throw new Error('jsfive library not available');
+    if (!_hdf5Cache[name]) {{
+      // Data is pre-parsed JSON from server-side h5py
+      var resp = await fetch('/file/' + encodeURIComponent(name));
+      var data = await resp.json();
 
-    var resp = await fetch('/file/' + encodeURIComponent(name));
-    var buf = await resp.arrayBuffer();
-    var f = new jsfive.File(buf);
-
-    var div = document.getElementById('hdf5Div');
-    if (!div) return;
-    var html = '';
-
-    // Show file structure
-    html += '<div class="hdf5-section"><h3>File Structure</h3><table>';
-    html += '<tr><th>Key</th><th>Type</th><th>Shape</th><th>Dtype</th></tr>';
-
-    function walkGroup(group, prefix) {{
-      var keys = group.keys || [];
-      if (typeof group.keys === 'function') keys = group.keys();
-      keys.forEach(function(key) {{
-        var fullKey = prefix ? prefix + '/' + key : key;
-        try {{
-          var item = group.get(key);
-          if (item && item.shape) {{
-            html += '<tr><td>' + fullKey + '</td><td>Dataset</td><td>[' + (item.shape || []).join(', ') + ']</td><td>' + (item.dtype || '-') + '</td></tr>';
-          }} else if (item && (item.keys || typeof item.keys === 'function')) {{
-            html += '<tr><td>' + fullKey + '/</td><td>Group</td><td>-</td><td>-</td></tr>';
-            walkGroup(item, fullKey);
-          }} else {{
-            html += '<tr><td>' + fullKey + '</td><td>-</td><td>-</td><td>-</td></tr>';
-          }}
-        }} catch(e) {{
-          html += '<tr><td>' + fullKey + '</td><td>Error</td><td colspan="2">' + e.message + '</td></tr>';
-        }}
-      }});
+      _hdf5Cache[name] = {{
+        items: data.items || [],
+        obsItems: data.obs_columns || [],
+        varItems: data.var_columns || [],
+        obsmKeys: data.obsm_keys || [],
+        unsKeys: data.uns_keys || [],
+        nObs: data.n_obs || 0,
+        nVar: data.n_var || 0,
+        fileSize: data.file_size || 0
+      }};
     }}
-
-    walkGroup(f, '');
-    html += '</table></div>';
-
-    // Try to show obs metadata if available
-    try {{
-      var obs = f.get('obs');
-      if (obs) {{
-        var obsKeys = obs.keys ? (typeof obs.keys === 'function' ? obs.keys() : obs.keys) : [];
-        if (obsKeys.length > 0) {{
-          html += '<div class="hdf5-section"><h3>Observations (obs) columns</h3><table>';
-          html += '<tr><th>Column</th><th>Dtype</th></tr>';
-          obsKeys.forEach(function(k) {{
-            try {{
-              var col = obs.get(k);
-              html += '<tr><td>' + k + '</td><td>' + (col && col.dtype ? col.dtype : '-') + '</td></tr>';
-            }} catch(e) {{
-              html += '<tr><td>' + k + '</td><td>Error</td></tr>';
-            }}
-          }});
-          html += '</table></div>';
-        }}
-      }}
-    }} catch(e) {{ /* obs not available */ }}
-
-    // Try to show var metadata if available
-    try {{
-      var varData = f.get('var');
-      if (varData) {{
-        var varKeys = varData.keys ? (typeof varData.keys === 'function' ? varData.keys() : varData.keys) : [];
-        if (varKeys.length > 0) {{
-          html += '<div class="hdf5-section"><h3>Variables (var) columns</h3><table>';
-          html += '<tr><th>Column</th><th>Dtype</th></tr>';
-          varKeys.forEach(function(k) {{
-            try {{
-              var col = varData.get(k);
-              html += '<tr><td>' + k + '</td><td>' + (col && col.dtype ? col.dtype : '-') + '</td></tr>';
-            }} catch(e) {{
-              html += '<tr><td>' + k + '</td><td>Error</td></tr>';
-            }}
-          }});
-          html += '</table></div>';
-        }}
-      }}
-    }} catch(e) {{ /* var not available */ }}
-
-    div.innerHTML = html;
+    _renderHdf5Page(name, 0);
   }} catch(e) {{
     content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
       '<p class="no-preview-title">HDF5 Load Error</p>' +
       '<p class="no-preview-msg">' + e.message + '<br><br>Download and inspect with Python:<br><code>import anndata; ad = anndata.read_h5ad("' + name + '")</code></p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
   }}
+}}
+function _renderHdf5Page(name, page) {{
+  var c = _hdf5Cache[name]; if (!c) return;
+  var div = document.getElementById('hdf5Div'); if (!div) return;
+  var html = '';
+  var sizeMB = (c.fileSize / 1048576).toFixed(1);
+
+  // Summary
+  html += '<div class="hdf5-section"><h3>Summary</h3><table>';
+  html += '<tr><th>Property</th><th>Value</th></tr>';
+  html += '<tr><td>File size</td><td>' + sizeMB + ' MB</td></tr>';
+  html += '<tr><td>Observations (n_obs)</td><td>' + c.nObs.toLocaleString() + '</td></tr>';
+  html += '<tr><td>Variables (n_var)</td><td>' + c.nVar.toLocaleString() + '</td></tr>';
+  html += '</table></div>';
+
+  // File structure
+  html += '<div class="hdf5-section"><h3>File Structure (' + c.items.length + ' entries)</h3>';
+  html += renderPaginatedTable('hdf5Div', ['Key', 'Type', 'Shape', 'Dtype'], c.items, page, function(item) {{
+    return '<tr><td>' + item.key + '</td><td>' + item.type + '</td><td>' + item.shape + '</td><td>' + item.dtype + '</td></tr>';
+  }});
+  html += '</div>';
+
+  // Obs columns
+  if (c.obsItems.length > 0) {{
+    html += '<div class="hdf5-section"><h3>Observations (obs) columns (' + c.obsItems.length + ')</h3><table>';
+    html += '<tr><th>Column</th><th>Dtype</th><th>Categories</th></tr>';
+    c.obsItems.forEach(function(item) {{
+      var cats = item.n_categories > 0 ? item.n_categories : '-';
+      html += '<tr><td>' + item.name + '</td><td>' + item.dtype + '</td><td>' + cats + '</td></tr>';
+    }});
+    html += '</table></div>';
+  }}
+
+  // Var columns
+  if (c.varItems.length > 0) {{
+    html += '<div class="hdf5-section"><h3>Variables (var) columns (' + c.varItems.length + ')</h3><table>';
+    html += '<tr><th>Column</th><th>Dtype</th></tr>';
+    c.varItems.forEach(function(item) {{
+      html += '<tr><td>' + item.name + '</td><td>' + item.dtype + '</td></tr>';
+    }});
+    html += '</table></div>';
+  }}
+
+  // Obsm keys (embeddings)
+  if (c.obsmKeys.length > 0) {{
+    html += '<div class="hdf5-section"><h3>Embeddings (obsm) (' + c.obsmKeys.length + ')</h3><table>';
+    html += '<tr><th>Key</th><th>Shape</th></tr>';
+    c.obsmKeys.forEach(function(item) {{
+      html += '<tr><td>' + item.key + '</td><td>' + item.shape + '</td></tr>';
+    }});
+    html += '</table></div>';
+  }}
+
+  // Uns keys (unstructured)
+  if (c.unsKeys.length > 0) {{
+    html += '<div class="hdf5-section"><h3>Unstructured (uns) (' + c.unsKeys.length + ')</h3><table>';
+    html += '<tr><th>Key</th></tr>';
+    c.unsKeys.forEach(function(k) {{
+      html += '<tr><td>' + k + '</td></tr>';
+    }});
+    html += '</table></div>';
+  }}
+
+  div.innerHTML = html;
+  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
 }}
 
 // ── Plugin Viewer ──
