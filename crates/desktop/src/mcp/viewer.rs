@@ -664,13 +664,13 @@ async function renderHdf5Viewer(name, actions, content) {{
   var fileInfo = FILES.find(function(f) {{ return f.name === name; }});
   var sizeMB = fileInfo ? (fileInfo.size / 1048576).toFixed(0) : 0;
 
-  if (fileInfo && fileInfo.size > 100 * 1048576) {{
-    // >100MB: too large for browser
+  if (fileInfo && fileInfo.size > 500 * 1048576) {{
+    // >500MB: too large for browser
     content.innerHTML =
       '<div class="no-preview">' +
         '<div class="no-preview-icon">🔬</div>' +
         '<p class="no-preview-title">' + name + '</p>' +
-        '<p class="no-preview-msg">HDF5 file size: ' + sizeMB + ' MB<br>Files over 100 MB cannot be previewed in the browser.<br>Download and inspect with Python (scanpy/anndata).</p>' +
+        '<p class="no-preview-msg">HDF5 file size: ' + sizeMB + ' MB<br>Files over 500 MB cannot be previewed in the browser.<br>Download and inspect with Python (scanpy/anndata).</p>' +
         '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download (' + sizeMB + ' MB)</a>' +
       '</div>';
     return;
