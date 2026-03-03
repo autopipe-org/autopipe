@@ -98,19 +98,46 @@
 			</p>
 		</section>
 
-		<!-- Section 4: Development & Testing -->
+		<!-- Section 4: Quick Start with CLI -->
 		<section class="guide-section">
-			<h2>4. Development & Testing</h2>
+			<h2>4. Quick Start with CLI</h2>
+			<p>
+				The easiest way to create a new plugin is with the <code>autopipe-ext</code> CLI tool:
+			</p>
 			<ol class="step-list">
 				<li>
-					<strong>Create files in the plugins directory</strong>
+					<strong>Install the CLI tool</strong>
+					<div class="code-block">
+						<pre>npm install -g @pnucolab/autopipe-ext</pre>
+					</div>
+				</li>
+				<li>
+					<strong>Scaffold a new plugin</strong>
+					<div class="code-block">
+						<pre>autopipe-ext init</pre>
+					</div>
+					<p>Interactive prompts will ask for the plugin name, description, and supported file extensions.
+						It generates <code>manifest.json</code>, <code>index.js</code>, and <code>README.md</code> automatically.</p>
+				</li>
+			</ol>
+			<p>
+				Alternatively, you can create the files manually (see Section 2 and 3 above).
+			</p>
+		</section>
+
+		<!-- Section 5: Development & Testing -->
+		<section class="guide-section">
+			<h2>5. Development & Testing</h2>
+			<ol class="step-list">
+				<li>
+					<strong>Copy the plugin to the plugins directory</strong>
 					<p>
 						Default location: <code>~/.local/share/autopipe/plugins/my-plugin/</code>
 						(configurable in app settings)
 					</p>
 				</li>
 				<li>
-					<strong>Write <code>manifest.json</code> and <code>index.js</code></strong>
+					<strong>Edit <code>index.js</code> with your rendering logic</strong>
 				</li>
 				<li>
 					<strong>Run <code>show_results</code> in AutoPipe</strong>
@@ -119,18 +146,18 @@
 			</ol>
 		</section>
 
-		<!-- Section 5: GitHub Account -->
+		<!-- Section 6: GitHub Account -->
 		<section class="guide-section">
-			<h2>5. GitHub Account</h2>
+			<h2>6. GitHub Account</h2>
 			<p>
 				A GitHub account is required to publish plugins to the registry.
 				If you don't have one, sign up at <a href="https://github.com/signup" target="_blank" rel="noopener">github.com/signup</a>.
 			</p>
 		</section>
 
-		<!-- Section 6: GitHub Token -->
+		<!-- Section 7: GitHub Token -->
 		<section class="guide-section">
-			<h2>6. GitHub Personal Access Token</h2>
+			<h2>7. GitHub Personal Access Token</h2>
 			<ol class="step-list">
 				<li>
 					Go to <a href="https://github.com/settings/tokens" target="_blank" rel="noopener">GitHub Settings &rarr; Developer settings &rarr; Personal access tokens &rarr; Tokens (classic)</a>
@@ -153,9 +180,9 @@
 			</div>
 		</section>
 
-		<!-- Section 7: GitHub Repository -->
+		<!-- Section 8: GitHub Repository -->
 		<section class="guide-section">
-			<h2>7. Create a GitHub Repository</h2>
+			<h2>8. Create a GitHub Repository</h2>
 			<ol class="step-list">
 				<li>Create a new public repository on GitHub.</li>
 				<li>Push your plugin files:
@@ -171,16 +198,10 @@ git push -u origin main`}</pre>
 			</ol>
 		</section>
 
-		<!-- Section 8: Packaging & Publishing -->
+		<!-- Section 9: Packaging & Publishing -->
 		<section class="guide-section">
-			<h2>8. Packaging & Publishing</h2>
+			<h2>9. Packaging & Publishing</h2>
 			<ol class="step-list">
-				<li>
-					<strong>Install the CLI tool</strong>
-					<div class="code-block">
-						<pre>npm install -g @pnucolab/autopipe-ext</pre>
-					</div>
-				</li>
 				<li>
 					<strong>Validate</strong>
 					<div class="code-block">
@@ -200,9 +221,9 @@ git push -u origin main`}</pre>
 			</ol>
 		</section>
 
-		<!-- Section 9: Example -->
+		<!-- Section 10: Example -->
 		<section class="guide-section">
-			<h2>9. Example: CSV Heatmap Plugin</h2>
+			<h2>10. Example: CSV Heatmap Plugin</h2>
 			<h3>manifest.json</h3>
 			<div class="code-block">
 				<pre>{`{

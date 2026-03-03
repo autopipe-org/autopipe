@@ -22,24 +22,18 @@
 
 	onMount(() => {
 		if (!isFirstVisit) {
-			// Already visited: redirect to / if needed, no splash
-			if (window.location.pathname !== '/') {
-				goto('/');
-			}
+			// Already visited: no splash, stay on current page
 			return;
 		}
 
-		// First visit: show splash then redirect
+		// First visit: show splash then reveal content
 		sessionStorage.setItem('autopipe_visited', '1');
 
 		setTimeout(() => {
 			splashFading = true;
-			setTimeout(async () => {
+			setTimeout(() => {
 				splashVisible = false;
 				appReady = true;
-				if (window.location.pathname !== '/') {
-					await goto('/');
-				}
 			}, 500);
 		}, 1200);
 	});
