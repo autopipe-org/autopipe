@@ -1032,7 +1032,7 @@ async function renderHdf5Viewer(name, actions, content) {{
     if (!_hdf5Cache[name]) {{
       var resp = await fetch('/file/' + encodeURIComponent(name));
       var buf = await resp.arrayBuffer();
-      var f = new jsfive.File(buf);
+      var f = new hdf5.File(buf);
 
       // Walk file structure (depth <= 3)
       var items = [];
