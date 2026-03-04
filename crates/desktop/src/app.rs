@@ -188,26 +188,23 @@ impl eframe::App for AutoPipeApp {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, Tab::Setup, "Setup");
 
-                let conn_label = if self.tab_errors[0] {
-                    egui::RichText::new("Connection ●").color(egui::Color32::RED)
-                } else {
-                    egui::RichText::new("Connection")
-                };
-                ui.selectable_value(&mut self.active_tab, Tab::Connection, conn_label);
+                let r = ui.selectable_value(&mut self.active_tab, Tab::Connection, "Connection");
+                if self.tab_errors[0] {
+                    let c = egui::pos2(r.rect.right() - 6.0, r.rect.top() + 6.0);
+                    ui.painter().circle_filled(c, 3.5, egui::Color32::RED);
+                }
 
-                let ssh_label = if self.tab_errors[1] {
-                    egui::RichText::new("SSH ●").color(egui::Color32::RED)
-                } else {
-                    egui::RichText::new("SSH")
-                };
-                ui.selectable_value(&mut self.active_tab, Tab::Ssh, ssh_label);
+                let r = ui.selectable_value(&mut self.active_tab, Tab::Ssh, "SSH");
+                if self.tab_errors[1] {
+                    let c = egui::pos2(r.rect.right() - 6.0, r.rect.top() + 6.0);
+                    ui.painter().circle_filled(c, 3.5, egui::Color32::RED);
+                }
 
-                let gh_label = if self.tab_errors[2] {
-                    egui::RichText::new("GitHub ●").color(egui::Color32::RED)
-                } else {
-                    egui::RichText::new("GitHub")
-                };
-                ui.selectable_value(&mut self.active_tab, Tab::GitHub, gh_label);
+                let r = ui.selectable_value(&mut self.active_tab, Tab::GitHub, "GitHub");
+                if self.tab_errors[2] {
+                    let c = egui::pos2(r.rect.right() - 6.0, r.rect.top() + 6.0);
+                    ui.painter().circle_filled(c, 3.5, egui::Color32::RED);
+                }
 
                 ui.selectable_value(&mut self.active_tab, Tab::Plugins, "Plugins");
                 ui.selectable_value(&mut self.active_tab, Tab::Status, "Status");
@@ -340,7 +337,22 @@ impl eframe::App for AutoPipeApp {
                     }
                 }
                 if self.save_ok && self.status_message.is_empty() {
-                    ui.colored_label(egui::Color32::GREEN, "✓");
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(16.0, 16.0),
+                        egui::Sense::hover(),
+                    );
+                    let c = rect.center();
+                    ui.painter().circle_filled(c, 6.0, egui::Color32::from_rgb(40, 180, 60));
+                    // Draw a checkmark with two lines
+                    let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+                    ui.painter().line_segment(
+                        [egui::pos2(c.x - 3.0, c.y), egui::pos2(c.x - 1.0, c.y + 3.0)],
+                        stroke,
+                    );
+                    ui.painter().line_segment(
+                        [egui::pos2(c.x - 1.0, c.y + 3.0), egui::pos2(c.x + 4.0, c.y - 3.0)],
+                        stroke,
+                    );
                 }
                 if !self.status_message.is_empty() {
                     ui.label(&self.status_message);

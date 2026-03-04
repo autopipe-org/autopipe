@@ -462,8 +462,9 @@ async fn data_handler(
         None => {
             let count_cmd = match ext.as_str() {
                 // BAM: only fetch first 100 reads to avoid timeout on large files
+                // 2>/dev/null MUST be at host level to suppress Docker stderr
                 "bam" => format!(
-                    "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} 2>/dev/null | head -100 | wc -l\"",
+                    "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} | head -100 | wc -l\" 2>/dev/null",
                     bam_dir, SAMTOOLS_DOCKER, bam_file
                 ),
                 "vcf" => format!("grep -c -v '^#' '{}'", remote_path),
@@ -507,7 +508,7 @@ async fn data_handler(
                 // Reference sequences from header
                 if let Ok((hdr_text, 0)) =
                     ssh_run(&ssh_cfg, &format!(
-                        "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view -H /data/{} 2>/dev/null | grep ^@SQ\"",
+                        "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view -H /data/{} | grep ^@SQ\" 2>/dev/null",
                         bam_dir, SAMTOOLS_DOCKER, bam_file
                     )).await
                 {
@@ -607,8 +608,9 @@ async fn data_handler(
     // Get rows for this page
     let rows_cmd = match ext.as_str() {
         // BAM: only first 100 reads (no pagination) to avoid timeout
+        // 2>/dev/null MUST be at host level to suppress Docker stderr
         "bam" => format!(
-            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} 2>/dev/null | head -100\"",
+            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} | head -100\" 2>/dev/null",
             bam_dir, SAMTOOLS_DOCKER, bam_file
         ),
         "vcf" => format!(
