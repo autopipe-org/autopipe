@@ -363,127 +363,16 @@ impl AutoPipeServer {
         mounts
     }
 
-    /// Extract chromosome/contig names from any IGV-compatible file via SSH.
-    /// Supports: BAM, CRAM, VCF, BCF, BED, GFF, GTF, GFF3.
-    async fn detect_chroms_from_headers(&self, file_paths: &[String]) -> Vec<String> {
-        for path in file_paths {
-            let ext = path.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-            let cmd = match ext.as_str() {
-                // BAM/CRAM: read @SQ header lines for sequence names
-                "bam" | "cram" => format!(
-                    "samtools view -H '{}' 2>/dev/null | grep '^@SQ' | head -10 | sed 's/.*SN:\\([^\\t]*\\).*/\\1/'",
-                    path
-                ),
-                // VCF/BCF: read ##contig header lines
-                "vcf" => format!(
-                    "grep '^##contig' '{}' 2>/dev/null | head -10 | sed 's/.*ID=\\([^,>]*\\).*/\\1/'",
-                    path
-                ),
-                "bcf" => format!(
-                    "bcftools view -h '{}' 2>/dev/null | grep '^##contig' | head -10 | sed 's/.*ID=\\([^,>]*\\).*/\\1/'",
-                    path
-                ),
-                // BED/GFF/GTF/GFF3: first column is chromosome name
-                "bed" | "gff" | "gff3" | "gtf" => format!(
-                    "grep -v '^#' '{}' 2>/dev/null | head -50 | cut -f1 | sort -u | head -10",
-                    path
-                ),
-                _ => continue,
-            };
 
-            if let Ok((output, 0)) = self.ssh_run(&cmd).await {
-                let cleaned = clean_content(&output);
-                let chroms: Vec<String> = cleaned
-                    .trim()
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(|l| l.to_string())
-                    .collect();
-                if !chroms.is_empty() {
-                    return chroms;
-                }
-            }
-        }
-        Vec::new()
-    }
 
-    /// Read contig names from a FASTA file (lines starting with '>').
-    async fn read_fasta_contigs(&self, fasta_path: &str) -> Vec<String> {
-        let cmd = format!(
-            "grep '^>' '{}' 2>/dev/null | head -20 | sed 's/^>\\([^ \\t]*\\).*/\\1/'",
-            fasta_path
-        );
-        if let Ok((output, 0)) = self.ssh_run(&cmd).await {
-            let cleaned = clean_content(&output);
-            cleaned
-                .trim()
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .collect()
-        } else {
-            Vec::new()
-        }
-    }
-
-    /// Map chromosome naming patterns to IGV genome IDs.
-    fn chroms_to_genome_id(chroms: &[String]) -> Option<String> {
-        if chroms.is_empty() {
-            return None;
-        }
-
-        let has_chr_prefix = chroms.iter().any(|c| c.starts_with("chr"));
-        let first = chroms[0].as_str();
-
-        if has_chr_prefix {
-            // Human: chr1-chr22, chrX, chrY
-            if chroms.iter().any(|c| c == "chr1" || c == "chrX") {
-                return Some("hg38".to_string());
-            }
-            // Mouse: chr1-chr19, chrX, chrY (no chr20+)
-            if chroms.iter().any(|c| c == "chr19") && !chroms.iter().any(|c| c == "chr20") {
-                return Some("mm39".to_string());
-            }
-            // Default with chr prefix: assume human
-            return Some("hg38".to_string());
-        }
-
-        // Without chr prefix
-        // Drosophila: 2L, 2R, 3L, 3R, X, 4
-        if chroms.iter().any(|c| c == "2L" || c == "2R") {
-            return Some("dm6".to_string());
-        }
-        // C. elegans: I, II, III, IV, V, X
-        if chroms.iter().any(|c| c == "I" || c == "II" || c == "III") {
-            return Some("ce11".to_string());
-        }
-        // Numeric chromosomes (1, 2, ... X) — likely human (Ensembl-style)
-        if first == "1" || first == "X" {
-            return Some("hg38".to_string());
-        }
-
-        None
-    }
-
-    /// Parse h5ad/h5/hdf5 file on the SSH server using Docker + h5py.
-    /// Returns JSON string with file structure, obs, var metadata.
-    async fn parse_h5ad_on_server(&self, remote_path: &str) -> Result<String, String> {
-        // Ensure the h5ad parser Docker image exists
-        let ensure_cmd = r#"docker image inspect autopipe-h5parser >/dev/null 2>&1 || docker build -t autopipe-h5parser - << 'DOCKERFILE'
-FROM python:3.11-slim
-RUN pip install --no-cache-dir h5py numpy
-DOCKERFILE"#;
-        let _ = self.ssh_run(ensure_cmd).await;
-
-        let parent_dir = remote_path.rsplitn(2, '/').nth(1).unwrap_or("/");
-        let filename = remote_path.rsplitn(2, '/').next().unwrap_or(remote_path);
-
-        let parse_cmd = format!(
-            r#"docker run --rm --memory=4g -v '{parent_dir}:/data:ro' autopipe-h5parser python3 -u << 'PYEOF'
-import h5py, json, sys, os
+    /// Build the Python h5ad parsing script.
+    /// `file_path` is the absolute path the script will use to open the file.
+    fn h5ad_python_script(file_path: &str) -> String {
+        format!(
+            r#"import h5py, json, sys, os
 
 try:
-    path = '/data/{filename}'
+    path = '{file_path}'
     size = os.path.getsize(path)
 
     f = h5py.File(path, 'r')
@@ -607,22 +496,100 @@ try:
     f.close()
 except Exception as e:
     json.dump({{"error": str(e), "file_size": 0, "n_obs": 0, "n_var": 0, "items": [], "obs_columns": [], "var_columns": [], "obsm_keys": [], "uns_keys": []}}, sys.stdout)
-PYEOF"#,
-            parent_dir = parent_dir,
-            filename = filename,
-        );
+"#,
+            file_path = file_path,
+        )
+    }
 
-        match self.ssh_run(&parse_cmd).await {
-            Ok((output, 0)) => {
-                let cleaned = clean_content(&output).trim().to_string();
-                // Verify it's valid JSON
-                if cleaned.starts_with('{') {
-                    Ok(cleaned)
-                } else {
-                    Err(format!("Invalid JSON output: {}", &cleaned[..cleaned.len().min(200)]))
+    /// Validate and extract JSON from h5ad parse output.
+    fn extract_h5ad_json(output: &str) -> Result<String, String> {
+        let cleaned = clean_content(output).trim().to_string();
+        if cleaned.starts_with('{') {
+            Ok(cleaned)
+        } else {
+            Err(format!("Invalid JSON output: {}", &cleaned[..cleaned.len().min(200)]))
+        }
+    }
+
+    /// Parse h5ad/h5/hdf5 file on the SSH server.
+    /// Tries Docker first, falls back to direct python3 if Docker is unavailable.
+    /// Returns JSON string with file structure, obs, var metadata.
+    async fn parse_h5ad_on_server(&self, remote_path: &str) -> Result<String, String> {
+        let parent_dir = remote_path.rsplitn(2, '/').nth(1).unwrap_or("/");
+        let filename = remote_path.rsplitn(2, '/').next().unwrap_or(remote_path);
+
+        // --- Attempt 1: Docker ---
+        let docker_available = match self.ssh_run("command -v docker >/dev/null 2>&1 && echo yes || echo no").await {
+            Ok((out, 0)) => clean_content(&out).trim().to_string() == "yes",
+            _ => false,
+        };
+
+        if docker_available {
+            // Ensure image exists
+            let ensure_cmd = r#"docker image inspect autopipe-h5parser >/dev/null 2>&1 || docker build -t autopipe-h5parser - << 'DOCKERFILE'
+FROM python:3.11-slim
+RUN pip install --no-cache-dir h5py numpy
+DOCKERFILE"#;
+            let _ = self.ssh_run(ensure_cmd).await;
+
+            let script = Self::h5ad_python_script(&format!("/data/{}", filename));
+            let parse_cmd = format!(
+                "docker run --rm --memory=4g -v '{parent_dir}:/data:ro' autopipe-h5parser python3 -u << 'PYEOF'\n{script}\nPYEOF",
+                parent_dir = parent_dir,
+                script = script,
+            );
+
+            match self.ssh_run(&parse_cmd).await {
+                Ok((output, 0)) => {
+                    if let Ok(json) = Self::extract_h5ad_json(&output) {
+                        return Ok(json);
+                    }
+                    // Docker ran but output was invalid — fall through to direct python
+                }
+                _ => {
+                    // Docker run failed — fall through to direct python
                 }
             }
-            Ok((output, _)) => Err(format!("Docker h5py parse failed: {}", clean_content(&output).trim())),
+        }
+
+        // --- Attempt 2: Direct python3 with h5py ---
+        // Check if python3 + h5py are available on the server
+        let py_check = "python3 -c 'import h5py; print(\"ok\")' 2>/dev/null || python -c 'import h5py; print(\"ok\")' 2>/dev/null";
+        let py_cmd = match self.ssh_run(py_check).await {
+            Ok((out, 0)) if clean_content(&out).trim().contains("ok") => {
+                // Determine which python binary has h5py
+                let has_py3 = match self.ssh_run("python3 -c 'import h5py' 2>/dev/null").await {
+                    Ok((_, 0)) => true,
+                    _ => false,
+                };
+                if has_py3 { "python3" } else { "python" }
+            }
+            _ => {
+                // Try pip install h5py as last resort
+                let install = "pip3 install --user h5py numpy 2>/dev/null || pip install --user h5py numpy 2>/dev/null";
+                let _ = self.ssh_run(install).await;
+                match self.ssh_run("python3 -c 'import h5py' 2>/dev/null").await {
+                    Ok((_, 0)) => "python3",
+                    _ => {
+                        return Err(
+                            "h5ad parsing failed: neither Docker nor python3 with h5py is available on the server. \
+                             Install h5py with: pip3 install h5py numpy".to_string()
+                        );
+                    }
+                }
+            }
+        };
+
+        let script = Self::h5ad_python_script(remote_path);
+        let direct_cmd = format!(
+            "{py_cmd} -u << 'PYEOF'\n{script}\nPYEOF",
+            py_cmd = py_cmd,
+            script = script,
+        );
+
+        match self.ssh_run(&direct_cmd).await {
+            Ok((output, 0)) => Self::extract_h5ad_json(&output),
+            Ok((output, code)) => Err(format!("python h5py parse failed (exit {}): {}", code, clean_content(&output).trim())),
             Err(e) => Err(format!("SSH error: {}", e)),
         }
     }
@@ -1569,7 +1536,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser to display files from the remote SSH server. ALWAYS pass a DIRECTORY path (not individual files). The viewer shows ALL files in a sidebar list — the user clicks each file to preview it. NEVER call this tool multiple times for the same directory. Supports: images (PNG/JPG/GIF/SVG/WebP/BMP/TIFF), PDF, text (TXT/LOG/CSV/TSV/JSON/YAML/XML/MD/FASTQ), genomics with Data tab (VCF/BED/GFF/BAM/FASTA parsed as tables) and optional IGV tab (requires reference), HDF5 (h5ad/h5). For genomics files: the Data tab always works without reference. The IGV tab requires a reference genome — pass it via the 'reference' parameter as a genome ID (e.g., 'hg38', 'mm10') or a FASTA filename in the results directory. CRAM and BCF files are IGV-only and need a reference to view. If the results contain genomics files, determine the organism and pass the appropriate reference.")]
+    #[tool(description = "Open the Results Viewer in a browser to display ALL result files. ALWAYS use this tool when the user wants to view results — NEVER use read_file for viewing results. Pass a DIRECTORY path (not individual files). The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). IMPORTANT workflow for genomics files: (1) First call show_results WITHOUT the reference parameter. (2) The response will tell you about FASTA files found in the same directory. (3) If a FASTA file is found, ask the user: 'A FASTA file [name] was found in the results directory. Is this the correct reference for your data?' (4a) If the user confirms, call show_results AGAIN with the reference parameter set to that FASTA filename to enable IGV visualization. (4b) If the user says no, ask them to provide the correct reference FASTA file path. If they don't provide one, proceed without reference — only the Data tab will be shown. (4c) For IGV-only formats (CRAM, BCF), inform the user that these files require a reference to display and cannot be viewed without one.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -1788,8 +1755,11 @@ impl AutoPipeServer {
                 matches!(ext.as_str(), "fasta" | "fa" | "fna")
             }).collect();
 
-            // Detect chromosomes from genomics files
-            let detected_chroms = self.detect_chroms_from_headers(&file_paths).await;
+            // Check for IGV-only files (CRAM, BCF) that cannot be viewed without reference
+            let igv_only_files: Vec<&String> = file_paths.iter().filter(|p| {
+                let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+                matches!(ext.as_str(), "cram" | "bcf")
+            }).collect();
 
             if !fasta_files.is_empty() {
                 let fasta_names: Vec<String> = fasta_files.iter().map(|p| {
@@ -1800,51 +1770,27 @@ impl AutoPipeServer {
                         .to_string()
                 }).collect();
 
-                // Read FASTA contigs for comparison
-                let mut fasta_info = Vec::new();
-                for fp in &fasta_files {
-                    let contigs = self.read_fasta_contigs(fp).await;
-                    let name = std::path::Path::new(fp.as_str())
+                ref_hint.push_str(&format!(
+                    "\n\n[Reference] FASTA file found in directory: {}.\nAsk the user: 'Is this the correct reference for your data?'\n- If yes: call show_results again with reference=\"{}\" to enable IGV visualization.\n- If no: ask the user for the correct reference FASTA file path. If they don't provide one, the current results are shown with Data tab only (no IGV).",
+                    fasta_names.join(", "),
+                    fasta_names[0],
+                ));
+            } else {
+                ref_hint.push_str("\n\n[Reference] Genomics files found but no FASTA reference file in the directory.\nAsk the user to provide a reference FASTA file path. If they don't provide one, the current results are shown with Data tab only (no IGV).");
+            }
+
+            if !igv_only_files.is_empty() {
+                let names: Vec<String> = igv_only_files.iter().map(|p| {
+                    std::path::Path::new(p.as_str())
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap_or("unknown");
-                    let contigs_preview: Vec<&str> = contigs.iter().take(5).map(|s| s.as_str()).collect();
-                    fasta_info.push(format!("  {} (contigs: {})", name, contigs_preview.join(", ")));
-                }
-
-                ref_hint.push_str("\n\n[Reference needed] Genomics files found but no reference specified.");
-                ref_hint.push_str("\nFASTA file(s) in directory:");
-                for info in &fasta_info {
-                    ref_hint.push_str(&format!("\n{}", info));
-                }
-                if !detected_chroms.is_empty() {
-                    let chroms_preview: Vec<&str> = detected_chroms.iter().take(5).map(|s| s.as_str()).collect();
-                    ref_hint.push_str(&format!("\nChromosomes in data files: {}", chroms_preview.join(", ")));
-                }
-                ref_hint.push_str(&format!("\n\nAsk the user if '{}' is the correct reference. If not, ask them to place the correct reference FASTA in the same directory, or provide a genome ID (e.g., hg38, mm39).", fasta_names.join("', '")));
-                ref_hint.push_str("\nThen call show_results again with the reference parameter.");
-            } else {
-                // No FASTA — try genome ID detection
-                let genome_id = Self::chroms_to_genome_id(&detected_chroms);
-                if let Some(gid) = &genome_id {
-                    ref_hint.push_str(&format!(
-                        "\n\n[Reference needed] Genomics files found. Detected genome: {}",
-                        gid
-                    ));
-                    if !detected_chroms.is_empty() {
-                        let chroms_preview: Vec<&str> = detected_chroms.iter().take(5).map(|s| s.as_str()).collect();
-                        ref_hint.push_str(&format!(" (chromosomes: {})", chroms_preview.join(", ")));
-                    }
-                    ref_hint.push_str(&format!("\nAsk the user to confirm, then call show_results again with reference=\"{}\".", gid));
-                } else if !detected_chroms.is_empty() {
-                    let chroms_preview: Vec<&str> = detected_chroms.iter().take(5).map(|s| s.as_str()).collect();
-                    ref_hint.push_str(&format!(
-                        "\n\n[Reference needed] Genomics files found but could not detect genome.\nChromosomes: {}\nNo FASTA file in directory. Ask the user to provide a reference FASTA file or genome ID.",
-                        chroms_preview.join(", ")
-                    ));
-                } else {
-                    ref_hint.push_str("\n\n[Reference needed] Genomics files found but no reference available.\nNo FASTA file in directory. Ask the user to provide a reference FASTA file or genome ID (e.g., hg38).");
-                }
+                        .unwrap_or("unknown")
+                        .to_string()
+                }).collect();
+                ref_hint.push_str(&format!(
+                    "\nNote: {} require a reference to display and cannot be viewed without one.",
+                    names.join(", ")
+                ));
             }
         }
 
