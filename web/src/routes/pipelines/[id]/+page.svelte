@@ -90,7 +90,7 @@
 				<div class="tag-row">
 					<span class="label">TAGS</span>
 					<div class="tag-list">
-						{#each p.tags as tag}
+						{#each p.tags.filter((t: string) => !p.tools.includes(t)) as tag}
 							<span class="tag">{tag}</span>
 						{/each}
 						{#if p.tags.length === 0}<span class="tag-empty">—</span>{/if}

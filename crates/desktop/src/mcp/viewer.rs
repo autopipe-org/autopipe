@@ -348,6 +348,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoPipe Results</title>
+<script src="https://cdn.jsdelivr.net/npm/jsfive@0.3.10/dist/browser/hdf5.js"></script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   html, body {{ height: 100%; overflow: hidden; }}
@@ -1020,35 +1021,116 @@ async function renderIgvViewer(name, ext, content) {{
   }}
 }}
 
-// ── HDF5 (h5ad) Viewer — server-side parsed ──
+// ── HDF5 (h5ad) Viewer — browser-side jsfive ──
 var _hdf5Cache = {{}};
 async function renderHdf5Viewer(name, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
 
-  var fileInfo = FILES.find(function(f) {{ return f.name === name; }});
-
-  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 metadata...</div>';
+  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 file...</div>';
 
   try {{
     if (!_hdf5Cache[name]) {{
-      // Data is pre-parsed JSON from server-side h5py
       var resp = await fetch('/file/' + encodeURIComponent(name));
-      var data = await resp.json();
+      var buf = await resp.arrayBuffer();
+      var f = new jsfive.File(buf);
+
+      // Walk file structure (depth <= 3)
+      var items = [];
+      function walkHdf5(group, prefix, depth) {{
+        if (depth > 3) return;
+        var keys = group.keys || [];
+        for (var i = 0; i < Math.min(keys.length, 200); i++) {{
+          var key = keys[i];
+          var full = prefix ? prefix + '/' + key : key;
+          try {{
+            var obj = group.get(key);
+            if (obj && obj.shape) {{
+              items.push({{key: full, type: 'Dataset', shape: JSON.stringify(obj.shape), dtype: String(obj.dtype || '-')}});
+            }} else if (obj && obj.keys) {{
+              items.push({{key: full + '/', type: 'Group', shape: '-', dtype: '-'}});
+              walkHdf5(obj, full, depth + 1);
+            }}
+          }} catch(e) {{
+            items.push({{key: full, type: 'Error', shape: '-', dtype: String(e)}});
+          }}
+        }}
+      }}
+      walkHdf5(f, '', 0);
+
+      // Extract obs/var columns
+      var obsItems = [];
+      var obs = f.get('obs');
+      if (obs && obs.keys) {{
+        obs.keys.slice(0, 100).forEach(function(k) {{
+          try {{
+            var obj = obs.get(k);
+            var dtype = (obj && obj.dtype) ? String(obj.dtype) : (obj && obj.keys ? 'categorical' : 'unknown');
+            var nCats = 0;
+            if (obj && obj.keys && obj.get && obj.get('categories')) {{
+              try {{ nCats = obj.get('categories').shape[0]; }} catch(e) {{}}
+            }}
+            obsItems.push({{name: k, dtype: dtype, n_categories: nCats}});
+          }} catch(e) {{
+            obsItems.push({{name: k, dtype: 'error', n_categories: 0}});
+          }}
+        }});
+      }}
+
+      var varItems = [];
+      var varGrp = f.get('var');
+      if (varGrp && varGrp.keys) {{
+        varGrp.keys.slice(0, 100).forEach(function(k) {{
+          try {{
+            var obj = varGrp.get(k);
+            var dtype = (obj && obj.dtype) ? String(obj.dtype) : (obj && obj.keys ? 'categorical' : 'unknown');
+            varItems.push({{name: k, dtype: dtype}});
+          }} catch(e) {{
+            varItems.push({{name: k, dtype: 'error'}});
+          }}
+        }});
+      }}
+
+      // Dimensions
+      var nObs = 0, nVar = 0;
+      var X = f.get('X');
+      if (X && X.shape) {{
+        nObs = X.shape[0] || 0;
+        nVar = X.shape[1] || 0;
+      }}
+
+      // Obsm keys
+      var obsmKeys = [];
+      var obsm = f.get('obsm');
+      if (obsm && obsm.keys) {{
+        obsm.keys.forEach(function(k) {{
+          try {{
+            var obj = obsm.get(k);
+            obsmKeys.push({{key: k, shape: obj && obj.shape ? JSON.stringify(obj.shape) : '-'}});
+          }} catch(e) {{
+            obsmKeys.push({{key: k, shape: '-'}});
+          }}
+        }});
+      }}
+
+      // Uns keys
+      var unsKeys = [];
+      var uns = f.get('uns');
+      if (uns && uns.keys) {{ unsKeys = uns.keys.slice(0, 100); }}
 
       _hdf5Cache[name] = {{
-        items: data.items || [],
-        obsItems: data.obs_columns || [],
-        varItems: data.var_columns || [],
-        obsmKeys: data.obsm_keys || [],
-        unsKeys: data.uns_keys || [],
-        nObs: data.n_obs || 0,
-        nVar: data.n_var || 0,
-        fileSize: data.file_size || 0
+        items: items,
+        obsItems: obsItems,
+        varItems: varItems,
+        obsmKeys: obsmKeys,
+        unsKeys: unsKeys,
+        nObs: nObs,
+        nVar: nVar,
+        fileSize: buf.byteLength
       }};
     }}
     _renderHdf5Page(name, 0);
   }} catch(e) {{
-    content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">⚠️</p>' +
+    content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">&#x26A0;&#xFE0F;</p>' +
       '<p class="no-preview-title">HDF5 Load Error</p>' +
       '<p class="no-preview-msg">' + e.message + '<br><br>Download and inspect with Python:<br><code>import anndata; ad = anndata.read_h5ad("' + name + '")</code></p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
@@ -1060,7 +1142,6 @@ function _renderHdf5Page(name, page) {{
   var html = '';
   var sizeMB = (c.fileSize / 1048576).toFixed(1);
 
-  // Summary
   html += '<div class="hdf5-section"><h3>Summary</h3><table>';
   html += '<tr><th>Property</th><th>Value</th></tr>';
   html += '<tr><td>File size</td><td>' + sizeMB + ' MB</td></tr>';
@@ -1068,14 +1149,12 @@ function _renderHdf5Page(name, page) {{
   html += '<tr><td>Variables (n_var)</td><td>' + c.nVar.toLocaleString() + '</td></tr>';
   html += '</table></div>';
 
-  // File structure
   html += '<div class="hdf5-section"><h3>File Structure (' + c.items.length + ' entries)</h3>';
   html += renderPaginatedTable('hdf5Div', ['Key', 'Type', 'Shape', 'Dtype'], c.items, page, function(item) {{
     return '<tr><td>' + item.key + '</td><td>' + item.type + '</td><td>' + item.shape + '</td><td>' + item.dtype + '</td></tr>';
   }});
   html += '</div>';
 
-  // Obs columns
   if (c.obsItems.length > 0) {{
     html += '<div class="hdf5-section"><h3>Observations (obs) columns (' + c.obsItems.length + ')</h3><table>';
     html += '<tr><th>Column</th><th>Dtype</th><th>Categories</th></tr>';
@@ -1086,7 +1165,6 @@ function _renderHdf5Page(name, page) {{
     html += '</table></div>';
   }}
 
-  // Var columns
   if (c.varItems.length > 0) {{
     html += '<div class="hdf5-section"><h3>Variables (var) columns (' + c.varItems.length + ')</h3><table>';
     html += '<tr><th>Column</th><th>Dtype</th></tr>';
@@ -1096,7 +1174,6 @@ function _renderHdf5Page(name, page) {{
     html += '</table></div>';
   }}
 
-  // Obsm keys (embeddings)
   if (c.obsmKeys.length > 0) {{
     html += '<div class="hdf5-section"><h3>Embeddings (obsm) (' + c.obsmKeys.length + ')</h3><table>';
     html += '<tr><th>Key</th><th>Shape</th></tr>';
@@ -1106,7 +1183,6 @@ function _renderHdf5Page(name, page) {{
     html += '</table></div>';
   }}
 
-  // Uns keys (unstructured)
   if (c.unsKeys.length > 0) {{
     html += '<div class="hdf5-section"><h3>Unstructured (uns) (' + c.unsKeys.length + ')</h3><table>';
     html += '<tr><th>Key</th></tr>';

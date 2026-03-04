@@ -365,194 +365,6 @@ impl AutoPipeServer {
 
 
 
-    /// Build the Python h5ad parsing script.
-    /// `file_path` is the absolute path the script will use to open the file.
-    fn h5ad_python_script(file_path: &str) -> String {
-        format!(
-            r#"import h5py, json, sys, os
-
-try:
-    path = '{file_path}'
-    size = os.path.getsize(path)
-
-    f = h5py.File(path, 'r')
-    items = []
-
-    def walk(group, prefix='', depth=0):
-        if depth > 3:
-            return
-        try:
-            keys = list(group.keys())
-        except:
-            return
-        for key in keys[:200]:
-            full = prefix + '/' + key if prefix else key
-            try:
-                obj = group[key]
-                if isinstance(obj, h5py.Dataset):
-                    items.append({{"key": full, "type": "Dataset", "shape": str(list(obj.shape)), "dtype": str(obj.dtype)}})
-                elif isinstance(obj, h5py.Group):
-                    items.append({{"key": full + "/", "type": "Group", "shape": "-", "dtype": "-"}})
-                    walk(obj, full, depth + 1)
-            except Exception as e:
-                items.append({{"key": full, "type": "Error", "shape": "-", "dtype": str(e)}})
-
-    walk(f)
-
-    obs_cols = []
-    if 'obs' in f:
-        obs = f['obs']
-        for k in list(obs.keys())[:100]:
-            try:
-                obj = obs[k]
-                if isinstance(obj, h5py.Group):
-                    dtype = 'categorical'
-                    n_cats = 0
-                    if 'categories' in obj:
-                        try:
-                            n_cats = obj['categories'].shape[0]
-                        except:
-                            pass
-                    obs_cols.append({{"name": k, "dtype": dtype, "n_categories": n_cats}})
-                elif isinstance(obj, h5py.Dataset):
-                    obs_cols.append({{"name": k, "dtype": str(obj.dtype), "n_categories": 0}})
-                else:
-                    obs_cols.append({{"name": k, "dtype": "unknown", "n_categories": 0}})
-            except Exception as e:
-                obs_cols.append({{"name": k, "dtype": "error: " + str(e), "n_categories": 0}})
-
-    var_cols = []
-    if 'var' in f:
-        var_grp = f['var']
-        for k in list(var_grp.keys())[:100]:
-            try:
-                obj = var_grp[k]
-                if isinstance(obj, h5py.Group):
-                    dtype = 'categorical'
-                elif isinstance(obj, h5py.Dataset):
-                    dtype = str(obj.dtype)
-                else:
-                    dtype = 'unknown'
-                var_cols.append({{"name": k, "dtype": dtype}})
-            except:
-                var_cols.append({{"name": k, "dtype": "error"}})
-
-    n_obs = 0
-    n_var = 0
-    if 'X' in f:
-        x = f['X']
-        if isinstance(x, h5py.Dataset):
-            n_obs = int(x.shape[0])
-            n_var = int(x.shape[1]) if len(x.shape) > 1 else 0
-        elif isinstance(x, h5py.Group):
-            attrs = dict(x.attrs)
-            if 'shape' in attrs:
-                sh = list(attrs['shape'])
-                n_obs = int(sh[0])
-                n_var = int(sh[1]) if len(sh) > 1 else 0
-    if n_obs == 0 and 'obs' in f:
-        obs = f['obs']
-        attrs = dict(obs.attrs)
-        if '_index' in attrs:
-            idx_key = attrs['_index']
-            if isinstance(idx_key, bytes):
-                idx_key = idx_key.decode()
-            if idx_key in obs and isinstance(obs[idx_key], h5py.Dataset):
-                n_obs = int(obs[idx_key].shape[0])
-        if n_obs == 0:
-            for k in list(obs.keys())[:5]:
-                obj = obs[k]
-                if isinstance(obj, h5py.Dataset) and len(obj.shape) == 1:
-                    n_obs = int(obj.shape[0])
-                    break
-
-    obsm_keys = []
-    if 'obsm' in f:
-        for k in f['obsm'].keys():
-            try:
-                obj = f['obsm'][k]
-                shape = str(list(obj.shape)) if isinstance(obj, h5py.Dataset) else '-'
-                obsm_keys.append({{"key": k, "shape": shape}})
-            except:
-                obsm_keys.append({{"key": k, "shape": "-"}})
-
-    uns_keys = []
-    if 'uns' in f:
-        for k in f['uns'].keys():
-            uns_keys.append(k)
-
-    result = {{
-        "file_size": size,
-        "n_obs": n_obs,
-        "n_var": n_var,
-        "items": items,
-        "obs_columns": obs_cols,
-        "var_columns": var_cols,
-        "obsm_keys": obsm_keys,
-        "uns_keys": uns_keys
-    }}
-
-    json.dump(result, sys.stdout)
-    f.close()
-except Exception as e:
-    json.dump({{"error": str(e), "file_size": 0, "n_obs": 0, "n_var": 0, "items": [], "obs_columns": [], "var_columns": [], "obsm_keys": [], "uns_keys": []}}, sys.stdout)
-"#,
-            file_path = file_path,
-        )
-    }
-
-    /// Validate and extract JSON from h5ad parse output.
-    fn extract_h5ad_json(output: &str) -> Result<String, String> {
-        let cleaned = clean_content(output).trim().to_string();
-        if cleaned.starts_with('{') {
-            Ok(cleaned)
-        } else {
-            Err(format!("Invalid JSON output: {}", &cleaned[..cleaned.len().min(200)]))
-        }
-    }
-
-    /// Parse h5ad/h5/hdf5 file on the SSH server using a Python venv with h5py.
-    /// Auto-creates ~/.autopipe-venv if it doesn't exist.
-    /// Returns JSON string with file structure, obs, var metadata.
-    async fn parse_h5ad_on_server(&self, remote_path: &str) -> Result<String, String> {
-        let venv = "~/.autopipe-venv";
-        let py = format!("{}/bin/python3", venv);
-
-        // Ensure venv with h5py exists (only created once)
-        let ensure_cmd = format!(
-            "test -f {py} && {py} -c 'import h5py' 2>/dev/null || \
-             (python3 -m venv {venv} && {venv}/bin/pip install --quiet h5py numpy)",
-            venv = venv,
-            py = py,
-        );
-        match self.ssh_run(&ensure_cmd).await {
-            Ok((_, 0)) => {}
-            Ok((output, _)) => {
-                return Err(format!(
-                    "Failed to set up h5ad parser venv. Ensure python3 and python3-venv are installed on the server.\n{}",
-                    clean_content(&output).trim()
-                ));
-            }
-            Err(e) => return Err(format!("SSH error setting up venv: {}", e)),
-        }
-
-        let script = Self::h5ad_python_script(remote_path);
-        let parse_cmd = format!(
-            "{py} -u << 'PYEOF'\n{script}\nPYEOF",
-            py = py,
-            script = script,
-        );
-
-        match self.ssh_run(&parse_cmd).await {
-            Ok((output, 0)) => Self::extract_h5ad_json(&output),
-            Ok((output, code)) => Err(format!(
-                "h5ad parse failed (exit {}): {}",
-                code,
-                clean_content(&output).trim()
-            )),
-            Err(e) => Err(format!("SSH error: {}", e)),
-        }
-    }
 
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
@@ -1656,15 +1468,16 @@ impl AutoPipeServer {
                 .unwrap_or("file")
                 .to_string();
 
-            // h5ad/h5/hdf5: parse on server via Docker + h5py (no size limit)
+            // h5ad/h5/hdf5: check file size, skip if > 1GB (download only)
             if matches!(ext.as_str(), "h5ad" | "h5" | "hdf5") {
-                match self.parse_h5ad_on_server(path).await {
-                    Ok(json_str) => {
-                        files.push((filename, json_str.into_bytes(), "application/x-h5ad-parsed".to_string()));
+                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", path, path);
+                if let Ok((size_str, 0)) = self.ssh_run(&size_cmd).await {
+                    let size: u64 = clean_content(&size_str).trim().parse().unwrap_or(0);
+                    if size > 1_073_741_824 {
+                        errors.push(format!("{}: file too large ({:.1} GB) — download only", filename, size as f64 / 1_073_741_824.0));
+                        continue;
                     }
-                    Err(e) => errors.push(format!("{}: h5ad parse error: {}", filename, e)),
                 }
-                continue;
             }
 
             match self

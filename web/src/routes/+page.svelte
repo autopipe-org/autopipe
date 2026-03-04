@@ -187,7 +187,7 @@
 								{#each p.tools as tool}
 									<span class="tag tool">{tool}</span>
 								{/each}
-								{#each p.tags as tag}
+								{#each p.tags.filter((t: string) => !p.tools.includes(t)) as tag}
 									<span class="tag">{tag}</span>
 								{/each}
 							</div>
