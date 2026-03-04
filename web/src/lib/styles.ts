@@ -13,8 +13,8 @@ header { padding: 14px 40px 0; border-bottom: 1px solid #eee; background: #fff; 
 .logo { font-size: 1.15rem; font-weight: 700; color: #111; text-decoration: none; letter-spacing: -0.02em; display: flex; align-items: center; gap: 8px; }
 .logo-icon { height: 24px; width: auto; }
 
-/* Main layout - wide */
-main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
+/* Main layout - full width */
+main { padding: 32px 48px; }
 
 /* Sections */
 .section { margin-bottom: 28px; }
@@ -42,6 +42,23 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 40px; }
 .tag { display: inline-block; padding: 3px 10px; border-radius: 100px; font-size: 11px; background: #f0f0f0; color: #666; font-weight: 500; }
 .tag.tool { background: #111; color: #fff; }
 .empty { text-align: center; color: #999; padding: 60px 20px; font-size: 14px; background: #fff; }
+
+/* List layout with filter sidebar */
+.list-layout { display: flex; gap: 32px; }
+.filter-sidebar { width: 240px; flex-shrink: 0; position: sticky; top: 24px; align-self: flex-start; }
+.filter-box { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 20px; }
+.filter-title { font-size: 11px; font-weight: 600; color: #999; letter-spacing: 0.04em; margin-bottom: 12px; }
+.filter-title:not(:first-child) { margin-top: 20px; }
+.filter-search { width: 100%; padding: 6px 10px; border: 1px solid #e5e5e5; border-radius: 6px; font-size: 12px; outline: none; margin-bottom: 10px; background: #fafafa; transition: border-color 0.2s; }
+.filter-search:focus { border-color: #999; background: #fff; }
+.filter-group { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; }
+.filter-item { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; color: #444; padding: 3px 0; }
+.filter-item input[type="checkbox"] { accent-color: #111; width: 14px; height: 14px; cursor: pointer; }
+.filter-item:hover { color: #111; }
+.filter-item .filter-count { color: #bbb; font-size: 11px; margin-left: auto; }
+.filter-clear { font-size: 12px; color: #888; cursor: pointer; background: none; border: none; padding: 4px 0; margin-top: 8px; }
+.filter-clear:hover { color: #111; }
+.list-content { flex: 1; min-width: 0; }
 
 /* Detail page */
 .back-link-wrap { margin-bottom: 24px; }

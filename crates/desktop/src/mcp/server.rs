@@ -479,122 +479,134 @@ DOCKERFILE"#;
         let filename = remote_path.rsplitn(2, '/').next().unwrap_or(remote_path);
 
         let parse_cmd = format!(
-            r#"docker run --rm --memory=2g -v '{parent_dir}:/data:ro' autopipe-h5parser python3 << 'PYEOF'
+            r#"docker run --rm --memory=4g -v '{parent_dir}:/data:ro' autopipe-h5parser python3 -u << 'PYEOF'
 import h5py, json, sys, os
 
-path = '/data/{filename}'
-size = os.path.getsize(path)
+try:
+    path = '/data/{filename}'
+    size = os.path.getsize(path)
 
-f = h5py.File(path, 'r')
-items = []
+    f = h5py.File(path, 'r')
+    items = []
 
-def walk(group, prefix='', depth=0):
-    if depth > 3:
-        return
-    for key in group.keys():
-        full = prefix + '/' + key if prefix else key
-        obj = group[key]
-        if isinstance(obj, h5py.Dataset):
-            items.append({{"key": full, "type": "Dataset", "shape": str(list(obj.shape)), "dtype": str(obj.dtype)}})
-        elif isinstance(obj, h5py.Group):
-            items.append({{"key": full + "/", "type": "Group", "shape": "-", "dtype": "-"}})
-            walk(obj, full, depth + 1)
+    def walk(group, prefix='', depth=0):
+        if depth > 3:
+            return
+        try:
+            keys = list(group.keys())
+        except:
+            return
+        for key in keys[:200]:
+            full = prefix + '/' + key if prefix else key
+            try:
+                obj = group[key]
+                if isinstance(obj, h5py.Dataset):
+                    items.append({{"key": full, "type": "Dataset", "shape": str(list(obj.shape)), "dtype": str(obj.dtype)}})
+                elif isinstance(obj, h5py.Group):
+                    items.append({{"key": full + "/", "type": "Group", "shape": "-", "dtype": "-"}})
+                    walk(obj, full, depth + 1)
+            except Exception as e:
+                items.append({{"key": full, "type": "Error", "shape": "-", "dtype": str(e)}})
 
-walk(f)
+    walk(f)
 
-obs_cols = []
-if 'obs' in f:
-    obs = f['obs']
-    for k in obs.keys():
-        obj = obs[k]
-        if isinstance(obj, h5py.Dataset):
-            dtype = str(obj.dtype)
-            n_cats = 0
-            # For categorical data stored as codes + categories (anndata format)
-            if obj.dtype.kind in ('i', 'u') and k in obs and isinstance(obs.get(k), h5py.Group):
-                pass  # handled below
-        elif isinstance(obj, h5py.Group):
-            dtype = 'categorical'
-            n_cats = 0
-            if 'categories' in obj:
-                try:
-                    n_cats = obj['categories'].shape[0]
-                except:
-                    pass
-            obs_cols.append({{"name": k, "dtype": dtype, "n_categories": n_cats}})
-            continue
-        else:
-            dtype = 'unknown'
-            n_cats = 0
-        obs_cols.append({{"name": k, "dtype": dtype, "n_categories": 0}})
+    obs_cols = []
+    if 'obs' in f:
+        obs = f['obs']
+        for k in list(obs.keys())[:100]:
+            try:
+                obj = obs[k]
+                if isinstance(obj, h5py.Group):
+                    dtype = 'categorical'
+                    n_cats = 0
+                    if 'categories' in obj:
+                        try:
+                            n_cats = obj['categories'].shape[0]
+                        except:
+                            pass
+                    obs_cols.append({{"name": k, "dtype": dtype, "n_categories": n_cats}})
+                elif isinstance(obj, h5py.Dataset):
+                    obs_cols.append({{"name": k, "dtype": str(obj.dtype), "n_categories": 0}})
+                else:
+                    obs_cols.append({{"name": k, "dtype": "unknown", "n_categories": 0}})
+            except Exception as e:
+                obs_cols.append({{"name": k, "dtype": "error: " + str(e), "n_categories": 0}})
 
-var_cols = []
-if 'var' in f:
-    var = f['var']
-    for k in var.keys():
-        obj = var[k]
-        if isinstance(obj, h5py.Dataset):
-            dtype = str(obj.dtype)
-        elif isinstance(obj, h5py.Group):
-            dtype = 'categorical'
-        else:
-            dtype = 'unknown'
-        var_cols.append({{"name": k, "dtype": dtype}})
+    var_cols = []
+    if 'var' in f:
+        var_grp = f['var']
+        for k in list(var_grp.keys())[:100]:
+            try:
+                obj = var_grp[k]
+                if isinstance(obj, h5py.Group):
+                    dtype = 'categorical'
+                elif isinstance(obj, h5py.Dataset):
+                    dtype = str(obj.dtype)
+                else:
+                    dtype = 'unknown'
+                var_cols.append({{"name": k, "dtype": dtype}})
+            except:
+                var_cols.append({{"name": k, "dtype": "error"}})
 
-n_obs = 0
-n_var = 0
-if 'X' in f:
-    x = f['X']
-    if isinstance(x, h5py.Dataset):
-        n_obs = x.shape[0]
-        n_var = x.shape[1] if len(x.shape) > 1 else 0
-    elif isinstance(x, h5py.Group):
-        attrs = dict(x.attrs)
-        if 'shape' in attrs:
-            sh = list(attrs['shape'])
-            n_obs = int(sh[0])
-            n_var = int(sh[1]) if len(sh) > 1 else 0
-elif 'obs' in f:
-    obs = f['obs']
-    attrs = dict(obs.attrs)
-    if '_index' in attrs:
-        idx_key = attrs['_index']
-        if isinstance(idx_key, bytes):
-            idx_key = idx_key.decode()
-        if idx_key in obs and isinstance(obs[idx_key], h5py.Dataset):
-            n_obs = obs[idx_key].shape[0]
-    if n_obs == 0:
-        for k in obs.keys():
-            obj = obs[k]
-            if isinstance(obj, h5py.Dataset) and len(obj.shape) == 1:
-                n_obs = obj.shape[0]
-                break
+    n_obs = 0
+    n_var = 0
+    if 'X' in f:
+        x = f['X']
+        if isinstance(x, h5py.Dataset):
+            n_obs = int(x.shape[0])
+            n_var = int(x.shape[1]) if len(x.shape) > 1 else 0
+        elif isinstance(x, h5py.Group):
+            attrs = dict(x.attrs)
+            if 'shape' in attrs:
+                sh = list(attrs['shape'])
+                n_obs = int(sh[0])
+                n_var = int(sh[1]) if len(sh) > 1 else 0
+    if n_obs == 0 and 'obs' in f:
+        obs = f['obs']
+        attrs = dict(obs.attrs)
+        if '_index' in attrs:
+            idx_key = attrs['_index']
+            if isinstance(idx_key, bytes):
+                idx_key = idx_key.decode()
+            if idx_key in obs and isinstance(obs[idx_key], h5py.Dataset):
+                n_obs = int(obs[idx_key].shape[0])
+        if n_obs == 0:
+            for k in list(obs.keys())[:5]:
+                obj = obs[k]
+                if isinstance(obj, h5py.Dataset) and len(obj.shape) == 1:
+                    n_obs = int(obj.shape[0])
+                    break
 
-obsm_keys = []
-if 'obsm' in f:
-    for k in f['obsm'].keys():
-        obj = f['obsm'][k]
-        shape = str(list(obj.shape)) if isinstance(obj, h5py.Dataset) else '-'
-        obsm_keys.append({{"key": k, "shape": shape}})
+    obsm_keys = []
+    if 'obsm' in f:
+        for k in f['obsm'].keys():
+            try:
+                obj = f['obsm'][k]
+                shape = str(list(obj.shape)) if isinstance(obj, h5py.Dataset) else '-'
+                obsm_keys.append({{"key": k, "shape": shape}})
+            except:
+                obsm_keys.append({{"key": k, "shape": "-"}})
 
-uns_keys = []
-if 'uns' in f:
-    for k in f['uns'].keys():
-        uns_keys.append(k)
+    uns_keys = []
+    if 'uns' in f:
+        for k in f['uns'].keys():
+            uns_keys.append(k)
 
-result = {{
-    "file_size": size,
-    "n_obs": n_obs,
-    "n_var": n_var,
-    "items": items,
-    "obs_columns": obs_cols,
-    "var_columns": var_cols,
-    "obsm_keys": obsm_keys,
-    "uns_keys": uns_keys
-}}
+    result = {{
+        "file_size": size,
+        "n_obs": n_obs,
+        "n_var": n_var,
+        "items": items,
+        "obs_columns": obs_cols,
+        "var_columns": var_cols,
+        "obsm_keys": obsm_keys,
+        "uns_keys": uns_keys
+    }}
 
-json.dump(result, sys.stdout)
-f.close()
+    json.dump(result, sys.stdout)
+    f.close()
+except Exception as e:
+    json.dump({{"error": str(e), "file_size": 0, "n_obs": 0, "n_var": 0, "items": [], "obs_columns": [], "var_columns": [], "obsm_keys": [], "uns_keys": []}}, sys.stdout)
 PYEOF"#,
             parent_dir = parent_dir,
             filename = filename,
@@ -1758,62 +1770,83 @@ impl AutoPipeServer {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
-        // Auto-detect reference genome if not explicitly provided
-        let reference = if params.reference.is_some() {
-            params.reference.clone()
-        } else {
-            // Check if any genomics files need a reference
-            let genomics_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf"];
-            let has_genomics = file_paths.iter().any(|p| {
+        // Use explicitly provided reference, or None
+        let reference = params.reference.clone();
+
+        // Detect genomics info for the AI to inform the user
+        let genomics_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf"];
+        let has_genomics = file_paths.iter().any(|p| {
+            let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            genomics_exts.contains(&ext.as_str())
+        });
+
+        let mut ref_hint = String::new();
+        if has_genomics && reference.is_none() {
+            // Find FASTA files in the directory
+            let fasta_files: Vec<&String> = file_paths.iter().filter(|p| {
                 let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-                genomics_exts.contains(&ext.as_str())
-            });
+                matches!(ext.as_str(), "fasta" | "fa" | "fna")
+            }).collect();
 
-            if has_genomics {
-                // 1) Detect chromosome names from BAM/VCF headers
-                let detected_chroms = self.detect_chroms_from_headers(&file_paths).await;
+            // Detect chromosomes from genomics files
+            let detected_chroms = self.detect_chroms_from_headers(&file_paths).await;
 
-                // 2) Check for local FASTA files and verify species match
-                let fasta_path = file_paths.iter().find(|p| {
-                    let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-                    matches!(ext.as_str(), "fasta" | "fa" | "fna")
-                });
+            if !fasta_files.is_empty() {
+                let fasta_names: Vec<String> = fasta_files.iter().map(|p| {
+                    std::path::Path::new(p.as_str())
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                }).collect();
 
-                if let Some(fasta) = fasta_path {
-                    if detected_chroms.is_empty() {
-                        // No BAM/VCF to compare — just use the FASTA
-                        std::path::Path::new(fasta)
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|s| s.to_string())
-                    } else {
-                        // Read FASTA contig names and compare with BAM/VCF chromosomes
-                        let fasta_contigs = self.read_fasta_contigs(fasta).await;
-                        let matched = if fasta_contigs.is_empty() {
-                            false
-                        } else {
-                            // Check if any BAM/VCF chromosome exists in FASTA contigs
-                            detected_chroms.iter().any(|c| fasta_contigs.contains(c))
-                        };
-
-                        if matched {
-                            std::path::Path::new(fasta)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|s| s.to_string())
-                        } else {
-                            // Species mismatch — fall back to online genome ID
-                            Self::chroms_to_genome_id(&detected_chroms)
-                        }
-                    }
-                } else {
-                    // 3) No FASTA file — use online genome ID from chromosome patterns
-                    Self::chroms_to_genome_id(&detected_chroms)
+                // Read FASTA contigs for comparison
+                let mut fasta_info = Vec::new();
+                for fp in &fasta_files {
+                    let contigs = self.read_fasta_contigs(fp).await;
+                    let name = std::path::Path::new(fp.as_str())
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    let contigs_preview: Vec<&str> = contigs.iter().take(5).map(|s| s.as_str()).collect();
+                    fasta_info.push(format!("  {} (contigs: {})", name, contigs_preview.join(", ")));
                 }
+
+                ref_hint.push_str("\n\n[Reference needed] Genomics files found but no reference specified.");
+                ref_hint.push_str("\nFASTA file(s) in directory:");
+                for info in &fasta_info {
+                    ref_hint.push_str(&format!("\n{}", info));
+                }
+                if !detected_chroms.is_empty() {
+                    let chroms_preview: Vec<&str> = detected_chroms.iter().take(5).map(|s| s.as_str()).collect();
+                    ref_hint.push_str(&format!("\nChromosomes in data files: {}", chroms_preview.join(", ")));
+                }
+                ref_hint.push_str(&format!("\n\nAsk the user if '{}' is the correct reference. If not, ask them to place the correct reference FASTA in the same directory, or provide a genome ID (e.g., hg38, mm39).", fasta_names.join("', '")));
+                ref_hint.push_str("\nThen call show_results again with the reference parameter.");
             } else {
-                None
+                // No FASTA — try genome ID detection
+                let genome_id = Self::chroms_to_genome_id(&detected_chroms);
+                if let Some(gid) = &genome_id {
+                    ref_hint.push_str(&format!(
+                        "\n\n[Reference needed] Genomics files found. Detected genome: {}",
+                        gid
+                    ));
+                    if !detected_chroms.is_empty() {
+                        let chroms_preview: Vec<&str> = detected_chroms.iter().take(5).map(|s| s.as_str()).collect();
+                        ref_hint.push_str(&format!(" (chromosomes: {})", chroms_preview.join(", ")));
+                    }
+                    ref_hint.push_str(&format!("\nAsk the user to confirm, then call show_results again with reference=\"{}\".", gid));
+                } else if !detected_chroms.is_empty() {
+                    let chroms_preview: Vec<&str> = detected_chroms.iter().take(5).map(|s| s.as_str()).collect();
+                    ref_hint.push_str(&format!(
+                        "\n\n[Reference needed] Genomics files found but could not detect genome.\nChromosomes: {}\nNo FASTA file in directory. Ask the user to provide a reference FASTA file or genome ID.",
+                        chroms_preview.join(", ")
+                    ));
+                } else {
+                    ref_hint.push_str("\n\n[Reference needed] Genomics files found but no reference available.\nNo FASTA file in directory. Ask the user to provide a reference FASTA file or genome ID (e.g., hg38).");
+                }
             }
-        };
+        }
 
         // Open in browser
         match viewer::show_files(files.clone(), self.config.full_plugins_dir(), reference).await {
@@ -1833,6 +1866,7 @@ impl AutoPipeServer {
                         errors.join("\n")
                     ));
                 }
+                msg.push_str(&ref_hint);
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(

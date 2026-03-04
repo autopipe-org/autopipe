@@ -592,17 +592,21 @@ function selectFileWithMode(name, mode) {{
   // Dual-tab files: Data + IGV
   if (igvDualExts.indexOf(ext) >= 0) {{
     var ref = hasReference();
-    var tabsHtml = '<div class="view-tabs">';
-    tabsHtml += '<button class="view-tab' + (mode === 'data' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'data\')">Data</button>';
-    tabsHtml += '<button class="view-tab' + (mode === 'igv' ? ' active' : '') + (ref ? '' : ' disabled') + '"' +
-      (ref ? ' onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'igv\')"' : ' title="No reference genome available"') +
-      '>IGV</button>';
-    tabsHtml += '</div>';
-    actions.innerHTML = tabsHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-
-    if (mode === 'igv' && ref) {{
-      renderIgvViewer(name, ext, content);
+    if (ref) {{
+      // Reference available: show both Data and IGV tabs
+      var tabsHtml = '<div class="view-tabs">';
+      tabsHtml += '<button class="view-tab' + (mode === 'data' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'data\')">Data</button>';
+      tabsHtml += '<button class="view-tab' + (mode === 'igv' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'igv\')">IGV</button>';
+      tabsHtml += '</div>';
+      actions.innerHTML = tabsHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+      if (mode === 'igv') {{
+        renderIgvViewer(name, ext, content);
+      }} else {{
+        renderDataViewer(name, ext, content);
+      }}
     }} else {{
+      // No reference: show Data only (no tabs)
+      actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
       renderDataViewer(name, ext, content);
     }}
     return;

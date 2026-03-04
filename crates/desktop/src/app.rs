@@ -343,8 +343,7 @@ impl AutoPipeApp {
             ui.heading("Step 3: Register MCP Tools");
             ui.add_space(5.0);
             ui.label("Click 'Register & Minimize to Tray' at the bottom.");
-            ui.label("This auto-registers autopipe tools in supported MCP clients");
-            ui.label("(Claude Desktop, Gemini CLI, etc.).");
+            ui.label("This auto-registers autopipe tools in supported MCP clients.");
             ui.label("After registration, restart your AI app to load the tools.");
 
             ui.add_space(15.0);
@@ -355,11 +354,16 @@ impl AutoPipeApp {
             ui.heading("Step 4: Use Your AI App");
             ui.add_space(5.0);
             ui.label("Open your MCP-compatible AI app and start a conversation.");
-            ui.label("You can ask the AI to:");
-            ui.label("  - Search for existing workflows and plugins");
+            ui.add_space(5.0);
+            ui.label("Workflows:");
             ui.label("  - Create new bioinformatics pipelines");
-            ui.label("  - Build, run, and monitor pipelines");
+            ui.label("  - Search and download existing workflows");
+            ui.label("  - Build, run, and monitor pipelines on your server");
             ui.label("  - Upload and publish workflows to the registry");
+            ui.add_space(5.0);
+            ui.label("Plugins & Result Viewer:");
+            ui.label("  - View pipeline results");
+            ui.label("  - Generate viewer plugins for custom file formats");
         });
     }
 
