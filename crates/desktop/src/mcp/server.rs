@@ -511,85 +511,45 @@ except Exception as e:
         }
     }
 
-    /// Parse h5ad/h5/hdf5 file on the SSH server.
-    /// Tries Docker first, falls back to direct python3 if Docker is unavailable.
+    /// Parse h5ad/h5/hdf5 file on the SSH server using a Python venv with h5py.
+    /// Auto-creates ~/.autopipe-venv if it doesn't exist.
     /// Returns JSON string with file structure, obs, var metadata.
     async fn parse_h5ad_on_server(&self, remote_path: &str) -> Result<String, String> {
-        let parent_dir = remote_path.rsplitn(2, '/').nth(1).unwrap_or("/");
-        let filename = remote_path.rsplitn(2, '/').next().unwrap_or(remote_path);
+        let venv = "~/.autopipe-venv";
+        let py = format!("{}/bin/python3", venv);
 
-        // --- Attempt 1: Docker ---
-        let docker_available = match self.ssh_run("command -v docker >/dev/null 2>&1 && echo yes || echo no").await {
-            Ok((out, 0)) => clean_content(&out).trim().to_string() == "yes",
-            _ => false,
-        };
-
-        if docker_available {
-            // Ensure image exists
-            let ensure_cmd = r#"docker image inspect autopipe-h5parser >/dev/null 2>&1 || docker build -t autopipe-h5parser - << 'DOCKERFILE'
-FROM python:3.11-slim
-RUN pip install --no-cache-dir h5py numpy
-DOCKERFILE"#;
-            let _ = self.ssh_run(ensure_cmd).await;
-
-            let script = Self::h5ad_python_script(&format!("/data/{}", filename));
-            let parse_cmd = format!(
-                "docker run --rm --memory=4g -v '{parent_dir}:/data:ro' autopipe-h5parser python3 -u << 'PYEOF'\n{script}\nPYEOF",
-                parent_dir = parent_dir,
-                script = script,
-            );
-
-            match self.ssh_run(&parse_cmd).await {
-                Ok((output, 0)) => {
-                    if let Ok(json) = Self::extract_h5ad_json(&output) {
-                        return Ok(json);
-                    }
-                    // Docker ran but output was invalid — fall through to direct python
-                }
-                _ => {
-                    // Docker run failed — fall through to direct python
-                }
+        // Ensure venv with h5py exists (only created once)
+        let ensure_cmd = format!(
+            "test -f {py} && {py} -c 'import h5py' 2>/dev/null || \
+             (python3 -m venv {venv} && {venv}/bin/pip install --quiet h5py numpy)",
+            venv = venv,
+            py = py,
+        );
+        match self.ssh_run(&ensure_cmd).await {
+            Ok((_, 0)) => {}
+            Ok((output, _)) => {
+                return Err(format!(
+                    "Failed to set up h5ad parser venv. Ensure python3 and python3-venv are installed on the server.\n{}",
+                    clean_content(&output).trim()
+                ));
             }
+            Err(e) => return Err(format!("SSH error setting up venv: {}", e)),
         }
 
-        // --- Attempt 2: Direct python3 with h5py ---
-        // Check if python3 + h5py are available on the server
-        let py_check = "python3 -c 'import h5py; print(\"ok\")' 2>/dev/null || python -c 'import h5py; print(\"ok\")' 2>/dev/null";
-        let py_cmd = match self.ssh_run(py_check).await {
-            Ok((out, 0)) if clean_content(&out).trim().contains("ok") => {
-                // Determine which python binary has h5py
-                let has_py3 = match self.ssh_run("python3 -c 'import h5py' 2>/dev/null").await {
-                    Ok((_, 0)) => true,
-                    _ => false,
-                };
-                if has_py3 { "python3" } else { "python" }
-            }
-            _ => {
-                // Try pip install h5py as last resort
-                let install = "pip3 install --user h5py numpy 2>/dev/null || pip install --user h5py numpy 2>/dev/null";
-                let _ = self.ssh_run(install).await;
-                match self.ssh_run("python3 -c 'import h5py' 2>/dev/null").await {
-                    Ok((_, 0)) => "python3",
-                    _ => {
-                        return Err(
-                            "h5ad parsing failed: neither Docker nor python3 with h5py is available on the server. \
-                             Install h5py with: pip3 install h5py numpy".to_string()
-                        );
-                    }
-                }
-            }
-        };
-
         let script = Self::h5ad_python_script(remote_path);
-        let direct_cmd = format!(
-            "{py_cmd} -u << 'PYEOF'\n{script}\nPYEOF",
-            py_cmd = py_cmd,
+        let parse_cmd = format!(
+            "{py} -u << 'PYEOF'\n{script}\nPYEOF",
+            py = py,
             script = script,
         );
 
-        match self.ssh_run(&direct_cmd).await {
+        match self.ssh_run(&parse_cmd).await {
             Ok((output, 0)) => Self::extract_h5ad_json(&output),
-            Ok((output, code)) => Err(format!("python h5py parse failed (exit {}): {}", code, clean_content(&output).trim())),
+            Ok((output, code)) => Err(format!(
+                "h5ad parse failed (exit {}): {}",
+                code,
+                clean_content(&output).trim()
+            )),
             Err(e) => Err(format!("SSH error: {}", e)),
         }
     }
@@ -1536,7 +1496,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser to display ALL result files. ALWAYS use this tool when the user wants to view results — NEVER use read_file for viewing results. Pass a DIRECTORY path (not individual files). The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). IMPORTANT workflow for genomics files: (1) First call show_results WITHOUT the reference parameter. (2) The response will tell you about FASTA files found in the same directory. (3) If a FASTA file is found, ask the user: 'A FASTA file [name] was found in the results directory. Is this the correct reference for your data?' (4a) If the user confirms, call show_results AGAIN with the reference parameter set to that FASTA filename to enable IGV visualization. (4b) If the user says no, ask them to provide the correct reference FASTA file path. If they don't provide one, proceed without reference — only the Data tab will be shown. (4c) For IGV-only formats (CRAM, BCF), inform the user that these files require a reference to display and cannot be viewed without one.")]
+    #[tool(description = "Open the Results Viewer in a browser to display ALL result files. ALWAYS use this tool when the user wants to view results — NEVER use read_file for viewing results. Pass a DIRECTORY path (not individual files). The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). IMPORTANT workflow for genomics files (BAM/VCF/BED/GFF/CRAM/BCF): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM/BCF files cannot be displayed without a reference.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -1737,64 +1697,77 @@ impl AutoPipeServer {
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
-        // Use explicitly provided reference, or None
-        let reference = params.reference.clone();
+        // "none" means user explicitly said no reference → open viewer without IGV
+        let user_declined_ref = matches!(
+            params.reference.as_deref(),
+            Some("none") | Some("None") | Some("no")
+        );
+        let reference = if user_declined_ref {
+            None
+        } else {
+            params.reference.clone()
+        };
 
-        // Detect genomics info for the AI to inform the user
+        // Detect genomics files
         let genomics_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf"];
         let has_genomics = file_paths.iter().any(|p| {
             let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
             genomics_exts.contains(&ext.as_str())
         });
 
-        let mut ref_hint = String::new();
-        if has_genomics && reference.is_none() {
-            // Find FASTA files in the directory
+        // --- Genomics files exist but no reference decision yet → ask first, don't open viewer ---
+        if has_genomics && reference.is_none() && !user_declined_ref {
             let fasta_files: Vec<&String> = file_paths.iter().filter(|p| {
                 let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
                 matches!(ext.as_str(), "fasta" | "fa" | "fna")
             }).collect();
 
-            // Check for IGV-only files (CRAM, BCF) that cannot be viewed without reference
-            let igv_only_files: Vec<&String> = file_paths.iter().filter(|p| {
+            let igv_only_files: Vec<String> = file_paths.iter().filter(|p| {
                 let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
                 matches!(ext.as_str(), "cram" | "bcf")
+            }).map(|p| {
+                std::path::Path::new(p.as_str())
+                    .file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()
             }).collect();
+
+            let mut msg = String::from("[Reference check] Genomics files detected. The viewer is NOT opened yet.\n");
 
             if !fasta_files.is_empty() {
                 let fasta_names: Vec<String> = fasta_files.iter().map(|p| {
                     std::path::Path::new(p.as_str())
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
+                        .file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()
                 }).collect();
 
-                ref_hint.push_str(&format!(
-                    "\n\n[Reference] FASTA file found in directory: {}.\nAsk the user: 'Is this the correct reference for your data?'\n- If yes: call show_results again with reference=\"{}\" to enable IGV visualization.\n- If no: ask the user for the correct reference FASTA file path. If they don't provide one, the current results are shown with Data tab only (no IGV).",
+                msg.push_str(&format!(
+                    "\nFASTA file(s) found in the directory: {}\n\
+                     Ask the user: 'Is [{}] the correct reference for your data? If not, please provide the correct reference file path.'\n\
+                     - If yes: call show_results again with reference=\"{}\"\n\
+                     - If user provides a different path: call show_results again with reference=<that_path>\n\
+                     - If user has no reference: call show_results again with reference=\"none\"",
+                    fasta_names.join(", "),
                     fasta_names.join(", "),
                     fasta_names[0],
                 ));
             } else {
-                ref_hint.push_str("\n\n[Reference] Genomics files found but no FASTA reference file in the directory.\nAsk the user to provide a reference FASTA file path. If they don't provide one, the current results are shown with Data tab only (no IGV).");
+                msg.push_str(
+                    "\nNo FASTA reference file found in the directory.\n\
+                     Ask the user: 'Do you have a reference FASTA file for this data? If so, please provide the file path.'\n\
+                     - If user provides a path: call show_results again with reference=<that_path>\n\
+                     - If user has no reference: call show_results again with reference=\"none\""
+                );
             }
 
             if !igv_only_files.is_empty() {
-                let names: Vec<String> = igv_only_files.iter().map(|p| {
-                    std::path::Path::new(p.as_str())
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string()
-                }).collect();
-                ref_hint.push_str(&format!(
-                    "\nNote: {} require a reference to display and cannot be viewed without one.",
-                    names.join(", ")
+                msg.push_str(&format!(
+                    "\n\nNote: {} require a reference and cannot be viewed without one.",
+                    igv_only_files.join(", ")
                 ));
             }
+
+            return Ok(CallToolResult::success(vec![Content::text(msg)]));
         }
 
-        // Open in browser
+        // --- Reference confirmed / declined / no genomics → open viewer ---
         match viewer::show_files(files.clone(), self.config.full_plugins_dir(), reference).await {
             Ok(url) => {
                 let mut msg = format!(
@@ -1812,7 +1785,6 @@ impl AutoPipeServer {
                         errors.join("\n")
                     ));
                 }
-                msg.push_str(&ref_hint);
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
