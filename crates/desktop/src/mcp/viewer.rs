@@ -629,14 +629,17 @@ async fn data_handler(
     };
 
     let rows: Vec<Vec<String>> = match ssh_run(&ssh_cfg, &rows_cmd).await {
-        Ok((output, 0)) => output
-            .trim()
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|line| line.split('\t').map(|s| s.to_string()).collect())
-            .collect(),
-        Ok((output, _)) => {
-            return Json(serde_json::json!({"error": output.trim()})).into_response();
+        Ok((output, code)) => {
+            // BAM: accept any exit code (head causes SIGPIPE → exit 141)
+            if code != 0 && ext != "bam" {
+                return Json(serde_json::json!({"error": output.trim()})).into_response();
+            }
+            output
+                .trim()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|line| line.split('\t').map(|s| s.to_string()).collect())
+                .collect()
         }
         Err(e) => {
             return Json(serde_json::json!({"error": e})).into_response();
