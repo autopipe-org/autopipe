@@ -1,17 +1,20 @@
 #![allow(dead_code)]
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Json},
     routing::get,
     Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
+
+use crate::config::AppConfig;
+use crate::ssh;
 
 /// Shared state: stores files keyed by filename.
 #[derive(Clone)]
@@ -102,6 +105,43 @@ async fn get_reference_lock() -> &'static Arc<Mutex<Option<String>>> {
         .await
 }
 
+/// Remote file entry — files that stay on the remote server (not transferred).
+struct RemoteFileEntry {
+    remote_path: String,
+    size: u64,
+    mime: String,
+}
+
+/// SSH config for on-demand remote data fetching.
+static SSH_CONFIG: tokio::sync::OnceCell<Arc<Mutex<Option<AppConfig>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_ssh_config_lock() -> &'static Arc<Mutex<Option<AppConfig>>> {
+    SSH_CONFIG
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
+/// Remote files that are NOT transferred — filename → remote path + metadata.
+static REMOTE_FILES: tokio::sync::OnceCell<Arc<Mutex<HashMap<String, RemoteFileEntry>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_remote_files_lock() -> &'static Arc<Mutex<HashMap<String, RemoteFileEntry>>> {
+    REMOTE_FILES
+        .get_or_init(|| async { Arc::new(Mutex::new(HashMap::new())) })
+        .await
+}
+
+/// Cache for total row counts of remote files (to avoid re-counting on every page).
+static ROW_COUNT_CACHE: tokio::sync::OnceCell<Arc<Mutex<HashMap<String, usize>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_row_count_cache() -> &'static Arc<Mutex<HashMap<String, usize>>> {
+    ROW_COUNT_CACHE
+        .get_or_init(|| async { Arc::new(Mutex::new(HashMap::new())) })
+        .await
+}
+
 /// Scan local plugins directory, reading manifest.json from each subdirectory.
 fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
     let mut plugins = Vec::new();
@@ -171,6 +211,7 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
         .route("/api/files", get(files_list_handler))
         .route("/api/reference", get(reference_handler))
         .route("/file/{filename}", get(file_handler))
+        .route("/data/{filename}", get(data_handler))
         .route("/plugin/{name}/{*path}", get(plugin_asset_handler))
         .with_state(state);
 
@@ -203,10 +244,14 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
 
 /// Add files and open browser. Returns the URL.
 /// `reference` can be a local FASTA filename (present in files), or a genome ID like "hg38", "mm10".
+/// `remote_files`: (filename, remote_path, size, mime) — files kept on remote server, fetched on demand.
+/// `ssh_config`: SSH credentials for on-demand remote data fetching.
 pub async fn show_files(
     files: Vec<(String, Vec<u8>, String)>,
+    remote_files: Vec<(String, String, u64, String)>,
     plugins_dir: String,
     reference: Option<String>,
+    ssh_config: Option<AppConfig>,
 ) -> Result<String, String> {
     // Check if server is already running (to decide whether to open a new tab)
     let already_running = {
@@ -223,6 +268,27 @@ pub async fn show_files(
         for (name, data, mime) in files {
             map.insert(name, FileEntry { data, mime });
         }
+    }
+
+    // Update remote file store
+    {
+        let mut rmap = get_remote_files_lock().await.lock().await;
+        rmap.clear();
+        for (name, remote_path, size, mime) in remote_files {
+            rmap.insert(name, RemoteFileEntry { remote_path, size, mime });
+        }
+    }
+
+    // Store SSH config
+    {
+        let mut cfg = get_ssh_config_lock().await.lock().await;
+        *cfg = ssh_config;
+    }
+
+    // Clear row count cache (new file set)
+    {
+        let mut cache = get_row_count_cache().await.lock().await;
+        cache.clear();
     }
 
     // Scan and update plugins
@@ -263,7 +329,7 @@ async fn logo_handler() -> impl IntoResponse {
     )
 }
 
-/// API: return file list as JSON.
+/// API: return file list as JSON (includes both local and remote files).
 async fn files_list_handler(State(state): State<ViewerState>) -> Json<Vec<FileListItem>> {
     let files = state.files.lock().await;
     let mut items: Vec<FileListItem> = files
@@ -271,9 +337,23 @@ async fn files_list_handler(State(state): State<ViewerState>) -> Json<Vec<FileLi
         .map(|(name, entry)| FileListItem {
             name: name.clone(),
             mime: entry.mime.clone(),
-            size: entry.data.len(),
+            size: entry.data.len() as u64,
+            remote: false,
         })
         .collect();
+    drop(files);
+
+    // Add remote files
+    let remote = get_remote_files_lock().await.lock().await;
+    for (name, entry) in remote.iter() {
+        items.push(FileListItem {
+            name: name.clone(),
+            mime: entry.mime.clone(),
+            size: entry.size,
+            remote: true,
+        });
+    }
+
     items.sort_by(|a, b| a.name.cmp(&b.name));
     Json(items)
 }
@@ -282,7 +362,8 @@ async fn files_list_handler(State(state): State<ViewerState>) -> Json<Vec<FileLi
 struct FileListItem {
     name: String,
     mime: String,
-    size: usize,
+    size: u64,
+    remote: bool,
 }
 
 /// API: return reference info as JSON.
@@ -292,6 +373,266 @@ async fn reference_handler() -> Json<serde_json::Value> {
         Some(ref_val) => Json(serde_json::json!({ "reference": ref_val })),
         None => Json(serde_json::json!({ "reference": null })),
     }
+}
+
+/// Query parameters for the /data/ endpoint (server-side pagination).
+#[derive(Deserialize)]
+struct DataQuery {
+    #[serde(default)]
+    page: Option<usize>,
+    #[serde(default)]
+    page_size: Option<usize>,
+}
+
+/// Helper: run SSH command via spawn_blocking.
+async fn ssh_run(config: &AppConfig, cmd: &str) -> Result<(String, i32), String> {
+    let config = config.clone();
+    let cmd = cmd.to_string();
+    tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
+        .await
+        .map_err(|e| format!("Task error: {}", e))?
+}
+
+/// Data handler: server-side pagination for genomics files (BAM/VCF/BED/GFF).
+/// GET /data/{filename}?page=0&page_size=100
+async fn data_handler(
+    Path(filename): Path<String>,
+    Query(query): Query<DataQuery>,
+) -> impl IntoResponse {
+    let page = query.page.unwrap_or(0);
+    let page_size = query.page_size.unwrap_or(100);
+
+    // Look up remote file
+    let remote_files = get_remote_files_lock().await.lock().await;
+    let entry = match remote_files.get(&filename) {
+        Some(e) => (e.remote_path.clone(), e.mime.clone()),
+        None => {
+            return Json(serde_json::json!({"error": "File not found in remote files"}))
+                .into_response();
+        }
+    };
+    drop(remote_files);
+    let (remote_path, _mime) = entry;
+
+    // Get SSH config
+    let ssh_cfg_lock = get_ssh_config_lock().await.lock().await;
+    let ssh_cfg = match &*ssh_cfg_lock {
+        Some(c) => c.clone(),
+        None => {
+            return Json(serde_json::json!({"error": "SSH not configured"})).into_response();
+        }
+    };
+    drop(ssh_cfg_lock);
+
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    let start = page * page_size + 1; // sed is 1-indexed
+    let end = start + page_size - 1;
+
+    // Get total row count (cached)
+    let total = {
+        let cache = get_row_count_cache().await.lock().await;
+        cache.get(&filename).copied()
+    };
+    let total = match total {
+        Some(t) => t,
+        None => {
+            let count_cmd = match ext.as_str() {
+                "bam" => format!("samtools view -c '{}'", remote_path),
+                "vcf" => format!("grep -c -v '^#' '{}'", remote_path),
+                "bed" => format!(
+                    "grep -c -v -E '^#|^track|^browser' '{}'",
+                    remote_path
+                ),
+                "gff" | "gtf" | "gff3" => format!("grep -c -v '^#' '{}'", remote_path),
+                _ => format!("wc -l < '{}'", remote_path),
+            };
+            match ssh_run(&ssh_cfg, &count_cmd).await {
+                Ok((output, 0)) => {
+                    let count: usize = output.trim().parse().unwrap_or(0);
+                    let mut cache = get_row_count_cache().await.lock().await;
+                    cache.insert(filename.clone(), count);
+                    count
+                }
+                _ => 0,
+            }
+        }
+    };
+
+    // Get metadata (header/meta lines) — only on first page
+    let mut meta = serde_json::Value::Null;
+    let mut header_val = serde_json::Value::Null;
+    let mut refs_val = serde_json::Value::Null;
+    let mut col_headers: Vec<String> = Vec::new();
+
+    if page == 0 {
+        match ext.as_str() {
+            "bam" => {
+                // SAM header
+                if let Ok((hdr, 0)) =
+                    ssh_run(&ssh_cfg, &format!("samtools view -H '{}'", remote_path)).await
+                {
+                    header_val = serde_json::Value::String(hdr.trim().to_string());
+                }
+                // Reference sequences from header
+                if let Ok((hdr_text, 0)) =
+                    ssh_run(&ssh_cfg, &format!("samtools view -H '{}' | grep '^@SQ'", remote_path))
+                        .await
+                {
+                    let mut refs = Vec::new();
+                    for line in hdr_text.trim().lines() {
+                        let mut name = String::new();
+                        let mut length: u64 = 0;
+                        for field in line.split('\t') {
+                            if let Some(val) = field.strip_prefix("SN:") {
+                                name = val.to_string();
+                            } else if let Some(val) = field.strip_prefix("LN:") {
+                                length = val.parse().unwrap_or(0);
+                            }
+                        }
+                        if !name.is_empty() {
+                            refs.push(serde_json::json!({"name": name, "length": length}));
+                        }
+                    }
+                    refs_val = serde_json::Value::Array(refs);
+                }
+                col_headers = vec![
+                    "Read Name", "Flag", "Chr", "Pos", "MAPQ", "CIGAR", "Sequence",
+                ]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+            }
+            "vcf" => {
+                if let Ok((m, 0)) =
+                    ssh_run(&ssh_cfg, &format!("grep '^#' '{}'", remote_path)).await
+                {
+                    let lines: Vec<&str> = m.trim().lines().collect();
+                    // Last # line is the header row
+                    if let Some(hdr_line) = lines.iter().find(|l| l.starts_with("#CHROM")) {
+                        col_headers = hdr_line
+                            .trim_start_matches('#')
+                            .split('\t')
+                            .map(|s| s.to_string())
+                            .collect();
+                    }
+                    let meta_lines: Vec<&str> =
+                        lines.iter().filter(|l| l.starts_with("##")).copied().collect();
+                    if !meta_lines.is_empty() {
+                        meta = serde_json::Value::String(meta_lines.join("\n"));
+                    }
+                }
+            }
+            "bed" => {
+                let bed_cols = [
+                    "chrom",
+                    "chromStart",
+                    "chromEnd",
+                    "name",
+                    "score",
+                    "strand",
+                    "thickStart",
+                    "thickEnd",
+                    "itemRgb",
+                    "blockCount",
+                    "blockSizes",
+                    "blockStarts",
+                ];
+                // Detect column count from first data line
+                if let Ok((first_line, 0)) = ssh_run(
+                    &ssh_cfg,
+                    &format!(
+                        "grep -v -E '^#|^track|^browser' '{}' | head -1",
+                        remote_path
+                    ),
+                )
+                .await
+                {
+                    let ncols = first_line.trim().split('\t').count().min(12);
+                    col_headers = bed_cols[..ncols].iter().map(|s| s.to_string()).collect();
+                }
+            }
+            "gff" | "gtf" | "gff3" => {
+                col_headers = vec![
+                    "seqid", "source", "type", "start", "end", "score", "strand", "phase",
+                    "attributes",
+                ]
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect();
+                if let Ok((m, 0)) =
+                    ssh_run(&ssh_cfg, &format!("grep '^#' '{}'", remote_path)).await
+                {
+                    if !m.trim().is_empty() {
+                        meta = serde_json::Value::String(m.trim().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Get rows for this page
+    let rows_cmd = match ext.as_str() {
+        "bam" => format!(
+            "samtools view '{}' | sed -n '{},{}p'",
+            remote_path, start, end
+        ),
+        "vcf" => format!(
+            "grep -v '^#' '{}' | sed -n '{},{}p'",
+            remote_path, start, end
+        ),
+        "bed" => format!(
+            "grep -v -E '^#|^track|^browser' '{}' | sed -n '{},{}p'",
+            remote_path, start, end
+        ),
+        "gff" | "gtf" | "gff3" => format!(
+            "grep -v '^#' '{}' | sed -n '{},{}p'",
+            remote_path, start, end
+        ),
+        _ => format!("sed -n '{},{}p' '{}'", start, end, remote_path),
+    };
+
+    let rows: Vec<Vec<String>> = match ssh_run(&ssh_cfg, &rows_cmd).await {
+        Ok((output, 0)) => output
+            .trim()
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|line| line.split('\t').map(|s| s.to_string()).collect())
+            .collect(),
+        Ok((output, _)) => {
+            return Json(serde_json::json!({"error": output.trim()})).into_response();
+        }
+        Err(e) => {
+            return Json(serde_json::json!({"error": e})).into_response();
+        }
+    };
+
+    let mut result = serde_json::json!({
+        "rows": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    });
+
+    if !meta.is_null() {
+        result["meta"] = meta;
+    }
+    if !header_val.is_null() {
+        result["header"] = header_val;
+    }
+    if !refs_val.is_null() {
+        result["refs"] = refs_val;
+    }
+    if !col_headers.is_empty() {
+        result["col_headers"] = serde_json::json!(col_headers);
+    }
+
+    Json(result).into_response()
 }
 
 /// Serve plugin assets from the local plugins directory.
@@ -554,13 +895,52 @@ function getIgvReference() {{
 
 function getIgvGenomeId() {{
   if (!REFERENCE) return null;
-  // If it's a known genome ID
-  var knownGenomes = ['hg38','hg19','hg18','mm39','mm10','mm9','rn7','rn6','dm6','dm3','ce11','danRer11','sacCer3','tair10'];
+  var knownGenomes = KNOWN_GENOMES.map(function(g) {{ return g.id; }});
   if (knownGenomes.indexOf(REFERENCE) >= 0) return REFERENCE;
-  // If it's a file in our list, not a genome ID
   if (FILES.some(function(f) {{ return f.name === REFERENCE; }})) return null;
-  // Treat unknown strings as genome IDs
   return REFERENCE;
+}}
+
+// ── Genome dropdown for IGV ──
+var KNOWN_GENOMES = [
+  {{id:'hg38', label:'Human (GRCh38/hg38)'}},
+  {{id:'hg19', label:'Human (GRCh37/hg19)'}},
+  {{id:'mm39', label:'Mouse (GRCm39/mm39)'}},
+  {{id:'mm10', label:'Mouse (GRCm38/mm10)'}},
+  {{id:'rn7',  label:'Rat (mRatBN7.2/rn7)'}},
+  {{id:'rn6',  label:'Rat (Rnor_6.0/rn6)'}},
+  {{id:'dm6',  label:'Fruit fly (BDGP6/dm6)'}},
+  {{id:'ce11', label:'C. elegans (WBcel235/ce11)'}},
+  {{id:'danRer11', label:'Zebrafish (GRCz11/danRer11)'}},
+  {{id:'sacCer3',  label:'Yeast (sacCer3)'}},
+  {{id:'tair10',   label:'Arabidopsis (TAIR10)'}},
+  {{id:'galGal6',  label:'Chicken (GRCg6a/galGal6)'}}
+];
+var selectedGenome = null;
+
+function buildGenomeDropdown() {{
+  var current = selectedGenome || REFERENCE || '';
+  var html = '<select class="btn" id="genomeSelect" onchange="onGenomeChange(this.value)" style="font-size:12px;padding:4px 8px;max-width:220px">';
+  // If REFERENCE is a local FASTA file
+  var localFasta = FILES.find(function(f) {{ return f.name === REFERENCE; }});
+  if (localFasta) {{
+    html += '<option value="' + REFERENCE + '"' + (current === REFERENCE ? ' selected' : '') + '>Local: ' + REFERENCE + '</option>';
+  }}
+  // Known genomes
+  KNOWN_GENOMES.forEach(function(g) {{
+    html += '<option value="' + g.id + '"' + (current === g.id ? ' selected' : '') + '>' + g.label + '</option>';
+  }});
+  html += '</select>';
+  return html;
+}}
+
+function onGenomeChange(val) {{
+  selectedGenome = val;
+  if (currentFile && currentViewMode === 'igv') {{
+    var ext = currentFile.split('.').pop().toLowerCase();
+    var content = document.getElementById('viewerContent');
+    renderIgvViewer(currentFile, ext, content);
+  }}
 }}
 
 function selectFile(name) {{
@@ -599,7 +979,8 @@ function selectFileWithMode(name, mode) {{
       tabsHtml += '<button class="view-tab' + (mode === 'data' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'data\')">Data</button>';
       tabsHtml += '<button class="view-tab' + (mode === 'igv' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'igv\')">IGV</button>';
       tabsHtml += '</div>';
-      actions.innerHTML = tabsHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+      var genomeHtml = (mode === 'igv') ? buildGenomeDropdown() : '';
+      actions.innerHTML = tabsHtml + genomeHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
       if (mode === 'igv') {{
         renderIgvViewer(name, ext, content);
       }} else {{
@@ -724,115 +1105,120 @@ function renderPaginatedTable(divId, headers, allRows, page, renderRow) {{
   return html;
 }}
 
-// ── VCF Viewer ──
-var _vcfCache = {{}};
+// ── Server-side paginated genomics viewers ──
+// All genomics viewers (BAM/VCF/BED/GFF) use /data/ API for server-side pagination.
+// Metadata (headers, refs) is cached; rows are fetched per page.
+var _genomicsMetaCache = {{}};
+
+async function fetchGenomicsPage(name, page) {{
+  var resp = await fetch('/data/' + encodeURIComponent(name) + '?page=' + page + '&page_size=' + PAGE_SIZE);
+  return await resp.json();
+}}
+
+function renderServerPaginatedTable(divId, name, headers, rows, total, page, renderRow) {{
+  var totalPages = Math.ceil(total / PAGE_SIZE) || 1;
+  var html = '<table><tr>';
+  headers.forEach(function(h) {{ html += '<th>' + h + '</th>'; }});
+  html += '</tr>';
+  rows.forEach(function(row, i) {{ html += renderRow(row, page * PAGE_SIZE + i); }});
+  html += '</table>';
+  if (totalPages > 1) {{
+    html += '<div class="pagination">';
+    html += '<button onclick="window._serverPaginate(\'' + divId + '\',\'' + name.replace(/'/g,"\\'") + '\',' + (page-1) + ')"' + (page <= 0 ? ' disabled' : '') + '>&laquo; Prev</button>';
+    html += '<span>Page ' + (page+1) + ' / ' + totalPages + ' (' + total.toLocaleString() + ' rows)</span>';
+    html += '<button onclick="window._serverPaginate(\'' + divId + '\',\'' + name.replace(/'/g,"\\'") + '\',' + (page+1) + ')"' + (page >= totalPages-1 ? ' disabled' : '') + '>Next &raquo;</button>';
+    html += '</div>';
+  }}
+  return html;
+}}
+
+window._serverPaginate = function(divId, name, page) {{
+  if (page < 0) return;
+  if (divId === 'bamDiv') _fetchAndRenderBam(name, page);
+  else if (divId === 'vcfDiv') _fetchAndRenderVcf(name, page);
+  else if (divId === 'bedDiv') _fetchAndRenderBed(name, page);
+  else if (divId === 'gffDiv') _fetchAndRenderGff(name, page);
+}};
+
+// ── VCF Viewer (server-side) ──
 async function renderVcfViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="vcfDiv">Loading VCF...</div>';
-  try {{
-    if (!_vcfCache[name]) {{
-      var resp = await fetch('/file/' + encodeURIComponent(name));
-      var text = await resp.text();
-      var meta = [], hdr = [], recs = [];
-      text.split('\n').forEach(function(l) {{
-        if (l.startsWith('##')) meta.push(l);
-        else if (l.startsWith('#CHROM')) hdr = l.substring(1).split('\t');
-        else if (l.trim()) recs.push(l.split('\t'));
-      }});
-      _vcfCache[name] = {{ meta: meta, hdr: hdr, recs: recs }};
-    }}
-    _renderVcfPage(name, 0);
-  }} catch(e) {{
-    document.getElementById('vcfDiv').innerHTML = 'Error: ' + e.message;
-  }}
+  try {{ await _fetchAndRenderVcf(name, 0); }}
+  catch(e) {{ document.getElementById('vcfDiv').innerHTML = 'Error: ' + e.message; }}
 }}
-function _renderVcfPage(name, page) {{
-  var c = _vcfCache[name]; if (!c) return;
+async function _fetchAndRenderVcf(name, page) {{
   var div = document.getElementById('vcfDiv'); if (!div) return;
-  var html = '<p class="meta">' + c.recs.length + ' variant(s) &middot; ' + c.meta.length + ' metadata lines</p>';
-  if (c.meta.length > 0) {{
-    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show metadata (' + c.meta.length + ' lines)</summary>';
-    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + c.meta.join('\n').replace(/</g,'&lt;') + '</pre></details>';
+  if (page > 0) div.innerHTML = '<div class="genomics-viewer">Loading page...</div>';
+  var data = await fetchGenomicsPage(name, page);
+  if (data.error) {{ div.innerHTML = 'Error: ' + data.error; return; }}
+  if (page === 0 && data.meta) _genomicsMetaCache[name] = {{ meta: data.meta, col_headers: data.col_headers || [] }};
+  var cached = _genomicsMetaCache[name] || {{}};
+  var hdrs = cached.col_headers || [];
+  var html = '<p class="meta">' + (data.total||0).toLocaleString() + ' variant(s)</p>';
+  if (cached.meta) {{
+    var metaLines = cached.meta.split('\n');
+    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show metadata (' + metaLines.length + ' lines)</summary>';
+    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + cached.meta.replace(/</g,'&lt;') + '</pre></details>';
   }}
-  html += renderPaginatedTable('vcfDiv', c.hdr, c.recs, page, function(rec) {{
+  html += renderServerPaginatedTable('vcfDiv', name, hdrs, data.rows || [], data.total || 0, page, function(rec) {{
     var r = '<tr>';
     rec.forEach(function(val, i) {{
-      r += (c.hdr[i]==='REF'||c.hdr[i]==='ALT') ? '<td class="seq">'+colorBases(val)+'</td>' : '<td>'+val+'</td>';
+      r += (hdrs[i]==='REF'||hdrs[i]==='ALT') ? '<td class="seq">'+colorBases(val)+'</td>' : '<td>'+val+'</td>';
     }});
     return r + '</tr>';
   }});
   div.innerHTML = html;
-  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
 }}
 
-// ── BED Viewer ──
-var _bedCache = {{}};
+// ── BED Viewer (server-side) ──
 async function renderBedViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="bedDiv">Loading BED...</div>';
-  try {{
-    if (!_bedCache[name]) {{
-      var resp = await fetch('/file/' + encodeURIComponent(name));
-      var text = await resp.text();
-      var lines = text.split('\n').filter(function(l) {{ return l.trim() && !l.startsWith('#') && !l.startsWith('track') && !l.startsWith('browser'); }});
-      var recs = lines.map(function(l) {{ return l.split('\t'); }});
-      var ncols = recs.length > 0 ? recs[0].length : 3;
-      _bedCache[name] = {{ recs: recs, ncols: ncols }};
-    }}
-    _renderBedPage(name, 0);
-  }} catch(e) {{
-    document.getElementById('bedDiv').innerHTML = 'Error: ' + e.message;
-  }}
+  try {{ await _fetchAndRenderBed(name, 0); }}
+  catch(e) {{ document.getElementById('bedDiv').innerHTML = 'Error: ' + e.message; }}
 }}
-function _renderBedPage(name, page) {{
-  var c = _bedCache[name]; if (!c) return;
+async function _fetchAndRenderBed(name, page) {{
   var div = document.getElementById('bedDiv'); if (!div) return;
-  var colNames = ['chrom','chromStart','chromEnd','name','score','strand','thickStart','thickEnd','itemRgb','blockCount','blockSizes','blockStarts'];
-  var hdrs = colNames.slice(0, Math.min(c.ncols, 12));
-  var html = '<p class="meta">' + c.recs.length + ' region(s) &middot; BED' + Math.min(c.ncols,12) + ' format</p>';
-  html += renderPaginatedTable('bedDiv', hdrs, c.recs, page, function(rec) {{
+  if (page > 0) div.innerHTML = '<div class="genomics-viewer">Loading page...</div>';
+  var data = await fetchGenomicsPage(name, page);
+  if (data.error) {{ div.innerHTML = 'Error: ' + data.error; return; }}
+  if (page === 0 && data.col_headers) _genomicsMetaCache[name] = {{ col_headers: data.col_headers }};
+  var cached = _genomicsMetaCache[name] || {{}};
+  var hdrs = cached.col_headers || ['chrom','chromStart','chromEnd'];
+  var html = '<p class="meta">' + (data.total||0).toLocaleString() + ' region(s) &middot; BED' + hdrs.length + ' format</p>';
+  html += renderServerPaginatedTable('bedDiv', name, hdrs, data.rows || [], data.total || 0, page, function(rec) {{
     var r = '<tr>'; rec.forEach(function(v) {{ r += '<td>'+v+'</td>'; }}); return r + '</tr>';
   }});
   div.innerHTML = html;
-  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
 }}
 
-// ── GFF/GTF Viewer ──
-var _gffCache = {{}};
+// ── GFF/GTF Viewer (server-side) ──
 async function renderGffViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="gffDiv">Loading GFF...</div>';
-  try {{
-    if (!_gffCache[name]) {{
-      var resp = await fetch('/file/' + encodeURIComponent(name));
-      var text = await resp.text();
-      var comments = [], recs = [];
-      text.split('\n').forEach(function(l) {{
-        if (l.startsWith('#')) comments.push(l);
-        else if (l.trim()) recs.push(l.split('\t'));
-      }});
-      _gffCache[name] = {{ comments: comments, recs: recs }};
-    }}
-    _renderGffPage(name, 0);
-  }} catch(e) {{
-    document.getElementById('gffDiv').innerHTML = 'Error: ' + e.message;
-  }}
+  try {{ await _fetchAndRenderGff(name, 0); }}
+  catch(e) {{ document.getElementById('gffDiv').innerHTML = 'Error: ' + e.message; }}
 }}
-function _renderGffPage(name, page) {{
-  var c = _gffCache[name]; if (!c) return;
+async function _fetchAndRenderGff(name, page) {{
   var div = document.getElementById('gffDiv'); if (!div) return;
+  if (page > 0) div.innerHTML = '<div class="genomics-viewer">Loading page...</div>';
+  var data = await fetchGenomicsPage(name, page);
+  if (data.error) {{ div.innerHTML = 'Error: ' + data.error; return; }}
+  if (page === 0 && data.meta) _genomicsMetaCache[name] = {{ meta: data.meta }};
+  var cached = _genomicsMetaCache[name] || {{}};
   var colNames = ['seqid','source','type','start','end','score','strand','phase','attributes'];
-  var html = '<p class="meta">' + c.recs.length + ' feature(s)</p>';
-  if (c.comments.length > 0) {{
-    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show comments (' + c.comments.length + ' lines)</summary>';
-    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + c.comments.join('\n').replace(/</g,'&lt;') + '</pre></details>';
+  var html = '<p class="meta">' + (data.total||0).toLocaleString() + ' feature(s)</p>';
+  if (cached.meta) {{
+    var metaLines = cached.meta.split('\n');
+    html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">Show comments (' + metaLines.length + ' lines)</summary>';
+    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + cached.meta.replace(/</g,'&lt;') + '</pre></details>';
   }}
-  html += renderPaginatedTable('gffDiv', colNames, c.recs, page, function(rec) {{
+  html += renderServerPaginatedTable('gffDiv', name, colNames, data.rows || [], data.total || 0, page, function(rec) {{
     var r = '<tr>';
     rec.forEach(function(v, i) {{
-      r += (i===8) ? '<td style="white-space:normal;max-width:400px;word-break:break-all;font-size:11px">'+v.replace(/;/g,'; ')+'</td>' : '<td>'+v+'</td>';
+      r += (i===8) ? '<td style="white-space:normal;max-width:400px;word-break:break-all;font-size:11px">'+(v||'').replace(/;/g,'; ')+'</td>' : '<td>'+(v||'')+'</td>';
     }});
     return r + '</tr>';
   }});
   div.innerHTML = html;
-  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
 }}
 
 // ── FASTA Viewer ──
@@ -854,105 +1240,44 @@ async function renderFastaViewer(name, content) {{
   }}
 }}
 
-// ── BAM Viewer ──
-var _bamCache = {{}};
+// ── BAM Viewer (server-side) ──
 async function renderBamViewer(name, content) {{
   content.innerHTML = '<div class="genomics-viewer" id="bamDiv">Loading BAM...</div>';
-  try {{
-    if (!_bamCache[name]) {{
-      var resp = await fetch('/file/' + encodeURIComponent(name));
-      var buf = await resp.arrayBuffer();
-      var parsed = await parseBam(buf);
-      _bamCache[name] = parsed;
-    }}
-    _renderBamPage(name, 0);
-  }} catch(e) {{
+  try {{ await _fetchAndRenderBam(name, 0); }}
+  catch(e) {{
     document.getElementById('bamDiv').innerHTML =
-      '<div class="no-preview"><p class="no-preview-icon">⚠️</p><p class="no-preview-title">BAM Parse Error</p><p class="no-preview-msg">' + e.message + '</p>' +
-      '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
+      '<div class="no-preview"><p class="no-preview-icon">⚠️</p><p class="no-preview-title">BAM Load Error</p><p class="no-preview-msg">' + e.message + '</p></div>';
   }}
 }}
-function _renderBamPage(name, page) {{
-  var c = _bamCache[name]; if (!c) return;
+async function _fetchAndRenderBam(name, page) {{
   var div = document.getElementById('bamDiv'); if (!div) return;
-  var html = '<p class="meta">' + c.refs.length + ' reference(s) &middot; ' + c.reads.length + ' read(s)</p>';
-  if (c.refs.length > 0) {{
+  if (page > 0) div.innerHTML = '<div class="genomics-viewer">Loading page...</div>';
+  var data = await fetchGenomicsPage(name, page);
+  if (data.error) {{ div.innerHTML = 'Error: ' + data.error; return; }}
+  // Cache metadata on first page
+  if (page === 0) {{
+    _genomicsMetaCache[name] = {{ refs: data.refs || [], header: data.header || '', total: data.total || 0 }};
+  }}
+  var cached = _genomicsMetaCache[name] || {{}};
+  var html = '<p class="meta">' + (cached.refs||[]).length + ' reference(s) &middot; ' + (cached.total||0).toLocaleString() + ' read(s)</p>';
+  if ((cached.refs||[]).length > 0) {{
     html += '<details style="margin-bottom:12px" open><summary style="cursor:pointer;font-size:13px;font-weight:600">References</summary><table><tr><th>Name</th><th>Length</th></tr>';
-    c.refs.forEach(function(r) {{ html += '<tr><td>'+r.name+'</td><td>'+r.length.toLocaleString()+' bp</td></tr>'; }});
+    cached.refs.forEach(function(r) {{ html += '<tr><td>'+r.name+'</td><td>'+r.length.toLocaleString()+' bp</td></tr>'; }});
     html += '</table></details>';
   }}
-  if (c.header) {{
+  if (cached.header) {{
     html += '<details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:13px;color:#666">SAM header</summary>';
-    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + c.header.replace(/</g,'&lt;') + '</pre></details>';
+    html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + cached.header.replace(/</g,'&lt;') + '</pre></details>';
   }}
   var bamHdrs = ['Read Name','Flag','Chr','Pos','MAPQ','CIGAR','Sequence'];
-  html += renderPaginatedTable('bamDiv', bamHdrs, c.reads, page, function(rd) {{
-    return '<tr><td>'+rd.name+'</td><td>'+rd.flag+'</td><td>'+rd.chr+'</td><td>'+rd.pos+'</td><td>'+rd.mapq+'</td><td>'+rd.cigar+'</td><td class="seq">'+colorBases(rd.seq)+'</td></tr>';
+  // BAM rows from samtools view come as tab-separated: QNAME FLAG RNAME POS MAPQ CIGAR ... SEQ QUAL
+  html += renderServerPaginatedTable('bamDiv', name, bamHdrs, data.rows || [], data.total || 0, page, function(row) {{
+    // samtools view columns: 0=QNAME, 1=FLAG, 2=RNAME, 3=POS, 4=MAPQ, 5=CIGAR, ... 9=SEQ
+    var qname = row[0]||'*', flag = row[1]||'0', rname = row[2]||'*', pos = row[3]||'0', mapq = row[4]||'0', cigar = row[5]||'*';
+    var seq = row.length > 9 ? row[9] : '*';
+    return '<tr><td>'+qname+'</td><td>'+flag+'</td><td>'+rname+'</td><td>'+pos+'</td><td>'+mapq+'</td><td>'+cigar+'</td><td class="seq">'+colorBases(seq)+'</td></tr>';
   }});
   div.innerHTML = html;
-  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
-}}
-
-async function parseBam(buf) {{
-  var data = new Uint8Array(buf);
-  var decompressed = [];
-  var offset = 0;
-  while (offset < data.length) {{
-    if (offset + 18 > data.length) break;
-    if (data[offset] !== 0x1f || data[offset+1] !== 0x8b) break;
-    var bsize = data[offset+16] | (data[offset+17] << 8);
-    var blockEnd = offset + bsize + 1;
-    if (blockEnd > data.length) break;
-    try {{ var inflated = await asyncInflate(data.slice(offset+18, blockEnd-8)); decompressed.push(inflated); }} catch(e) {{ break; }}
-    offset = blockEnd;
-    var tl = 0; decompressed.forEach(function(d){{ tl += d.length; }}); if (tl > 4*1024*1024) break;
-  }}
-  var ts = 0; decompressed.forEach(function(d){{ ts += d.length; }});
-  var raw = new Uint8Array(ts); var p = 0;
-  decompressed.forEach(function(d) {{ raw.set(d, p); p += d.length; }});
-  var view = new DataView(raw.buffer);
-  if (raw[0]!==66||raw[1]!==65||raw[2]!==77||raw[3]!==1) throw new Error('Not a valid BAM file');
-  var hLen = view.getInt32(4,true);
-  var header = new TextDecoder().decode(raw.slice(8, 8+hLen));
-  var ro = 8+hLen;
-  var nRef = view.getInt32(ro,true); ro += 4;
-  var refs = [];
-  for (var r=0; r<nRef; r++) {{
-    var nl = view.getInt32(ro,true); ro += 4;
-    var rn = new TextDecoder().decode(raw.slice(ro, ro+nl-1)); ro += nl;
-    var rl = view.getInt32(ro,true); ro += 4;
-    refs.push({{ name: rn, length: rl }});
-  }}
-  var reads = [], maxR = 2000, seqLU = 'NACMGRSVTWYHKDBN';
-  while (ro + 4 < raw.length && reads.length < maxR) {{
-    var bs = view.getInt32(ro,true);
-    if (bs<=0 || ro+4+bs>raw.length) break;
-    var rs = ro+4;
-    var refID=view.getInt32(rs,true), pos2=view.getInt32(rs+4,true), nl2=raw[rs+8], mq=raw[rs+9];
-    var nCig=view.getUint16(rs+12,true), fl=view.getUint16(rs+14,true), sl=view.getInt32(rs+16,true);
-    var rName=new TextDecoder().decode(raw.slice(rs+32, rs+32+nl2-1));
-    var co=rs+32+nl2, cig='', cops='MIDNSHP=X';
-    for (var c2=0;c2<nCig;c2++) {{ var cv=view.getUint32(co+c2*4,true); cig += (cv>>4)+cops[cv&0xf]; }}
-    var so=co+nCig*4, sq='';
-    for (var s2=0;s2<sl;s2++) {{ var b2=raw[so+(s2>>1)]; sq += seqLU[(s2&1)?(b2&0x0f):((b2>>4)&0x0f)]; }}
-    reads.push({{ name:rName, flag:fl, chr:(refID>=0&&refID<refs.length)?refs[refID].name:'*', pos:pos2+1, mapq:mq, cigar:cig||'*', seq:sq }});
-    ro += 4+bs;
-  }}
-  return {{ refs:refs, reads:reads, header:header }};
-}}
-
-// ── BGZF decompression ──
-async function asyncInflate(data) {{
-  var ds = new DecompressionStream('deflate-raw');
-  var writer = ds.writable.getWriter();
-  writer.write(data); writer.close();
-  var reader = ds.readable.getReader();
-  var chunks = [];
-  while (true) {{ var r = await reader.read(); if (r.done) break; chunks.push(r.value); }}
-  var tl = 0; chunks.forEach(function(c) {{ tl += c.length; }});
-  var out = new Uint8Array(tl); var off = 0;
-  chunks.forEach(function(c) {{ out.set(c, off); off += c.length; }});
-  return out;
 }}
 
 // ── Color bases helper ──
@@ -996,17 +1321,20 @@ async function renderIgvViewer(name, ext, content) {{
     else if (ext === 'gff' || ext === 'gtf' || ext === 'gff3') {{ trackType = 'annotation'; }}
 
     var opts = {{}};
-    var localRef = getIgvReference();
-    var genomeId = getIgvGenomeId();
+    // Use dropdown selection if available, otherwise fall back to REFERENCE
+    var activeRef = selectedGenome || REFERENCE;
+    var isLocalFasta = activeRef && FILES.some(function(f) {{ return f.name === activeRef; }});
+    var knownIds = KNOWN_GENOMES.map(function(g) {{ return g.id; }});
+    var isKnownGenome = activeRef && knownIds.indexOf(activeRef) >= 0;
 
     if (ext === 'fasta' || ext === 'fa') {{
       // FASTA is the reference itself
       opts.reference = {{ fastaURL: fileUrl, indexed: false }};
-    }} else if (localRef) {{
-      opts.reference = localRef;
+    }} else if (isLocalFasta) {{
+      opts.reference = {{ fastaURL: '/file/' + encodeURIComponent(activeRef), indexed: false }};
       opts.tracks = [{{ type: trackType, format: trackFormat, url: fileUrl, name: name }}];
-    }} else if (genomeId) {{
-      opts.genome = genomeId;
+    }} else if (isKnownGenome || activeRef) {{
+      opts.genome = activeRef;
       opts.tracks = [{{ type: trackType, format: trackFormat, url: fileUrl, name: name }}];
     }} else {{
       throw new Error('No reference genome available');
@@ -1193,7 +1521,7 @@ function _renderHdf5Page(name, page) {{
   }}
 
   div.innerHTML = html;
-  window._paginate = function(id, p) {{ if (id==='vcfDiv') _renderVcfPage(name, p); else if (id==='bedDiv') _renderBedPage(name, p); else if (id==='gffDiv') _renderGffPage(name, p); else if (id==='bamDiv') _renderBamPage(name, p); else if (id==='hdf5Div') _renderHdf5Page(name, p); }};
+  window._paginate = function(id, p) {{ if (id==='hdf5Div') _renderHdf5Page(name, p); }};
 }}
 
 // ── Plugin Viewer ──
@@ -1272,15 +1600,176 @@ loadFiles();
 async fn file_handler(
     State(state): State<ViewerState>,
     Path(filename): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let files = state.files.lock().await;
-    match files.get(&filename) {
-        Some(entry) => (
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, entry.mime.clone())],
-            entry.data.clone(),
-        )
-            .into_response(),
-        None => (StatusCode::NOT_FOUND, "File not found").into_response(),
+    // 1. Check local file store first
+    {
+        let files = state.files.lock().await;
+        if let Some(entry) = files.get(&filename) {
+            let data = entry.data.clone();
+            let mime = entry.mime.clone();
+            let total_size = data.len();
+
+            // Support Range requests for local files too
+            if let Some(range_val) = headers.get(header::RANGE) {
+                if let Ok(range_str) = range_val.to_str() {
+                    if let Some((range_start, range_end)) = parse_range_header(range_str, total_size) {
+                        let length = range_end - range_start + 1;
+                        let slice = data[range_start..=range_end].to_vec();
+                        return (
+                            StatusCode::PARTIAL_CONTENT,
+                            [
+                                (header::CONTENT_TYPE, mime),
+                                (header::CONTENT_LENGTH, length.to_string()),
+                                (header::HeaderName::from_static("content-range"),
+                                 format!("bytes {}-{}/{}", range_start, range_end, total_size).parse().unwrap()),
+                                (header::HeaderName::from_static("accept-ranges"),
+                                 "bytes".parse().unwrap()),
+                            ],
+                            slice,
+                        ).into_response();
+                    }
+                }
+            }
+
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::CONTENT_LENGTH, total_size.to_string()),
+                    (header::HeaderName::from_static("accept-ranges"), "bytes".parse().unwrap()),
+                ],
+                data,
+            ).into_response();
+        }
     }
+
+    // 2. Check remote files — SSH Range proxy
+    let remote_files = get_remote_files_lock().await.lock().await;
+    let entry = remote_files.get(&filename).map(|e| (e.remote_path.clone(), e.size, e.mime.clone()));
+    drop(remote_files);
+
+    if let Some((remote_path, total_size, mime)) = entry {
+        let ssh_cfg_lock = get_ssh_config_lock().await.lock().await;
+        let ssh_cfg = match &*ssh_cfg_lock {
+            Some(c) => c.clone(),
+            None => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "SSH not configured").into_response();
+            }
+        };
+        drop(ssh_cfg_lock);
+
+        // Index files (.bai, .tbi, .fai, .csi, .crai, .idx) are small — transfer entirely
+        let is_index = filename.ends_with(".bai") || filename.ends_with(".tbi")
+            || filename.ends_with(".fai") || filename.ends_with(".csi")
+            || filename.ends_with(".crai") || filename.ends_with(".idx");
+
+        if let Some(range_val) = headers.get(header::RANGE) {
+            if let Ok(range_str) = range_val.to_str() {
+                if let Some((range_start, range_end)) = parse_range_header(range_str, total_size as usize) {
+                    let length = range_end - range_start + 1;
+                    // Use dd to extract byte range via SSH
+                    let cmd = format!(
+                        "dd if='{}' bs=1 skip={} count={} 2>/dev/null | base64 -w 0",
+                        remote_path, range_start, length
+                    );
+                    match ssh_run(&ssh_cfg, &cmd).await {
+                        Ok((b64, 0)) => {
+                            let trimmed = b64.trim().to_string();
+                            match base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &trimmed,
+                            ) {
+                                Ok(data) => {
+                                    return (
+                                        StatusCode::PARTIAL_CONTENT,
+                                        [
+                                            (header::CONTENT_TYPE, mime),
+                                            (header::CONTENT_LENGTH, data.len().to_string()),
+                                            (header::HeaderName::from_static("content-range"),
+                                             format!("bytes {}-{}/{}", range_start, range_end, total_size).parse().unwrap()),
+                                            (header::HeaderName::from_static("accept-ranges"),
+                                             "bytes".parse().unwrap()),
+                                        ],
+                                        data,
+                                    ).into_response();
+                                }
+                                Err(e) => {
+                                    return (StatusCode::INTERNAL_SERVER_ERROR, format!("decode error: {}", e)).into_response();
+                                }
+                            }
+                        }
+                        Ok((err, _)) => {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, format!("SSH error: {}", err.trim())).into_response();
+                        }
+                        Err(e) => {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, format!("SSH error: {}", e)).into_response();
+                        }
+                    }
+                }
+            }
+        }
+
+        // No Range header — for small/index files, transfer entire; otherwise return headers only
+        if is_index || total_size < 10_000_000 {
+            // Transfer entire file (index files are small)
+            let cmd = format!("base64 -w 0 '{}'", remote_path);
+            match ssh_run(&ssh_cfg, &cmd).await {
+                Ok((b64, 0)) => {
+                    let trimmed = b64.trim().to_string();
+                    match base64::Engine::decode(
+                        &base64::engine::general_purpose::STANDARD,
+                        &trimmed,
+                    ) {
+                        Ok(data) => {
+                            return (
+                                StatusCode::OK,
+                                [
+                                    (header::CONTENT_TYPE, mime),
+                                    (header::CONTENT_LENGTH, data.len().to_string()),
+                                    (header::HeaderName::from_static("accept-ranges"), "bytes".parse().unwrap()),
+                                ],
+                                data,
+                            ).into_response();
+                        }
+                        Err(_) => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Large file without Range — return empty body with Content-Length + Accept-Ranges
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CONTENT_LENGTH, total_size.to_string()),
+                (header::HeaderName::from_static("accept-ranges"), "bytes".parse().unwrap()),
+            ],
+            Vec::new(),
+        ).into_response();
+    }
+
+    (StatusCode::NOT_FOUND, "File not found").into_response()
+}
+
+/// Parse HTTP Range header: "bytes=START-END" or "bytes=START-"
+fn parse_range_header(range: &str, total: usize) -> Option<(usize, usize)> {
+    let range = range.strip_prefix("bytes=")?;
+    let parts: Vec<&str> = range.split('-').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start: usize = parts[0].parse().ok()?;
+    let end: usize = if parts[1].is_empty() {
+        total.saturating_sub(1)
+    } else {
+        parts[1].parse().ok()?
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    let end = end.min(total - 1);
+    Some((start, end))
 }

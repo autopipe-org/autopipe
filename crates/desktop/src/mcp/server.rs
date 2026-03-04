@@ -1433,8 +1433,11 @@ impl AutoPipeServer {
             ))]));
         }
 
-        // Download each file via base64
+        // Separate genomics files (remote, server-side pagination) from other files (local transfer)
+        let genomics_remote_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf",
+                                     "bai", "crai", "tbi", "csi", "fai", "idx"];
         let mut files: Vec<(String, Vec<u8>, String)> = Vec::new();
+        let mut remote_files: Vec<(String, String, u64, String)> = Vec::new(); // (filename, remote_path, size, mime)
         let mut errors: Vec<String> = Vec::new();
 
         for path in &file_paths {
@@ -1467,6 +1470,18 @@ impl AutoPipeServer {
                 .and_then(|n| n.to_str())
                 .unwrap_or("file")
                 .to_string();
+
+            // Genomics files: register as remote (server-side pagination + Range proxy)
+            if genomics_remote_exts.contains(&ext.as_str()) {
+                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", path, path);
+                let size: u64 = if let Ok((size_str, 0)) = self.ssh_run(&size_cmd).await {
+                    clean_content(&size_str).trim().parse().unwrap_or(0)
+                } else {
+                    0
+                };
+                remote_files.push((filename, path.clone(), size, mime.to_string()));
+                continue;
+            }
 
             // h5ad/h5/hdf5: check file size, skip if > 1GB (download only)
             if matches!(ext.as_str(), "h5ad" | "h5" | "hdf5") {
@@ -1501,7 +1516,7 @@ impl AutoPipeServer {
             }
         }
 
-        if files.is_empty() {
+        if files.is_empty() && remote_files.is_empty() {
             let msg = if errors.is_empty() {
                 format!("No viewable files found in '{}'", params.path)
             } else {
@@ -1581,15 +1596,25 @@ impl AutoPipeServer {
         }
 
         // --- Reference confirmed / declined / no genomics → open viewer ---
-        match viewer::show_files(files.clone(), self.config.full_plugins_dir(), reference).await {
+        let total_files = files.len() + remote_files.len();
+        match viewer::show_files(
+            files.clone(),
+            remote_files.clone(),
+            self.config.full_plugins_dir(),
+            reference,
+            Some(self.config.clone()),
+        ).await {
             Ok(url) => {
                 let mut msg = format!(
                     "Opened results in browser: {}\n\nDisplaying {} file(s):",
                     url,
-                    files.len()
+                    total_files
                 );
                 for (name, data, _) in &files {
                     msg.push_str(&format!("\n  {} ({} bytes)", name, data.len()));
+                }
+                for (name, _, size, _) in &remote_files {
+                    msg.push_str(&format!("\n  {} ({} bytes, server-side)", name, size));
                 }
                 if !errors.is_empty() {
                     msg.push_str(&format!(
