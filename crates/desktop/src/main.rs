@@ -139,7 +139,7 @@ fn run_gui() {
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([550.0, 500.0])
+            .with_inner_size([550.0, 650.0])
             .with_title("AutoPipe")
             .with_icon(std::sync::Arc::new(app_icon)),
         ..Default::default()

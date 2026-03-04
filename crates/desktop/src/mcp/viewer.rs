@@ -881,8 +881,8 @@ function renderSidebar() {{
 }}
 
 // IGV-compatible extensions (can show Data tab, IGV tab, or both)
-var igvDualExts = ['bam','vcf','bed','gff','gtf','gff3','fasta','fa'];
-var igvOnlyExts = ['cram','bcf'];
+var igvDualExts = ['vcf','bed','gff','gtf','gff3','fasta','fa'];
+var igvOnlyExts = ['bam','cram','bcf'];
 
 function hasReference() {{
   return !!REFERENCE;
