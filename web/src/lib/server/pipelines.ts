@@ -178,7 +178,8 @@ export async function deletePipeline(id: number): Promise<boolean> {
 	return result.length > 0;
 }
 
-/** Get all versions related to this pipeline: same name + forked_from chain */
+/** Get all versions of this pipeline: same name + same author only.
+ *  Fork versions are NOT included — they have their own independent version chain. */
 export async function getVersionChain(pipelineId: number): Promise<PipelineSummary[]> {
 	const allRows = await db.select().from(userPipelines);
 	const byId = new Map(allRows.map((r) => [r.pipelineId, r]));
@@ -186,41 +187,9 @@ export async function getVersionChain(pipelineId: number): Promise<PipelineSumma
 	const current = byId.get(pipelineId);
 	if (!current) return [];
 
-	const chainIds = new Set<number>();
-
-	// 1. All records with the same name
-	for (const row of allRows) {
-		if (row.name === current.name) {
-			chainIds.add(row.pipelineId);
-		}
-	}
-
-	// 2. Walk up forked_from chain with cycle detection
-	const visited = new Set<number>();
-	let walkId: number | null = pipelineId;
-	while (walkId !== null && !visited.has(walkId)) {
-		visited.add(walkId);
-		chainIds.add(walkId);
-		const row = byId.get(walkId);
-		if (!row || row.forkedFrom === null) break;
-		walkId = row.forkedFrom;
-	}
-
-	// 3. Walk down: find children of any chain member
-	let changed = true;
-	while (changed) {
-		changed = false;
-		for (const row of allRows) {
-			if (row.forkedFrom !== null && chainIds.has(row.forkedFrom) && !chainIds.has(row.pipelineId)) {
-				chainIds.add(row.pipelineId);
-				changed = true;
-			}
-		}
-	}
-
-	// Return sorted by created_at desc (newest first)
+	// Only include records with the same name AND same author
 	const chainRows = allRows
-		.filter((r) => chainIds.has(r.pipelineId))
+		.filter((r) => r.name === current.name && r.author === current.author)
 		.sort((a, b) => {
 			const ta = a.createdAt?.getTime() ?? 0;
 			const tb = b.createdAt?.getTime() ?? 0;

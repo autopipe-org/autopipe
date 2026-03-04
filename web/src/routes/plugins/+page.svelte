@@ -62,22 +62,29 @@
 			{searchValue ? 'Search Results' : 'All Plugins'}
 			<span class="section-count">({filteredPlugins().length})</span>
 		</h3>
-		<div class="grid">
+		<div class="plugin-grid">
 			{#each paginatedPlugins() as p (p.plugin_id)}
-				<a href="/plugins/{p.plugin_id}" class="card">
-					<div class="card-title">
-						{p.name}
-						<span class="card-version">v{p.version}</span>
+				<a href="/plugins/{p.plugin_id}" class="plugin-card">
+					<div class="plugin-card-header">
+						<div class="plugin-card-icon">{p.name.charAt(0).toUpperCase()}</div>
+						<div class="plugin-card-meta">
+							<div class="plugin-card-name">{p.name}</div>
+							<div class="plugin-card-version">v{p.version}</div>
+						</div>
 					</div>
-					<div class="card-desc">{p.description}</div>
+					<div class="plugin-card-desc">{p.description}</div>
 					{#if p.extensions && p.extensions.length > 0}
-						<div class="card-exts">{p.extensions.map((e) => `.${e}`).join(', ')}</div>
+						<div class="plugin-card-exts">
+							{#each p.extensions as ext}
+								<span class="plugin-ext-tag">.{ext}</span>
+							{/each}
+						</div>
 					{/if}
-					<div class="card-tags">
+					<div class="plugin-card-footer">
 						{#if p.category}
 							<span class="tag tool">{p.category}</span>
 						{/if}
-						{#each p.tags as tag}
+						{#each p.tags.slice(0, 2) as tag}
 							<span class="tag">{tag}</span>
 						{/each}
 					</div>

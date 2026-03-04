@@ -462,7 +462,7 @@ async fn data_handler(
         None => {
             let count_cmd = match ext.as_str() {
                 "bam" => format!(
-                    "docker run --rm -v \"{}:/data:ro\" {} samtools view -c \"/data/{}\"",
+                    "docker run --rm -v \"{}:/data:ro\" {} samtools view -c \"/data/{}\" 2>/dev/null",
                     bam_dir, SAMTOOLS_DOCKER, bam_file
                 ),
                 "vcf" => format!("grep -c -v '^#' '{}'", remote_path),
@@ -497,7 +497,7 @@ async fn data_handler(
                 // SAM header
                 if let Ok((hdr, 0)) =
                     ssh_run(&ssh_cfg, &format!(
-                        "docker run --rm -v \"{}:/data:ro\" {} samtools view -H \"/data/{}\"",
+                        "docker run --rm -v \"{}:/data:ro\" {} samtools view -H \"/data/{}\" 2>/dev/null",
                         bam_dir, SAMTOOLS_DOCKER, bam_file
                     )).await
                 {
@@ -506,7 +506,7 @@ async fn data_handler(
                 // Reference sequences from header
                 if let Ok((hdr_text, 0)) =
                     ssh_run(&ssh_cfg, &format!(
-                        "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view -H /data/{} | grep ^@SQ\"",
+                        "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view -H /data/{} 2>/dev/null | grep ^@SQ\"",
                         bam_dir, SAMTOOLS_DOCKER, bam_file
                     )).await
                 {
@@ -606,7 +606,7 @@ async fn data_handler(
     // Get rows for this page
     let rows_cmd = match ext.as_str() {
         "bam" => format!(
-            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} | sed -n {},{}p\"",
+            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} 2>/dev/null | sed -n {},{}p\"",
             bam_dir, SAMTOOLS_DOCKER, bam_file, start, end
         ),
         "vcf" => format!(
@@ -718,6 +718,17 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <title>AutoPipe Results Viewer</title>
 <link rel="icon" href="/logo.png" type="image/png">
 <script src="https://cdn.jsdelivr.net/npm/jsfive@0.3.10/dist/browser/hdf5.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css">
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/dockerfile.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/yaml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/python.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/markdown.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/json.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/r.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/xml.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/ini.min.js"></script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   html, body {{ height: 100%; overflow: hidden; }}
@@ -760,7 +771,8 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .img-viewer img {{ max-width: 100%; height: auto; transition: transform 0.15s; transform-origin: top left; }}
 
   /* Text viewer */
-  .text-viewer {{ padding: 0; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; overflow: auto; max-height: 100%; }}
+  .text-viewer {{ padding: 0; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; overflow: auto; max-height: 100%; background: transparent; }}
+  .text-viewer code {{ font-family: inherit; font-size: inherit; line-height: inherit; background: transparent; }}
 
   /* PDF viewer */
   .pdf-viewer {{ width: 100%; height: 100%; border: none; border-radius: 8px; }}
@@ -984,6 +996,32 @@ function onGenomeChange(val) {{
   }}
 }}
 
+// Files recognized as text by filename (no extension match needed)
+var textFileNames = ['snakefile','dockerfile','makefile','readme','readme.md','license','license.md'];
+function isTextByName(name) {{
+  var lower = name.toLowerCase();
+  var base = lower.split('/').pop() || lower;
+  return textFileNames.indexOf(base) >= 0;
+}}
+
+// Map filename/extension to highlight.js language
+function detectHljsLang(name) {{
+  var lower = name.toLowerCase();
+  var base = lower.split('/').pop() || lower;
+  if (base === 'snakefile' || lower.endsWith('.smk')) return 'python';
+  if (base === 'dockerfile' || lower.endsWith('.dockerfile')) return 'dockerfile';
+  if (base === 'makefile') return 'makefile';
+  var ext = lower.split('.').pop();
+  var langMap = {{
+    'py': 'python', 'r': 'r', 'sh': 'bash', 'bash': 'bash',
+    'json': 'json', 'yaml': 'yaml', 'yml': 'yaml',
+    'xml': 'xml', 'md': 'markdown',
+    'cfg': 'ini', 'ini': 'ini', 'toml': 'ini',
+    'nf': 'groovy', 'js': 'javascript', 'ts': 'typescript'
+  }};
+  return langMap[ext] || null;
+}}
+
 function selectFile(name) {{
   selectFileWithMode(name, 'data');
 }}
@@ -1010,7 +1048,7 @@ function selectFileWithMode(name, mode) {{
   title.textContent = name;
 
   var imageExts = ['png','jpg','jpeg','gif','svg','webp','bmp','tiff','tif'];
-  var textExts = ['txt','log','csv','tsv','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq'];
+  var textExts = ['txt','log','csv','tsv','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq','dockerfile'];
   var hdf5Exts = ['h5ad','h5','hdf5'];
 
   // Dual-tab files: Data + IGV
@@ -1061,7 +1099,7 @@ function selectFileWithMode(name, mode) {{
     renderImageViewer(name, actions, content);
   }} else if (ext === 'pdf') {{
     renderPdfViewer(name, actions, content);
-  }} else if (textExts.indexOf(ext) >= 0) {{
+  }} else if (textExts.indexOf(ext) >= 0 || isTextByName(name)) {{
     renderTextViewer(name, actions, content);
   }} else if (hdf5Exts.indexOf(ext) >= 0) {{
     renderHdf5Viewer(name, actions, content);
@@ -1115,11 +1153,20 @@ function renderPdfViewer(name, actions, content) {{
 // ── Text Viewer ──
 async function renderTextViewer(name, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-  content.innerHTML = '<div class="text-viewer" id="textContent">Loading...</div>';
+  var lang = detectHljsLang(name);
+  if (lang && typeof hljs !== 'undefined') {{
+    content.innerHTML = '<pre class="text-viewer"><code id="textContent" class="language-' + lang + '">Loading...</code></pre>';
+  }} else {{
+    content.innerHTML = '<div class="text-viewer" id="textContent">Loading...</div>';
+  }}
   try {{
     var resp = await fetch('/file/' + encodeURIComponent(name));
     var text = await resp.text();
-    document.getElementById('textContent').textContent = text;
+    var el = document.getElementById('textContent');
+    el.textContent = text;
+    if (lang && typeof hljs !== 'undefined') {{
+      hljs.highlightElement(el);
+    }}
   }} catch(e) {{
     document.getElementById('textContent').textContent = 'Error loading file: ' + e.message;
   }}

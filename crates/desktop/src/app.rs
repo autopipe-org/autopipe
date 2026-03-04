@@ -402,9 +402,9 @@ impl AutoPipeApp {
 
         if let Some(idx) = test_idx {
             let url = self.config.registry_urls[idx].clone();
-            self.status_message = match reqwest_test(&url) {
-                Ok(_) => format!("Connection {} OK", idx + 1),
-                Err(e) => format!("Connection {} failed: {}", idx + 1, e),
+            match reqwest_test(&url) {
+                Ok(_) => self.status_message = String::new(),
+                Err(e) => self.status_message = format!("Connection {} failed: {}", idx + 1, e),
             };
         }
 
@@ -473,7 +473,7 @@ impl AutoPipeApp {
         if ui.button("Test SSH Connection").clicked() {
             self.save_config();
             match crate::ssh::test_connection(&self.config) {
-                Ok(msg) => self.status_message = format!("SSH OK: {}", msg),
+                Ok(_) => self.status_message = String::new(),
                 Err(e) => self.status_message = format!("SSH Failed: {}", e),
             }
         }
@@ -648,35 +648,79 @@ impl AutoPipeApp {
                 self.installed_plugins.iter().map(|p| p.name.clone()).collect();
             let mut install_plugin: Option<RegistryPlugin> = None;
 
-            for plugin in &self.plugin_registry {
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.strong(&plugin.name);
-                        ui.label(format!("v{}", plugin.version));
-                        ui.label(format!("by {}", plugin.author));
-                    });
-                    if !plugin.description.is_empty() {
-                        ui.label(&plugin.description);
-                    }
-                    if !plugin.extensions.is_empty() {
-                        ui.label(format!(
-                            "Formats: {}",
-                            plugin
-                                .extensions
-                                .iter()
-                                .map(|e| format!(".{}", e))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ));
-                    }
-                    let already = installed_names.contains(&plugin.name);
-                    if already {
-                        ui.colored_label(egui::Color32::GREEN, "✓ Installed");
-                    } else if ui.button("Install").clicked() {
-                        install_plugin = Some(plugin.clone());
+            // Card grid layout: 2 columns
+            let col_count = 2;
+            let chunks: Vec<&[RegistryPlugin]> = self.plugin_registry.chunks(col_count).collect();
+            for chunk in &chunks {
+                ui.columns(col_count, |cols| {
+                    for (i, plugin) in chunk.iter().enumerate() {
+                        let ui = &mut cols[i];
+                        egui::Frame::none()
+                            .inner_margin(egui::Margin::same(12))
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
+                            .corner_radius(8.0)
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+
+                                // Plugin initial (icon placeholder)
+                                let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                ui.horizontal(|ui| {
+                                    egui::Frame::none()
+                                        .inner_margin(egui::Margin::same(6))
+                                        .fill(egui::Color32::from_gray(240))
+                                        .corner_radius(6.0)
+                                        .show(ui, |ui| {
+                                            ui.strong(&initial);
+                                        });
+                                    ui.vertical(|ui| {
+                                        ui.strong(&plugin.name);
+                                        ui.label(
+                                            egui::RichText::new(format!("v{} · {}", plugin.version, plugin.author))
+                                                .size(11.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                    });
+                                });
+
+                                if !plugin.description.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        egui::RichText::new(&plugin.description)
+                                            .size(12.0)
+                                            .color(egui::Color32::from_gray(100)),
+                                    );
+                                }
+
+                                if !plugin.extensions.is_empty() {
+                                    ui.add_space(4.0);
+                                    ui.horizontal_wrapped(|ui| {
+                                        for ext in &plugin.extensions {
+                                            egui::Frame::none()
+                                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                                .fill(egui::Color32::from_gray(240))
+                                                .corner_radius(4.0)
+                                                .show(ui, |ui| {
+                                                    ui.label(
+                                                        egui::RichText::new(format!(".{}", ext))
+                                                            .size(11.0)
+                                                            .color(egui::Color32::from_gray(80)),
+                                                    );
+                                                });
+                                        }
+                                    });
+                                }
+
+                                ui.add_space(6.0);
+                                let already = installed_names.contains(&plugin.name);
+                                if already {
+                                    ui.colored_label(egui::Color32::GREEN, "✓ Installed");
+                                } else if ui.button("Install").clicked() {
+                                    install_plugin = Some(plugin.clone());
+                                }
+                            });
                     }
                 });
-                ui.add_space(3.0);
+                ui.add_space(6.0);
             }
 
             if let Some(p) = install_plugin {

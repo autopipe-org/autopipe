@@ -67,6 +67,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 		// 6. Always INSERT a new record (version tracking)
 		let name: string = metadata.name;
+		let version: string = metadata.version || '1.0.0';
 
 		// forked_from: trust the value Claude sends (no auto-detection)
 		const resolvedForkedFrom: number | null =
@@ -83,8 +84,10 @@ export const POST: RequestHandler = async ({ request }) => {
 			if (parent && parent.author === author) {
 				// Same author → version upgrade: use the original pipeline's name
 				name = parent.name;
+			} else {
+				// Different author → fork: independent version chain starting at 1.0.0
+				version = '1.0.0';
 			}
-			// Different author → fork: keep metadata.name as-is (user chooses freely)
 		} else {
 			// No forked_from → name deduplication if same name exists
 			const existing = await db
@@ -122,7 +125,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				githubUrl: github_url,
 				metadataJson: metadata,
 				author,
-				version: metadata.version || '1.0.0',
+				version,
 				verified: false,
 				forkedFrom: resolvedForkedFrom
 			})

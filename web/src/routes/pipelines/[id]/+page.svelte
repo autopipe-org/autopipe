@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { onMount, tick } from 'svelte';
+
 	let { data } = $props();
 	const p = data.pipeline;
 	const f = data.files;
@@ -10,21 +12,46 @@
 		showAll ? data.versionChain : data.versionChain.slice(0, 3)
 	);
 
-	type FileTab = { name: string; content: string };
+	type FileTab = { name: string; content: string; lang: string };
+	const langMap: Record<string, string> = {
+		'Snakefile': 'python', 'Dockerfile': 'dockerfile',
+		'config.yaml': 'yaml', 'metadata.json': 'json', 'README.md': 'markdown'
+	};
 	const files: FileTab[] = [];
-	if (f.snakefile) files.push({ name: 'Snakefile', content: f.snakefile });
-	if (f.dockerfile) files.push({ name: 'Dockerfile', content: f.dockerfile });
-	if (f.config_yaml) files.push({ name: 'config.yaml', content: f.config_yaml });
+	if (f.snakefile) files.push({ name: 'Snakefile', content: f.snakefile, lang: 'python' });
+	if (f.dockerfile) files.push({ name: 'Dockerfile', content: f.dockerfile, lang: 'dockerfile' });
+	if (f.config_yaml) files.push({ name: 'config.yaml', content: f.config_yaml, lang: 'yaml' });
 	if (f.metadata_json) {
-		files.push({
-			name: 'metadata.json',
-			content: f.metadata_json
-		});
+		files.push({ name: 'metadata.json', content: f.metadata_json, lang: 'json' });
 	}
-	if (f.readme) files.push({ name: 'README.md', content: f.readme });
+	if (f.readme) files.push({ name: 'README.md', content: f.readme, lang: 'markdown' });
 
-	function switchTab(idx: number) {
+	let hljsReady = $state(false);
+
+	onMount(async () => {
+		const link = document.createElement('link');
+		link.rel = 'stylesheet';
+		link.href = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css';
+		document.head.appendChild(link);
+		const script = document.createElement('script');
+		script.src = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js';
+		script.onload = () => { hljsReady = true; highlightAll(); };
+		document.head.appendChild(script);
+	});
+
+	async function highlightAll() {
+		await tick();
+		if (typeof (window as any).hljs !== 'undefined') {
+			document.querySelectorAll('.tab-panel pre code[class*="language-"]').forEach((el) => {
+				(window as any).hljs.highlightElement(el);
+			});
+		}
+	}
+
+	async function switchTab(idx: number) {
 		activeTab = idx;
+		await tick();
+		if (hljsReady) highlightAll();
 	}
 </script>
 
@@ -112,7 +139,7 @@
 				<div class="tab-content">
 					{#each files as file, idx}
 						<div class="tab-panel" class:active={idx === activeTab}>
-							<pre><code>{file.content}</code></pre>
+							<pre><code class="language-{file.lang}">{file.content}</code></pre>
 						</div>
 					{/each}
 				</div>
