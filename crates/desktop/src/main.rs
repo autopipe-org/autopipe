@@ -73,11 +73,11 @@ fn main() {
             println!("AutoPipe Desktop");
             println!();
             println!("MCP server for bioinformatics pipeline management.");
-            println!("Compatible with Claude Desktop, Gemini CLI, and any MCP-compatible app.");
+            println!("Compatible with Claude Desktop and any MCP-compatible app.");
             println!();
             println!("Usage:");
             println!("  desktop --mcp-server    Run as MCP server (stdio transport)");
-            println!("  desktop --register      Auto-register in Claude Desktop & Gemini CLI");
+            println!("  desktop --register      Auto-register in Claude Desktop");
             println!("  desktop --unregister    Unregister from all supported clients");
             println!("  desktop --status        Check registration status");
             println!();

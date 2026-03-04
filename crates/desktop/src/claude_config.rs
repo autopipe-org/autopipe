@@ -5,18 +5,16 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum McpClient {
     ClaudeDesktop,
-    GeminiCli,
 }
 
 impl McpClient {
     /// All supported clients.
-    pub const ALL: &'static [McpClient] = &[McpClient::ClaudeDesktop, McpClient::GeminiCli];
+    pub const ALL: &'static [McpClient] = &[McpClient::ClaudeDesktop];
 
     /// Display name.
     pub fn name(&self) -> &'static str {
         match self {
             McpClient::ClaudeDesktop => "Claude Desktop",
-            McpClient::GeminiCli => "Gemini CLI",
         }
     }
 
@@ -24,7 +22,6 @@ impl McpClient {
     pub fn config_path(&self) -> PathBuf {
         match self {
             McpClient::ClaudeDesktop => claude_desktop_config_path(),
-            McpClient::GeminiCli => gemini_cli_config_path(),
         }
     }
 }
@@ -57,16 +54,7 @@ pub fn claude_desktop_config_path() -> PathBuf {
     }
 }
 
-/// Returns the Gemini CLI config file path.
-/// All platforms: ~/.gemini/settings.json
-pub fn gemini_cli_config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".gemini")
-        .join("settings.json")
-}
-
-/// Build the MCP server entry JSON (same format for Claude Desktop and Gemini CLI).
+/// Build the MCP server entry JSON for Claude Desktop.
 fn mcp_entry(config_path: &str) -> Value {
     let exe_path = std::env::current_exe()
         .unwrap_or_else(|_| PathBuf::from("autopipe-desktop"))

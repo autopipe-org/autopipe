@@ -15,7 +15,9 @@ pub enum SshAuth {
 
 impl Default for SshAuth {
     fn default() -> Self {
-        SshAuth::Agent
+        SshAuth::Password {
+            password: String::new(),
+        }
     }
 }
 
