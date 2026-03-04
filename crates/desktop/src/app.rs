@@ -89,9 +89,9 @@ impl AutoPipeApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config = AppConfig::load();
         let (ssh_auth_type, ssh_key_path_input, ssh_password_input) = match &config.ssh_auth {
-            SshAuth::Agent => (0, String::new(), String::new()),
+            SshAuth::Password { password } => (0, String::new(), password.clone()),
             SshAuth::Key { key_path } => (1, key_path.clone(), String::new()),
-            SshAuth::Password { password } => (2, String::new(), password.clone()),
+            SshAuth::Agent => (0, String::new(), String::new()), // fallback to Password
         };
 
         // If token exists, try to resolve GitHub username
@@ -129,13 +129,15 @@ impl AutoPipeApp {
 
     fn save_config(&mut self) {
         self.config.ssh_auth = match self.ssh_auth_type {
+            0 => SshAuth::Password {
+                password: self.ssh_password_input.clone(),
+            },
             1 => SshAuth::Key {
                 key_path: self.ssh_key_path_input.clone(),
             },
-            2 => SshAuth::Password {
+            _ => SshAuth::Password {
                 password: self.ssh_password_input.clone(),
             },
-            _ => SshAuth::Agent,
         };
 
         match self.config.save() {
@@ -442,22 +444,21 @@ impl AutoPipeApp {
         ui.add_space(5.0);
         ui.label("Authentication:");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.ssh_auth_type, 0, "SSH Agent");
+            ui.radio_value(&mut self.ssh_auth_type, 0, "Password");
             ui.radio_value(&mut self.ssh_auth_type, 1, "Key File");
-            ui.radio_value(&mut self.ssh_auth_type, 2, "Password");
         });
 
         match self.ssh_auth_type {
+            0 => {
+                ui.horizontal(|ui| {
+                    ui.label("Password:");
+                    ui.add(egui::TextEdit::singleline(&mut self.ssh_password_input).password(true));
+                });
+            }
             1 => {
                 ui.horizontal(|ui| {
                     ui.label("Key Path:");
                     ui.text_edit_singleline(&mut self.ssh_key_path_input);
-                });
-            }
-            2 => {
-                ui.horizontal(|ui| {
-                    ui.label("Password:");
-                    ui.add(egui::TextEdit::singleline(&mut self.ssh_password_input).password(true));
                 });
             }
             _ => {}
@@ -682,20 +683,6 @@ impl AutoPipeApp {
                 self.plugin_confirm = Some(p);
             }
 
-            ui.add_space(15.0);
-            ui.separator();
-            ui.add_space(10.0);
-
-            // --- Built-in Viewers ---
-            ui.heading("Built-in Viewers");
-            ui.add_space(5.0);
-            ui.label("The Results Viewer includes built-in support for:");
-            ui.add_space(3.0);
-            ui.label("  Images: PNG, JPG, GIF, SVG, WebP, BMP");
-            ui.label("  Documents: PDF");
-            ui.label("  Text: TXT, LOG, CSV, TSV, JSON, YAML, XML, FASTQ");
-            ui.label("  Genomics (igv.js): BAM, CRAM, VCF, BCF, BED, GFF, GTF, FASTA");
-            ui.label("  Single-cell (jsfive): h5ad");
         });
     }
 
