@@ -23,9 +23,12 @@
 
 	const allTags = $derived(() => {
 		const counts = new Map<string, number>();
+		const toolSet = new Set(allTools().map(([name]) => name));
 		for (const p of data.pipelines) {
 			for (const t of p.tags) {
-				counts.set(t, (counts.get(t) || 0) + 1);
+				if (!toolSet.has(t)) {
+					counts.set(t, (counts.get(t) || 0) + 1);
+				}
 			}
 		}
 		return [...counts.entries()].sort((a, b) => b[1] - a[1]);

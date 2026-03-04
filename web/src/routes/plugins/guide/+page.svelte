@@ -268,9 +268,7 @@ git push -u origin main`}</pre>
 
 <style>
 	.guide {
-		max-width: 800px;
-		margin: 0 auto;
-		padding: 24px;
+		padding: 0;
 	}
 	.back-link {
 		display: inline-block;

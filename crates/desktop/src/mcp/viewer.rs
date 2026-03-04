@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::config::AppConfig;
 use crate::ssh;
+use common::models::clean_content;
 
 /// Shared state: stores files keyed by filename.
 #[derive(Clone)]
@@ -387,10 +388,13 @@ struct DataQuery {
 /// Helper: run SSH command via spawn_blocking.
 async fn ssh_run(config: &AppConfig, cmd: &str) -> Result<(String, i32), String> {
     let config = config.clone();
-    let cmd = cmd.to_string();
-    tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
+    // Wrap in login shell so ~/.bash_profile / conda / module PATH is loaded
+    let escaped = cmd.replace('\'', "'\\''");
+    let cmd = format!("bash -l -c '{}'", escaped);
+    let (output, code) = tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
         .await
-        .map_err(|e| format!("Task error: {}", e))?
+        .map_err(|e| format!("Task error: {}", e))??;
+    Ok((clean_content(&output), code))
 }
 
 /// Data handler: server-side pagination for genomics files (BAM/VCF/BED/GFF).
@@ -920,7 +924,8 @@ var selectedGenome = null;
 
 function buildGenomeDropdown() {{
   var current = selectedGenome || REFERENCE || '';
-  var html = '<select class="btn" id="genomeSelect" onchange="onGenomeChange(this.value)" style="font-size:12px;padding:4px 8px;max-width:220px">';
+  var html = '<span style="font-size:12px;color:#888;font-weight:500;margin-right:4px">Reference:</span>';
+  html += '<select class="btn" id="genomeSelect" onchange="onGenomeChange(this.value)" style="font-size:12px;padding:4px 8px;max-width:220px">';
   // If REFERENCE is a local FASTA file
   var localFasta = FILES.find(function(f) {{ return f.name === REFERENCE; }});
   if (localFasta) {{
@@ -936,10 +941,12 @@ function buildGenomeDropdown() {{
 
 function onGenomeChange(val) {{
   selectedGenome = val;
-  if (currentFile && currentViewMode === 'igv') {{
+  if (currentFile) {{
     var ext = currentFile.split('.').pop().toLowerCase();
     var content = document.getElementById('viewerContent');
-    renderIgvViewer(currentFile, ext, content);
+    if (currentViewMode === 'igv' || igvOnlyExts.indexOf(ext) >= 0) {{
+      renderIgvViewer(currentFile, ext, content);
+    }}
   }}
 }}
 
@@ -996,10 +1003,12 @@ function selectFileWithMode(name, mode) {{
 
   // IGV-only files: CRAM/BCF
   if (igvOnlyExts.indexOf(ext) >= 0) {{
-    actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
     if (hasReference()) {{
+      var genomeHtml = buildGenomeDropdown();
+      actions.innerHTML = genomeHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
       renderIgvViewer(name, ext, content);
     }} else {{
+      actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
       content.innerHTML =
         '<div class="no-preview">' +
           '<div class="no-preview-icon">🧬</div>' +
