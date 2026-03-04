@@ -385,6 +385,9 @@ struct DataQuery {
     page_size: Option<usize>,
 }
 
+/// Docker image for samtools (used for BAM file parsing via Docker on remote server).
+const SAMTOOLS_DOCKER: &str = "biocontainers/samtools:v1.9-4-deb_cv1";
+
 /// Helper: run SSH command via spawn_blocking.
 async fn ssh_run(config: &AppConfig, cmd: &str) -> Result<(String, i32), String> {
     let config = config.clone();
@@ -434,6 +437,18 @@ async fn data_handler(
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
+    // For BAM files: extract parent dir and filename for Docker volume mount
+    let bam_dir = std::path::Path::new(&remote_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("/"))
+        .to_string_lossy()
+        .to_string();
+    let bam_file = std::path::Path::new(&remote_path)
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
     let start = page * page_size + 1; // sed is 1-indexed
     let end = start + page_size - 1;
 
@@ -446,7 +461,10 @@ async fn data_handler(
         Some(t) => t,
         None => {
             let count_cmd = match ext.as_str() {
-                "bam" => format!("samtools view -c '{}'", remote_path),
+                "bam" => format!(
+                    "docker run --rm -v \"{}:/data:ro\" {} samtools view -c \"/data/{}\"",
+                    bam_dir, SAMTOOLS_DOCKER, bam_file
+                ),
                 "vcf" => format!("grep -c -v '^#' '{}'", remote_path),
                 "bed" => format!(
                     "grep -c -v -E '^#|^track|^browser' '{}'",
@@ -478,14 +496,19 @@ async fn data_handler(
             "bam" => {
                 // SAM header
                 if let Ok((hdr, 0)) =
-                    ssh_run(&ssh_cfg, &format!("samtools view -H '{}'", remote_path)).await
+                    ssh_run(&ssh_cfg, &format!(
+                        "docker run --rm -v \"{}:/data:ro\" {} samtools view -H \"/data/{}\"",
+                        bam_dir, SAMTOOLS_DOCKER, bam_file
+                    )).await
                 {
                     header_val = serde_json::Value::String(hdr.trim().to_string());
                 }
                 // Reference sequences from header
                 if let Ok((hdr_text, 0)) =
-                    ssh_run(&ssh_cfg, &format!("samtools view -H '{}' | grep '^@SQ'", remote_path))
-                        .await
+                    ssh_run(&ssh_cfg, &format!(
+                        "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view -H /data/{} | grep ^@SQ\"",
+                        bam_dir, SAMTOOLS_DOCKER, bam_file
+                    )).await
                 {
                     let mut refs = Vec::new();
                     for line in hdr_text.trim().lines() {
@@ -583,8 +606,8 @@ async fn data_handler(
     // Get rows for this page
     let rows_cmd = match ext.as_str() {
         "bam" => format!(
-            "samtools view '{}' | sed -n '{},{}p'",
-            remote_path, start, end
+            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} | sed -n {},{}p\"",
+            bam_dir, SAMTOOLS_DOCKER, bam_file, start, end
         ),
         "vcf" => format!(
             "grep -v '^#' '{}' | sed -n '{},{}p'",
@@ -692,12 +715,13 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AutoPipe Results</title>
+<title>AutoPipe Results Viewer</title>
+<link rel="icon" href="/logo.png" type="image/png">
 <script src="https://cdn.jsdelivr.net/npm/jsfive@0.3.10/dist/browser/hdf5.js"></script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   html, body {{ height: 100%; overflow: hidden; }}
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif; background: #fafafa; color: #111; line-height: 1.5; display: flex; flex-direction: column; }}
+  body {{ font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: #fafafa; color: #111; line-height: 1.5; display: flex; flex-direction: column; }}
 
   /* Header */
   .header {{ padding: 12px 24px; border-bottom: 1px solid #e5e5e5; background: #fff; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }}
@@ -729,14 +753,14 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .zoom-btn {{ width: 30px; padding: 5px 0; justify-content: center; }}
   .zoom-label {{ min-width: 38px; text-align: center; }}
 
-  .viewer-content {{ flex: 1; overflow: auto; padding: 20px; background: #fafafa; }}
+  .viewer-content {{ flex: 1; overflow: auto; padding: 20px; background: #fff; }}
 
   /* Image viewer */
   .img-viewer {{ overflow: auto; }}
   .img-viewer img {{ max-width: 100%; height: auto; transition: transform 0.15s; transform-origin: top left; }}
 
   /* Text viewer */
-  .text-viewer {{ background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; overflow: auto; max-height: 100%; }}
+  .text-viewer {{ padding: 0; font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; overflow: auto; max-height: 100%; }}
 
   /* PDF viewer */
   .pdf-viewer {{ width: 100%; height: 100%; border: none; border-radius: 8px; }}
@@ -779,9 +803,19 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .hdf5-viewer table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
   .hdf5-viewer th {{ background: #f5f5f5; padding: 8px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #e5e5e5; position: sticky; top: 0; }}
   .hdf5-viewer td {{ padding: 6px 12px; border-bottom: 1px solid #f0f0f0; }}
-  .hdf5-viewer tr:hover td {{ background: #f8f8f8; }}
+  .hdf5-viewer tr:hover td {{ background: #f0f7ff; }}
   .hdf5-section {{ margin-bottom: 20px; }}
   .hdf5-section h3 {{ font-size: 14px; font-weight: 600; margin-bottom: 8px; color: #333; }}
+
+  /* HDF5 tree layout */
+  .hdf5-tree-layout {{ display: flex; height: 100%; }}
+  .hdf5-tree {{ width: 280px; min-width: 280px; overflow-y: auto; border-right: 1px solid #e5e5e5; padding: 8px 0; font-size: 12px; }}
+  .hdf5-tree-item {{ display: block; padding: 4px 12px; cursor: pointer; white-space: nowrap; color: #333; }}
+  .hdf5-tree-item:hover {{ background: #f5f5f5; }}
+  .hdf5-tree-item.active {{ background: #f0f7ff; color: #0366d6; }}
+  .hdf5-tree-item.group {{ font-weight: 600; }}
+  .hdf5-tree-toggle {{ display: inline-block; width: 12px; text-align: center; margin-right: 4px; font-size: 10px; }}
+  .hdf5-detail {{ flex: 1; overflow: auto; padding: 16px; }}
 
   /* No preview */
   .no-preview {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: #999; }}
@@ -881,8 +915,8 @@ function renderSidebar() {{
 }}
 
 // IGV-compatible extensions (can show Data tab, IGV tab, or both)
-var igvDualExts = ['vcf','bed','gff','gtf','gff3','fasta','fa'];
-var igvOnlyExts = ['bam','cram','bcf'];
+var igvDualExts = ['bam','vcf','bed','gff','gtf','gff3','fasta','fa'];
+var igvOnlyExts = ['cram','bcf'];
 
 function hasReference() {{
   return !!REFERENCE;
@@ -969,6 +1003,8 @@ function selectFileWithMode(name, mode) {{
   var title = document.getElementById('toolbarTitle');
   var actions = document.getElementById('toolbarActions');
   var content = document.getElementById('viewerContent');
+  content.style.padding = '20px';
+  content.style.overflow = 'auto';
 
   toolbar.style.display = 'flex';
   title.textContent = name;
@@ -1358,180 +1394,241 @@ async function renderIgvViewer(name, ext, content) {{
   }}
 }}
 
-// ── HDF5 (h5ad) Viewer — browser-side jsfive ──
-var _hdf5Cache = {{}};
+// ── HDF5 (h5ad) Viewer — tree layout with jsfive ──
+var _hdf5FileCache = {{}};
+var _hdf5TreeState = {{}};
+var _hdf5ValueCache = {{}};
+var _hdf5ValuePage = {{}};
+var _hdf5ActiveFile = null;
+
 async function renderHdf5Viewer(name, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-
-  content.innerHTML = '<div class="hdf5-viewer" id="hdf5Div">Loading HDF5 file...</div>';
+  content.style.padding = '0';
+  content.style.overflow = 'hidden';
+  content.innerHTML = '<div class="hdf5-tree-layout"><div class="hdf5-tree" id="hdf5Tree">Loading HDF5...</div><div class="hdf5-detail" id="hdf5Detail"><div class="empty-state">Select an item from the tree</div></div></div>';
+  _hdf5ActiveFile = name;
 
   try {{
-    if (!_hdf5Cache[name]) {{
+    if (!_hdf5FileCache[name]) {{
       var resp = await fetch('/file/' + encodeURIComponent(name));
       var buf = await resp.arrayBuffer();
-      var f = new hdf5.File(buf);
-
-      // Walk file structure (depth <= 3)
-      var items = [];
-      function walkHdf5(group, prefix, depth) {{
-        if (depth > 3) return;
-        var keys = group.keys || [];
-        for (var i = 0; i < Math.min(keys.length, 200); i++) {{
-          var key = keys[i];
-          var full = prefix ? prefix + '/' + key : key;
-          try {{
-            var obj = group.get(key);
-            if (obj && obj.shape) {{
-              items.push({{key: full, type: 'Dataset', shape: JSON.stringify(obj.shape), dtype: String(obj.dtype || '-')}});
-            }} else if (obj && obj.keys) {{
-              items.push({{key: full + '/', type: 'Group', shape: '-', dtype: '-'}});
-              walkHdf5(obj, full, depth + 1);
-            }}
-          }} catch(e) {{
-            items.push({{key: full, type: 'Error', shape: '-', dtype: String(e)}});
-          }}
-        }}
-      }}
-      walkHdf5(f, '', 0);
-
-      // Extract obs/var columns
-      var obsItems = [];
-      var obs = f.get('obs');
-      if (obs && obs.keys) {{
-        obs.keys.slice(0, 100).forEach(function(k) {{
-          try {{
-            var obj = obs.get(k);
-            var dtype = (obj && obj.dtype) ? String(obj.dtype) : (obj && obj.keys ? 'categorical' : 'unknown');
-            var nCats = 0;
-            if (obj && obj.keys && obj.get && obj.get('categories')) {{
-              try {{ nCats = obj.get('categories').shape[0]; }} catch(e) {{}}
-            }}
-            obsItems.push({{name: k, dtype: dtype, n_categories: nCats}});
-          }} catch(e) {{
-            obsItems.push({{name: k, dtype: 'error', n_categories: 0}});
-          }}
-        }});
-      }}
-
-      var varItems = [];
-      var varGrp = f.get('var');
-      if (varGrp && varGrp.keys) {{
-        varGrp.keys.slice(0, 100).forEach(function(k) {{
-          try {{
-            var obj = varGrp.get(k);
-            var dtype = (obj && obj.dtype) ? String(obj.dtype) : (obj && obj.keys ? 'categorical' : 'unknown');
-            varItems.push({{name: k, dtype: dtype}});
-          }} catch(e) {{
-            varItems.push({{name: k, dtype: 'error'}});
-          }}
-        }});
-      }}
-
-      // Dimensions
-      var nObs = 0, nVar = 0;
-      var X = f.get('X');
-      if (X && X.shape) {{
-        nObs = X.shape[0] || 0;
-        nVar = X.shape[1] || 0;
-      }}
-
-      // Obsm keys
-      var obsmKeys = [];
-      var obsm = f.get('obsm');
-      if (obsm && obsm.keys) {{
-        obsm.keys.forEach(function(k) {{
-          try {{
-            var obj = obsm.get(k);
-            obsmKeys.push({{key: k, shape: obj && obj.shape ? JSON.stringify(obj.shape) : '-'}});
-          }} catch(e) {{
-            obsmKeys.push({{key: k, shape: '-'}});
-          }}
-        }});
-      }}
-
-      // Uns keys
-      var unsKeys = [];
-      var uns = f.get('uns');
-      if (uns && uns.keys) {{ unsKeys = uns.keys.slice(0, 100); }}
-
-      _hdf5Cache[name] = {{
-        items: items,
-        obsItems: obsItems,
-        varItems: varItems,
-        obsmKeys: obsmKeys,
-        unsKeys: unsKeys,
-        nObs: nObs,
-        nVar: nVar,
-        fileSize: buf.byteLength
-      }};
+      _hdf5FileCache[name] = new hdf5.File(buf);
     }}
-    _renderHdf5Page(name, 0);
+    if (!_hdf5TreeState[name]) _hdf5TreeState[name] = {{}};
+    _buildHdf5Tree(name);
   }} catch(e) {{
+    content.style.padding = '20px';
+    content.style.overflow = 'auto';
     content.innerHTML = '<div class="no-preview"><p class="no-preview-icon">&#x26A0;&#xFE0F;</p>' +
       '<p class="no-preview-title">HDF5 Load Error</p>' +
       '<p class="no-preview-msg">' + e.message + '<br><br>Download and inspect with Python:<br><code>import anndata; ad = anndata.read_h5ad("' + name + '")</code></p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a></div>';
   }}
 }}
-function _renderHdf5Page(name, page) {{
-  var c = _hdf5Cache[name]; if (!c) return;
-  var div = document.getElementById('hdf5Div'); if (!div) return;
+
+function _buildHdf5Tree(name) {{
+  var f = _hdf5FileCache[name]; if (!f) return;
+  var tree = document.getElementById('hdf5Tree'); if (!tree) return;
+  var state = _hdf5TreeState[name];
   var html = '';
-  var sizeMB = (c.fileSize / 1048576).toFixed(1);
 
-  html += '<div class="hdf5-section"><h3>Summary</h3><table>';
-  html += '<tr><th>Property</th><th>Value</th></tr>';
-  html += '<tr><td>File size</td><td>' + sizeMB + ' MB</td></tr>';
-  html += '<tr><td>Observations (n_obs)</td><td>' + c.nObs.toLocaleString() + '</td></tr>';
-  html += '<tr><td>Variables (n_var)</td><td>' + c.nVar.toLocaleString() + '</td></tr>';
-  html += '</table></div>';
-
-  html += '<div class="hdf5-section"><h3>File Structure (' + c.items.length + ' entries)</h3>';
-  html += renderPaginatedTable('hdf5Div', ['Key', 'Type', 'Shape', 'Dtype'], c.items, page, function(item) {{
-    return '<tr><td>' + item.key + '</td><td>' + item.type + '</td><td>' + item.shape + '</td><td>' + item.dtype + '</td></tr>';
-  }});
-  html += '</div>';
-
-  if (c.obsItems.length > 0) {{
-    html += '<div class="hdf5-section"><h3>Observations (obs) columns (' + c.obsItems.length + ')</h3><table>';
-    html += '<tr><th>Column</th><th>Dtype</th><th>Categories</th></tr>';
-    c.obsItems.forEach(function(item) {{
-      var cats = item.n_categories > 0 ? item.n_categories : '-';
-      html += '<tr><td>' + item.name + '</td><td>' + item.dtype + '</td><td>' + cats + '</td></tr>';
-    }});
-    html += '</table></div>';
+  function renderNode(group, path, depth) {{
+    var keys;
+    try {{ keys = group.keys || []; }} catch(e) {{ return; }}
+    for (var i = 0; i < keys.length; i++) {{
+      var key = keys[i];
+      var fullPath = path ? path + '/' + key : key;
+      try {{
+        var obj = group.get(key);
+        var esc = fullPath.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+        if (obj && obj.keys !== undefined && !obj.shape) {{
+          // Group node
+          var isOpen = !!state[fullPath];
+          var arrow = isOpen ? '\u25BC' : '\u25B6';
+          html += '<div class="hdf5-tree-item group" data-path="' + fullPath + '" style="padding-left:' + (12 + depth * 16) + 'px" onclick="event.stopPropagation();_hdf5ToggleGroup(\'' + esc + '\')">';
+          html += '<span class="hdf5-tree-toggle">' + arrow + '</span> ' + key;
+          html += '</div>';
+          if (isOpen) renderNode(obj, fullPath, depth + 1);
+        }} else if (obj && obj.shape) {{
+          // Dataset node
+          html += '<div class="hdf5-tree-item" data-path="' + fullPath + '" style="padding-left:' + (12 + depth * 16) + 'px" onclick="_hdf5ShowItem(\'' + esc + '\')">';
+          html += key + ' <span style="color:#999;font-size:11px">' + JSON.stringify(obj.shape) + '</span>';
+          html += '</div>';
+        }}
+      }} catch(e) {{
+        html += '<div class="hdf5-tree-item" style="padding-left:' + (12 + depth * 16) + 'px;color:#c00">' + key + ' (error)</div>';
+      }}
+    }}
   }}
 
-  if (c.varItems.length > 0) {{
-    html += '<div class="hdf5-section"><h3>Variables (var) columns (' + c.varItems.length + ')</h3><table>';
-    html += '<tr><th>Column</th><th>Dtype</th></tr>';
-    c.varItems.forEach(function(item) {{
-      html += '<tr><td>' + item.name + '</td><td>' + item.dtype + '</td></tr>';
-    }});
-    html += '</table></div>';
-  }}
-
-  if (c.obsmKeys.length > 0) {{
-    html += '<div class="hdf5-section"><h3>Embeddings (obsm) (' + c.obsmKeys.length + ')</h3><table>';
-    html += '<tr><th>Key</th><th>Shape</th></tr>';
-    c.obsmKeys.forEach(function(item) {{
-      html += '<tr><td>' + item.key + '</td><td>' + item.shape + '</td></tr>';
-    }});
-    html += '</table></div>';
-  }}
-
-  if (c.unsKeys.length > 0) {{
-    html += '<div class="hdf5-section"><h3>Unstructured (uns) (' + c.unsKeys.length + ')</h3><table>';
-    html += '<tr><th>Key</th></tr>';
-    c.unsKeys.forEach(function(k) {{
-      html += '<tr><td>' + k + '</td></tr>';
-    }});
-    html += '</table></div>';
-  }}
-
-  div.innerHTML = html;
-  window._paginate = function(id, p) {{ if (id==='hdf5Div') _renderHdf5Page(name, p); }};
+  renderNode(f, '', 0);
+  tree.innerHTML = html || '<div style="padding:16px;color:#999">Empty file</div>';
 }}
+
+window._hdf5ToggleGroup = function(path) {{
+  var name = _hdf5ActiveFile; if (!name) return;
+  var state = _hdf5TreeState[name];
+  state[path] = !state[path];
+  _buildHdf5Tree(name);
+  _hdf5ShowItem(path);
+}};
+
+window._hdf5ShowItem = function(path) {{
+  var name = _hdf5ActiveFile; if (!name) return;
+  var f = _hdf5FileCache[name]; if (!f) return;
+  var detail = document.getElementById('hdf5Detail'); if (!detail) return;
+
+  // Highlight active item
+  document.querySelectorAll('.hdf5-tree-item').forEach(function(el) {{
+    el.classList.toggle('active', el.dataset.path === path);
+  }});
+
+  try {{
+    var obj = f.get(path);
+    if (!obj) {{ detail.innerHTML = '<p style="color:#888">Item not found</p>'; return; }}
+
+    if (obj.keys !== undefined && !obj.shape) {{
+      // Group: show children summary
+      var html = '<h3 style="font-size:14px;font-weight:600;margin-bottom:12px">' + path + '/</h3>';
+      html += '<div class="genomics-viewer"><table><tr><th>Key</th><th>Type</th><th>Shape</th><th>Dtype</th></tr>';
+      var keys = obj.keys || [];
+      keys.forEach(function(k) {{
+        try {{
+          var child = obj.get(k);
+          if (child && child.keys !== undefined && !child.shape) {{
+            html += '<tr><td>' + k + '/</td><td>Group</td><td>-</td><td>-</td></tr>';
+          }} else if (child && child.shape) {{
+            html += '<tr><td>' + k + '</td><td>Dataset</td><td>' + JSON.stringify(child.shape) + '</td><td>' + (child.dtype || '-') + '</td></tr>';
+          }}
+        }} catch(e) {{
+          html += '<tr><td>' + k + '</td><td colspan="3" style="color:#c00">' + e + '</td></tr>';
+        }}
+      }});
+      html += '</table></div>';
+      detail.innerHTML = html;
+      return;
+    }}
+
+    // Dataset: show shape/dtype and optionally values
+    var shape = obj.shape || [];
+    var dtype = String(obj.dtype || '-');
+    var totalElements = 1;
+    for (var s = 0; s < shape.length; s++) totalElements *= shape[s];
+
+    var html = '<h3 style="font-size:14px;font-weight:600;margin-bottom:12px">' + path + '</h3>';
+    html += '<div style="margin-bottom:12px;font-size:12px;color:#666">';
+    html += 'Shape: ' + JSON.stringify(shape) + ' &middot; Dtype: ' + dtype + ' &middot; Elements: ' + totalElements.toLocaleString();
+    html += '</div>';
+
+    if (totalElements > 1000000) {{
+      html += '<p style="color:#888;font-size:13px">Dataset too large to preview (' + totalElements.toLocaleString() + ' elements).<br>Download the file and inspect with Python.</p>';
+      detail.innerHTML = html;
+      return;
+    }}
+
+    // Load value (cached)
+    var cacheKey = name + ':' + path;
+    var value;
+    if (_hdf5ValueCache[cacheKey] !== undefined) {{
+      value = _hdf5ValueCache[cacheKey];
+    }} else {{
+      try {{
+        value = obj.value;
+        _hdf5ValueCache[cacheKey] = value;
+      }} catch(e) {{
+        html += '<p style="color:#c00;font-size:13px">Error reading value: ' + e + '</p>';
+        detail.innerHTML = html;
+        return;
+      }}
+    }}
+
+    var page = _hdf5ValuePage[path] || 0;
+    if (shape.length <= 1) {{
+      html += _renderHdf5Values1D(value, path, page);
+    }} else if (shape.length === 2) {{
+      html += _renderHdf5Values2D(value, shape, path, page);
+    }} else {{
+      html += '<pre style="font-size:12px;max-height:400px;overflow:auto">' + String(value).substring(0, 5000) + '</pre>';
+    }}
+
+    detail.innerHTML = html;
+  }} catch(e) {{
+    detail.innerHTML = '<p style="color:#c00">Error: ' + e + '</p>';
+  }}
+}};
+
+function _renderHdf5Values1D(value, path, page) {{
+  var arr = Array.isArray(value) ? value : (value && value.length ? Array.from(value) : [value]);
+  var pageSize = 100;
+  var totalPages = Math.ceil(arr.length / pageSize) || 1;
+  if (page >= totalPages) page = totalPages - 1;
+  if (page < 0) page = 0;
+  var start = page * pageSize;
+  var pageArr = arr.slice(start, start + pageSize);
+  var esc = path.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+
+  var html = '<div class="genomics-viewer"><table><tr><th>Index</th><th>Value</th></tr>';
+  pageArr.forEach(function(v, i) {{
+    if (typeof v === 'number' && !Number.isInteger(v)) v = v.toFixed(4);
+    html += '<tr><td>' + (start + i) + '</td><td>' + v + '</td></tr>';
+  }});
+  html += '</table>';
+  if (totalPages > 1) {{
+    html += '<div class="pagination">';
+    html += '<button onclick="_hdf5PageVal(\'' + esc + '\',' + (page-1) + ')"' + (page <= 0 ? ' disabled' : '') + '>&laquo; Prev</button>';
+    html += '<span>Page ' + (page+1) + ' / ' + totalPages + ' (' + arr.length.toLocaleString() + ' values)</span>';
+    html += '<button onclick="_hdf5PageVal(\'' + esc + '\',' + (page+1) + ')"' + (page >= totalPages-1 ? ' disabled' : '') + '>Next &raquo;</button>';
+    html += '</div>';
+  }}
+  html += '</div>';
+  return html;
+}}
+
+function _renderHdf5Values2D(value, shape, path, page) {{
+  var nRows = shape[0], nCols = shape[1];
+  var maxCols = 20;
+  var pageSize = 100;
+  var totalPages = Math.ceil(nRows / pageSize) || 1;
+  if (page >= totalPages) page = totalPages - 1;
+  if (page < 0) page = 0;
+  var start = page * pageSize;
+  var endRow = Math.min(start + pageSize, nRows);
+  var esc = path.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+
+  var html = '<div class="genomics-viewer"><table><tr><th>#</th>';
+  for (var c = 0; c < Math.min(nCols, maxCols); c++) html += '<th>' + c + '</th>';
+  if (nCols > maxCols) html += '<th>...</th>';
+  html += '</tr>';
+  for (var r = start; r < endRow; r++) {{
+    html += '<tr><td>' + r + '</td>';
+    for (var c = 0; c < Math.min(nCols, maxCols); c++) {{
+      var v;
+      if (Array.isArray(value)) {{ v = value[r * nCols + c]; }}
+      else if (value && value[r * nCols + c] !== undefined) {{ v = value[r * nCols + c]; }}
+      else {{ v = '-'; }}
+      if (typeof v === 'number' && !Number.isInteger(v)) v = v.toFixed(4);
+      html += '<td>' + v + '</td>';
+    }}
+    if (nCols > maxCols) html += '<td>...</td>';
+    html += '</tr>';
+  }}
+  html += '</table>';
+  if (totalPages > 1) {{
+    html += '<div class="pagination">';
+    html += '<button onclick="_hdf5PageVal(\'' + esc + '\',' + (page-1) + ')"' + (page <= 0 ? ' disabled' : '') + '>&laquo; Prev</button>';
+    html += '<span>Page ' + (page+1) + ' / ' + totalPages + ' (' + nRows.toLocaleString() + ' rows)</span>';
+    html += '<button onclick="_hdf5PageVal(\'' + esc + '\',' + (page+1) + ')"' + (page >= totalPages-1 ? ' disabled' : '') + '>Next &raquo;</button>';
+    html += '</div>';
+  }}
+  html += '</div>';
+  return html;
+}}
+
+window._hdf5PageVal = function(path, page) {{
+  if (page < 0) return;
+  _hdf5ValuePage[path] = page;
+  _hdf5ShowItem(path);
+}};
 
 // ── Plugin Viewer ──
 function findPlugin(ext) {{
