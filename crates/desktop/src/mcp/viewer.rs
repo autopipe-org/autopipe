@@ -461,8 +461,9 @@ async fn data_handler(
         Some(t) => t,
         None => {
             let count_cmd = match ext.as_str() {
+                // BAM: only fetch first 100 reads to avoid timeout on large files
                 "bam" => format!(
-                    "docker run --rm -v \"{}:/data:ro\" {} samtools view -c \"/data/{}\" 2>/dev/null",
+                    "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} 2>/dev/null | head -100 | wc -l\"",
                     bam_dir, SAMTOOLS_DOCKER, bam_file
                 ),
                 "vcf" => format!("grep -c -v '^#' '{}'", remote_path),
@@ -605,9 +606,10 @@ async fn data_handler(
 
     // Get rows for this page
     let rows_cmd = match ext.as_str() {
+        // BAM: only first 100 reads (no pagination) to avoid timeout
         "bam" => format!(
-            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} 2>/dev/null | sed -n {},{}p\"",
-            bam_dir, SAMTOOLS_DOCKER, bam_file, start, end
+            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} 2>/dev/null | head -100\"",
+            bam_dir, SAMTOOLS_DOCKER, bam_file
         ),
         "vcf" => format!(
             "grep -v '^#' '{}' | sed -n '{},{}p'",
@@ -1048,7 +1050,8 @@ function selectFileWithMode(name, mode) {{
   title.textContent = name;
 
   var imageExts = ['png','jpg','jpeg','gif','svg','webp','bmp','tiff','tif'];
-  var textExts = ['txt','log','csv','tsv','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq','dockerfile'];
+  var delimExts = ['csv','tsv','tab'];
+  var textExts = ['txt','log','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq','dockerfile'];
   var hdf5Exts = ['h5ad','h5','hdf5'];
 
   // Dual-tab files: Data + IGV
@@ -1099,6 +1102,8 @@ function selectFileWithMode(name, mode) {{
     renderImageViewer(name, actions, content);
   }} else if (ext === 'pdf') {{
     renderPdfViewer(name, actions, content);
+  }} else if (delimExts.indexOf(ext) >= 0) {{
+    renderDelimitedViewer(name, ext, actions, content);
   }} else if (textExts.indexOf(ext) >= 0 || isTextByName(name)) {{
     renderTextViewer(name, actions, content);
   }} else if (hdf5Exts.indexOf(ext) >= 0) {{
@@ -1171,6 +1176,83 @@ async function renderTextViewer(name, actions, content) {{
     document.getElementById('textContent').textContent = 'Error loading file: ' + e.message;
   }}
 }}
+
+// ── Delimited File Viewer (CSV/TSV) ──
+var _delimCache = {{}};
+var _delimPage = {{}};
+async function renderDelimitedViewer(name, ext, actions, content) {{
+  actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
+  content.innerHTML = '<div class="genomics-viewer" id="delimDiv">Loading...</div>';
+  try {{
+    var resp = await fetch('/file/' + encodeURIComponent(name));
+    var text = await resp.text();
+    // Detect delimiter: tab for tsv/tab, comma for csv, auto-detect for others
+    var delim = (ext === 'tsv' || ext === 'tab') ? '\t' : ',';
+    var lines = text.split('\n').filter(function(l) {{ return l.trim().length > 0; }});
+    if (lines.length === 0) {{
+      document.getElementById('delimDiv').innerHTML = '<p class="meta">Empty file</p>';
+      return;
+    }}
+    // Auto-detect: if first line has more tabs than commas, use tab
+    if (ext !== 'tsv' && ext !== 'tab' && ext !== 'csv') {{
+      var tabs = (lines[0].match(/\t/g)||[]).length;
+      var commas = (lines[0].match(/,/g)||[]).length;
+      if (tabs > commas) delim = '\t';
+    }}
+    // Parse rows
+    var allRows = lines.map(function(line) {{
+      if (delim === ',') {{
+        // Simple CSV parse (handles quoted fields)
+        var row = []; var cur = ''; var inQuote = false;
+        for (var ci = 0; ci < line.length; ci++) {{
+          var ch = line[ci];
+          if (inQuote) {{
+            if (ch === '"' && ci+1 < line.length && line[ci+1] === '"') {{ cur += '"'; ci++; }}
+            else if (ch === '"') {{ inQuote = false; }}
+            else {{ cur += ch; }}
+          }} else {{
+            if (ch === '"') {{ inQuote = true; }}
+            else if (ch === ',') {{ row.push(cur); cur = ''; }}
+            else {{ cur += ch; }}
+          }}
+        }}
+        row.push(cur);
+        return row;
+      }}
+      return line.split(delim);
+    }});
+    // First row as header
+    var headers = allRows[0];
+    var dataRows = allRows.slice(1);
+    _delimCache[name] = {{ headers: headers, rows: dataRows }};
+    _delimPage[name] = 0;
+    _renderDelimPage(name);
+  }} catch(e) {{
+    document.getElementById('delimDiv').innerHTML = 'Error: ' + e.message;
+  }}
+}}
+function _renderDelimPage(name) {{
+  var div = document.getElementById('delimDiv'); if (!div) return;
+  var cached = _delimCache[name]; if (!cached) return;
+  var page = _delimPage[name] || 0;
+  var headers = cached.headers;
+  var dataRows = cached.rows;
+  var html = '<p class="meta">' + dataRows.length.toLocaleString() + ' row(s) &middot; ' + headers.length + ' column(s)</p>';
+  html += renderPaginatedTable('delimDiv', headers, dataRows, page, function(row) {{
+    var r = '<tr>';
+    for (var ci = 0; ci < headers.length; ci++) {{ r += '<td>' + ((row[ci]||'').replace(/</g,'&lt;')) + '</td>'; }}
+    return r + '</tr>';
+  }});
+  div.innerHTML = html;
+}}
+window._paginate = function(divId, page) {{
+  if (divId === 'delimDiv') {{
+    var name = currentFile;
+    if (page < 0) return;
+    _delimPage[name] = page;
+    _renderDelimPage(name);
+  }}
+}};
 
 // ── Pagination helper ──
 var PAGE_SIZE = 100;
@@ -1343,15 +1425,12 @@ async function renderBamViewer(name, content) {{
 }}
 async function _fetchAndRenderBam(name, page) {{
   var div = document.getElementById('bamDiv'); if (!div) return;
-  if (page > 0) div.innerHTML = '<div class="genomics-viewer">Loading page...</div>';
-  var data = await fetchGenomicsPage(name, page);
+  var data = await fetchGenomicsPage(name, 0);
   if (data.error) {{ div.innerHTML = 'Error: ' + data.error; return; }}
-  // Cache metadata on first page
-  if (page === 0) {{
-    _genomicsMetaCache[name] = {{ refs: data.refs || [], header: data.header || '', total: data.total || 0 }};
-  }}
-  var cached = _genomicsMetaCache[name] || {{}};
-  var html = '<p class="meta">' + (cached.refs||[]).length + ' reference(s) &middot; ' + (cached.total||0).toLocaleString() + ' read(s)</p>';
+  _genomicsMetaCache[name] = {{ refs: data.refs || [], header: data.header || '', total: data.total || 0 }};
+  var cached = _genomicsMetaCache[name];
+  var rowCount = (data.rows || []).length;
+  var html = '<p class="meta">' + (cached.refs||[]).length + ' reference(s) &middot; First ' + rowCount + ' read(s)</p>';
   if ((cached.refs||[]).length > 0) {{
     html += '<details style="margin-bottom:12px" open><summary style="cursor:pointer;font-size:13px;font-weight:600">References</summary><table><tr><th>Name</th><th>Length</th></tr>';
     cached.refs.forEach(function(r) {{ html += '<tr><td>'+r.name+'</td><td>'+r.length.toLocaleString()+' bp</td></tr>'; }});
@@ -1362,13 +1441,15 @@ async function _fetchAndRenderBam(name, page) {{
     html += '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' + cached.header.replace(/</g,'&lt;') + '</pre></details>';
   }}
   var bamHdrs = ['Read Name','Flag','Chr','Pos','MAPQ','CIGAR','Sequence'];
-  // BAM rows from samtools view come as tab-separated: QNAME FLAG RNAME POS MAPQ CIGAR ... SEQ QUAL
-  html += renderServerPaginatedTable('bamDiv', name, bamHdrs, data.rows || [], data.total || 0, page, function(row) {{
-    // samtools view columns: 0=QNAME, 1=FLAG, 2=RNAME, 3=POS, 4=MAPQ, 5=CIGAR, ... 9=SEQ
+  html += '<table><tr>';
+  bamHdrs.forEach(function(h) {{ html += '<th>' + h + '</th>'; }});
+  html += '</tr>';
+  (data.rows || []).forEach(function(row) {{
     var qname = row[0]||'*', flag = row[1]||'0', rname = row[2]||'*', pos = row[3]||'0', mapq = row[4]||'0', cigar = row[5]||'*';
     var seq = row.length > 9 ? row[9] : '*';
-    return '<tr><td>'+qname+'</td><td>'+flag+'</td><td>'+rname+'</td><td>'+pos+'</td><td>'+mapq+'</td><td>'+cigar+'</td><td class="seq">'+colorBases(seq)+'</td></tr>';
+    html += '<tr><td>'+qname+'</td><td>'+flag+'</td><td>'+rname+'</td><td>'+pos+'</td><td>'+mapq+'</td><td>'+cigar+'</td><td class="seq">'+colorBases(seq)+'</td></tr>';
   }});
+  html += '</table>';
   div.innerHTML = html;
 }}
 

@@ -57,6 +57,8 @@ pub struct AutoPipeApp {
     ssh_key_path_input: String,
     ssh_auth_type: usize, // 0=Agent, 1=Key, 2=Password
     status_message: String,
+    save_ok: bool,
+    tab_errors: [bool; 3], // [Connection, SSH, GitHub]
     should_minimize: bool,
     minimized_to_tray: bool,
     // GitHub device flow state
@@ -104,6 +106,8 @@ impl AutoPipeApp {
             ssh_key_path_input,
             ssh_auth_type,
             status_message: String::new(),
+            save_ok: false,
+            tab_errors: [false; 3],
             should_minimize: false,
             minimized_to_tray: false,
             github_rx: None,
@@ -141,8 +145,39 @@ impl AutoPipeApp {
         };
 
         match self.config.save() {
-            Ok(_) => self.status_message = "Settings saved.".into(),
-            Err(e) => self.status_message = format!("Save failed: {}", e),
+            Ok(_) => {
+                self.status_message = String::new();
+                self.save_ok = true;
+                self.tab_errors = [false; 3];
+
+                // Validate registry connection
+                if let Some(url) = self.config.registry_urls.first() {
+                    if !url.is_empty() {
+                        if reqwest_test(url).is_err() {
+                            self.tab_errors[0] = true;
+                            self.save_ok = false;
+                        }
+                    }
+                }
+
+                // Validate SSH connection
+                if !self.config.ssh_host.is_empty() {
+                    if crate::ssh::test_connection(&self.config).is_err() {
+                        self.tab_errors[1] = true;
+                        self.save_ok = false;
+                    }
+                }
+
+                // Check GitHub login
+                if self.config.github_token.is_none() {
+                    self.tab_errors[2] = true;
+                    self.save_ok = false;
+                }
+            }
+            Err(e) => {
+                self.status_message = format!("Save failed: {}", e);
+                self.save_ok = false;
+            }
         }
     }
 }
@@ -152,9 +187,28 @@ impl eframe::App for AutoPipeApp {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.active_tab, Tab::Setup, "Setup");
-                ui.selectable_value(&mut self.active_tab, Tab::Connection, "Connection");
-                ui.selectable_value(&mut self.active_tab, Tab::Ssh, "SSH");
-                ui.selectable_value(&mut self.active_tab, Tab::GitHub, "GitHub");
+
+                let conn_label = if self.tab_errors[0] {
+                    egui::RichText::new("Connection ●").color(egui::Color32::RED)
+                } else {
+                    egui::RichText::new("Connection")
+                };
+                ui.selectable_value(&mut self.active_tab, Tab::Connection, conn_label);
+
+                let ssh_label = if self.tab_errors[1] {
+                    egui::RichText::new("SSH ●").color(egui::Color32::RED)
+                } else {
+                    egui::RichText::new("SSH")
+                };
+                ui.selectable_value(&mut self.active_tab, Tab::Ssh, ssh_label);
+
+                let gh_label = if self.tab_errors[2] {
+                    egui::RichText::new("GitHub ●").color(egui::Color32::RED)
+                } else {
+                    egui::RichText::new("GitHub")
+                };
+                ui.selectable_value(&mut self.active_tab, Tab::GitHub, gh_label);
+
                 ui.selectable_value(&mut self.active_tab, Tab::Plugins, "Plugins");
                 ui.selectable_value(&mut self.active_tab, Tab::Status, "Status");
             });
@@ -257,6 +311,9 @@ impl eframe::App for AutoPipeApp {
                 }
                 if ui.button("Register & Minimize to Tray").clicked() {
                     self.save_config();
+                    if !self.save_ok {
+                        return;
+                    }
                     let config_path = AppConfig::config_path();
                     let results = claude_config::register_all(
                         &config_path.to_string_lossy(),
@@ -281,6 +338,9 @@ impl eframe::App for AutoPipeApp {
                     if any_err && ok_names.is_empty() {
                         self.status_message = "Failed to register MCP in any client.".into();
                     }
+                }
+                if self.save_ok && self.status_message.is_empty() {
+                    ui.colored_label(egui::Color32::GREEN, "✓");
                 }
                 if !self.status_message.is_empty() {
                     ui.label(&self.status_message);
@@ -378,16 +438,12 @@ impl AutoPipeApp {
         ui.add_space(10.0);
 
         let mut remove_idx: Option<usize> = None;
-        let mut test_idx: Option<usize> = None;
 
         for i in 0..self.config.registry_urls.len() {
             ui.horizontal(|ui| {
                 ui.label(format!("{}.", i + 1));
                 ui.add(egui::TextEdit::singleline(&mut self.config.registry_urls[i])
                     .desired_width(350.0));
-                if ui.button("Test").clicked() {
-                    test_idx = Some(i);
-                }
                 if self.config.registry_urls.len() > 1 {
                     if ui.button("Remove").clicked() {
                         remove_idx = Some(i);
@@ -398,14 +454,6 @@ impl AutoPipeApp {
 
         if let Some(idx) = remove_idx {
             self.config.registry_urls.remove(idx);
-        }
-
-        if let Some(idx) = test_idx {
-            let url = self.config.registry_urls[idx].clone();
-            match reqwest_test(&url) {
-                Ok(_) => self.status_message = String::new(),
-                Err(e) => self.status_message = format!("Connection {} failed: {}", idx + 1, e),
-            };
         }
 
         ui.add_space(5.0);
@@ -470,13 +518,6 @@ impl AutoPipeApp {
             ui.text_edit_singleline(&mut self.config.repo_path);
         });
 
-        if ui.button("Test SSH Connection").clicked() {
-            self.save_config();
-            match crate::ssh::test_connection(&self.config) {
-                Ok(_) => self.status_message = String::new(),
-                Err(e) => self.status_message = format!("SSH Failed: {}", e),
-            }
-        }
     }
 
     fn draw_plugins_tab(&mut self, ui: &mut egui::Ui) {
