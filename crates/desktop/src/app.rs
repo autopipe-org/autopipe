@@ -79,6 +79,7 @@ pub struct AutoPipeApp {
     plugin_confirm: Option<RegistryPlugin>,
     plugin_is_update: bool,
     plugin_status: String,
+    plugin_card_heights: std::collections::HashMap<usize, f32>,
 }
 
 /// Info about an installed plugin, read from manifest.json.
@@ -147,6 +148,7 @@ impl AutoPipeApp {
             plugin_confirm: None,
             plugin_is_update: false,
             plugin_status: String::new(),
+            plugin_card_heights: std::collections::HashMap::new(),
         }
     }
 
@@ -736,16 +738,29 @@ impl AutoPipeApp {
             let inner_width = card_width - 22.0; // minus Frame margin(10*2) + stroke(1*2)
 
             let registry_len = self.plugin_registry.len();
+            let row_spacing = 4.0_f32;
             let mut idx = 0;
             while idx < registry_len {
-                ui.horizontal(|ui| {
+                // Compute row height from cached heights of previous frame
+                let mut row_height = 0.0_f32;
+                for col in 0..col_count {
+                    let pidx = idx + col;
+                    if pidx < registry_len {
+                        if let Some(&h) = self.plugin_card_heights.get(&pidx) {
+                            row_height = row_height.max(h);
+                        }
+                    }
+                }
+
+                ui.horizontal_top(|ui| {
+                    ui.spacing_mut().item_spacing.x = spacing;
                     for col in 0..col_count {
                         let pidx = idx + col;
                         if pidx >= registry_len { break; }
                         let plugin = &self.plugin_registry[pidx];
 
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(card_width, 0.0),
+                        let card_resp = ui.allocate_ui_with_layout(
+                            egui::vec2(card_width, if row_height > 0.0 { row_height } else { 0.0 }),
                             egui::Layout::top_down(egui::Align::LEFT),
                             |ui| {
                             egui::Frame::none()
@@ -754,6 +769,9 @@ impl AutoPipeApp {
                                 .corner_radius(8.0)
                                 .show(ui, |ui| {
                                     ui.set_width(inner_width);
+                                    if row_height > 0.0 {
+                                        ui.set_min_height(row_height - 22.0); // minus frame margin + stroke
+                                    }
 
                                     let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
                                     let installed_ver = installed_map.get(&plugin.name);
@@ -820,9 +838,11 @@ impl AutoPipeApp {
                                     }
                                 });
                         });
+                        // Cache this card's actual height for next frame
+                        self.plugin_card_heights.insert(pidx, card_resp.response.rect.height());
                     }
                 });
-                ui.add_space(spacing);
+                ui.add_space(row_spacing);
                 idx += col_count;
             }
 
