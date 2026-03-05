@@ -27,6 +27,7 @@ export interface Plugin {
 	tags: string[];
 	github_url: string;
 	metadata_json: unknown;
+	readme: string;
 	author: string;
 	version: string;
 	verified: boolean;
@@ -62,6 +63,7 @@ function rowToPlugin(r: typeof userPlugins.$inferSelect): Plugin {
 		tags: r.tags ?? [],
 		github_url: r.githubUrl,
 		metadata_json: r.metadataJson,
+		readme: r.readme ?? '',
 		author: r.author ?? '',
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,

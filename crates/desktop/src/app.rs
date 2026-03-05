@@ -715,8 +715,9 @@ impl AutoPipeApp {
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
 
-                                // Plugin initial (icon placeholder)
+                                // Header row: icon + name + Install button (right-aligned)
                                 let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                let already = installed_names.contains(&plugin.name);
                                 ui.horizontal(|ui| {
                                     egui::Frame::none()
                                         .inner_margin(egui::Margin::same(6))
@@ -732,6 +733,13 @@ impl AutoPipeApp {
                                                 .size(11.0)
                                                 .color(egui::Color32::GRAY),
                                         );
+                                    });
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if already {
+                                            ui.colored_label(egui::Color32::GREEN, "Installed");
+                                        } else if ui.button("Install").clicked() {
+                                            install_plugin = Some(plugin.clone());
+                                        }
                                     });
                                 });
 
@@ -761,14 +769,6 @@ impl AutoPipeApp {
                                                 });
                                         }
                                     });
-                                }
-
-                                ui.add_space(6.0);
-                                let already = installed_names.contains(&plugin.name);
-                                if already {
-                                    ui.colored_label(egui::Color32::GREEN, "✓ Installed");
-                                } else if ui.button("Install").clicked() {
-                                    install_plugin = Some(plugin.clone());
                                 }
                             });
                     }

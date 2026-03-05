@@ -45,6 +45,7 @@ export const userPlugins = pgTable(
 		tags: text('tags').array(),
 		githubUrl: varchar('github_url', { length: 500 }).notNull(),
 		metadataJson: jsonb('metadata_json').notNull(),
+		readme: text('readme'),
 		author: varchar('author', { length: 255 }),
 		version: varchar('version', { length: 50 }).default('1.0.0'),
 		verified: boolean('verified').default(false),

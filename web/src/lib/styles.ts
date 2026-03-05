@@ -150,8 +150,24 @@ main { padding: 32px 48px; }
 .plugin-card-exts { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
 .plugin-ext-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #f0f0f0; color: #555; font-family: 'SF Mono', 'Consolas', monospace; }
 .plugin-card-footer { display: flex; flex-wrap: wrap; gap: 6px; }
+.plugin-card-author { font-size: 12px; color: #999; }
 .guide-link { display: inline-block; margin-top: 8px; font-size: 13px; color: #0366d6; text-decoration: none; font-weight: 500; }
 .guide-link:hover { text-decoration: underline; }
+
+/* README section */
+.readme-section { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 24px 28px; margin-top: 16px; }
+.readme-content { font-size: 14px; line-height: 1.7; color: #333; }
+.readme-content h1 { font-size: 1.4em; font-weight: 700; margin: 20px 0 10px; padding-bottom: 6px; border-bottom: 1px solid #eee; }
+.readme-content h2 { font-size: 1.2em; font-weight: 600; margin: 18px 0 8px; }
+.readme-content h3 { font-size: 1.05em; font-weight: 600; margin: 14px 0 6px; }
+.readme-content p { margin: 8px 0; }
+.readme-content code { font-family: 'SF Mono','Consolas',monospace; font-size: 0.9em; background: #f5f5f5; padding: 2px 6px; border-radius: 4px; }
+.readme-content pre { background: #f5f5f5; padding: 14px 18px; border-radius: 8px; overflow-x: auto; margin: 12px 0; }
+.readme-content pre code { background: none; padding: 0; font-size: 13px; }
+.readme-content ul, .readme-content ol { padding-left: 24px; margin: 8px 0; }
+.readme-content li { margin: 4px 0; }
+.readme-content a { color: #0366d6; }
+.readme-empty { color: #999; font-size: 14px; }
 
 /* General */
 a { color: #111; }

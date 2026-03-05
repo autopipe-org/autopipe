@@ -13,8 +13,7 @@
 			(p) =>
 				p.name.toLowerCase().includes(q) ||
 				p.description.toLowerCase().includes(q) ||
-				p.category.toLowerCase().includes(q) ||
-				p.tags.some((t) => t.toLowerCase().includes(q))
+				(p.extensions || []).some((e) => e.toLowerCase().includes(q))
 		);
 	});
 
@@ -81,12 +80,7 @@
 						</div>
 					{/if}
 					<div class="plugin-card-footer">
-						{#if p.category}
-							<span class="tag tool">{p.category}</span>
-						{/if}
-						{#each p.tags.slice(0, 2) as tag}
-							<span class="tag">{tag}</span>
-						{/each}
+						<span class="plugin-card-author">{p.author || 'unknown'}</span>
 					</div>
 				</a>
 			{:else}

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { marked } from 'marked';
+
 	let { data } = $props();
 	const p = data.plugin;
 
@@ -8,9 +10,7 @@
 		showAll ? data.versionChain : data.versionChain.slice(0, 3)
 	);
 
-	const metadataStr = typeof p.metadata_json === 'string'
-		? p.metadata_json
-		: JSON.stringify(p.metadata_json, null, 2);
+	const readmeHtml = p.readme ? marked(p.readme) : '';
 </script>
 
 <svelte:head>
@@ -39,32 +39,24 @@
 					<span class="label">AUTHOR</span>
 					<span class="value">{p.author || 'unknown'}</span>
 				</div>
-				<div class="detail-info-item">
-					<span class="label">CATEGORY</span>
-					<span class="value">{p.category || '—'}</span>
-				</div>
+				{#if p.extensions && p.extensions.length > 0}
+					<div class="detail-info-item">
+						<span class="label">EXTENSIONS</span>
+						<span class="value">{p.extensions.map(e => '.' + e).join(', ')}</span>
+					</div>
+				{/if}
 			</div>
-			<div class="detail-tags">
-				<div class="tag-row">
-					<span class="label">TAGS</span>
-					<div class="tag-list">
-						{#each p.tags as tag}
-							<span class="tag">{tag}</span>
-						{/each}
-						{#if p.tags.length === 0}<span class="tag-empty">—</span>{/if}
+			{#if readmeHtml}
+				<div class="readme-section">
+					<div class="readme-content">
+						{@html readmeHtml}
 					</div>
 				</div>
-			</div>
-			<div class="files-section">
-				<div class="tab-bar">
-					<button class="tab-btn active">metadata.json</button>
+			{:else}
+				<div class="readme-section">
+					<p class="readme-empty">No README available.</p>
 				</div>
-				<div class="tab-content">
-					<div class="tab-panel active">
-						<pre><code>{metadataStr}</code></pre>
-					</div>
-				</div>
-			</div>
+			{/if}
 		</div>
 		<div class="detail-sidebar">
 			<div class="sidebar-title">VERSIONS</div>

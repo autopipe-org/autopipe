@@ -23,12 +23,17 @@ export async function init() {
       type: 'input',
       name: 'extensions',
       message: 'Supported file extensions (comma-separated):',
-      validate: (v) => (v.trim() ? true : 'At least one extension is required'),
-      filter: (v) =>
-        v
+      validate: (v) => {
+        if (Array.isArray(v)) return v.length > 0 ? true : 'At least one extension is required';
+        return typeof v === 'string' && v.trim() ? true : 'At least one extension is required';
+      },
+      filter: (v) => {
+        const raw = typeof v === 'string' ? v : v.join(',');
+        return raw
           .split(',')
           .map((s) => s.trim().replace(/^\./, ''))
-          .filter(Boolean),
+          .filter(Boolean);
+      },
     },
   ]);
 

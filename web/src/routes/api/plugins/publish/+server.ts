@@ -67,7 +67,30 @@ export const POST: RequestHandler = async ({ request }) => {
 			);
 		}
 
-		// 3. Validate required fields
+		// 3. Fetch README.md (optional)
+		let readme: string | null = null;
+		for (const readmeFile of ['README.md', 'readme.md', 'README.MD']) {
+			const readmePath = subpath ? `${subpath}/${readmeFile}` : readmeFile;
+			const readmeResp = await fetch(
+				`https://api.github.com/repos/${owner}/${repo}/contents/${readmePath}`,
+				{
+					headers: {
+						Accept: 'application/vnd.github.raw',
+						'User-Agent': 'autopipe-registry'
+					}
+				}
+			);
+			if (readmeResp.ok) {
+				try {
+					readme = await readmeResp.text();
+					break;
+				} catch {
+					continue;
+				}
+			}
+		}
+
+		// 4. Validate required fields
 		if (!metadata.name) {
 			return json({ error: 'manifest.json must contain a "name" field' }, { status: 400 });
 		}
@@ -117,6 +140,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
 				githubUrl: github_url,
 				metadataJson: metadata,
+				readme: readme || '',
 				author,
 				version: (metadata.version as string) || '1.0.0',
 				verified: false,
