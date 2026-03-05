@@ -727,44 +727,44 @@ impl AutoPipeApp {
             let mut install_plugin: Option<(RegistryPlugin, bool)> = None; // (plugin, is_update)
             let mut delete_plugin_name: Option<String> = None;
 
-            // Card grid layout: 2 columns
+            // Responsive card grid: 2 columns if wide enough, 1 column if narrow
             let available = ui.available_width();
-            let spacing = 8.0;
-            let card_width = (available - spacing) / 2.0;
+            let col_count = if available >= 500.0 { 2 } else { 1 };
+            let card_width = (available - (col_count as f32 - 1.0) * ui.spacing().item_spacing.x) / col_count as f32;
 
-            let chunks: Vec<&[RegistryPlugin]> = self.plugin_registry.chunks(2).collect();
-            for chunk in &chunks {
-                ui.horizontal(|ui| {
-                    for plugin in chunk.iter() {
+            egui::Grid::new("plugin_grid")
+                .num_columns(col_count)
+                .spacing([8.0, 8.0])
+                .show(ui, |ui| {
+                    for (idx, plugin) in self.plugin_registry.iter().enumerate() {
                         egui::Frame::none()
-                            .inner_margin(egui::Margin::same(12))
+                            .inner_margin(egui::Margin::same(10))
                             .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
                             .corner_radius(8.0)
                             .show(ui, |ui| {
-                                ui.set_width(card_width - 28.0); // account for margin + stroke
+                                ui.set_width(card_width - 24.0);
 
-                                // Header row: icon + name + Install button
                                 let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
                                 let installed_ver = installed_map.get(&plugin.name);
                                 let needs_update = installed_ver
                                     .map(|iv| is_version_outdated(iv, &plugin.version))
                                     .unwrap_or(false);
+
+                                // Header: icon + name + buttons
                                 ui.horizontal(|ui| {
                                     egui::Frame::none()
-                                        .inner_margin(egui::Margin::same(6))
+                                        .inner_margin(egui::Margin::same(4))
                                         .fill(egui::Color32::from_gray(240))
-                                        .corner_radius(6.0)
+                                        .corner_radius(4.0)
                                         .show(ui, |ui| {
                                             ui.strong(&initial);
                                         });
-                                    ui.vertical(|ui| {
-                                        ui.strong(&plugin.name);
-                                        ui.label(
-                                            egui::RichText::new(format!("v{} · {}", plugin.version, plugin.author))
-                                                .size(11.0)
-                                                .color(egui::Color32::GRAY),
-                                        );
-                                    });
+                                    ui.strong(&plugin.name);
+                                    ui.label(
+                                        egui::RichText::new(format!("v{}", plugin.version))
+                                            .size(11.0)
+                                            .color(egui::Color32::GRAY),
+                                    );
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if installed_ver.is_some() {
                                             if ui.button("Delete").clicked() {
@@ -782,26 +782,24 @@ impl AutoPipeApp {
                                 });
 
                                 if !plugin.description.is_empty() {
-                                    ui.add_space(4.0);
                                     ui.label(
                                         egui::RichText::new(&plugin.description)
-                                            .size(12.0)
+                                            .size(11.0)
                                             .color(egui::Color32::from_gray(100)),
                                     );
                                 }
 
                                 if !plugin.extensions.is_empty() {
-                                    ui.add_space(4.0);
                                     ui.horizontal_wrapped(|ui| {
                                         for ext in &plugin.extensions {
                                             egui::Frame::none()
-                                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                                .inner_margin(egui::Margin::symmetric(5, 1))
                                                 .fill(egui::Color32::from_gray(240))
-                                                .corner_radius(4.0)
+                                                .corner_radius(3.0)
                                                 .show(ui, |ui| {
                                                     ui.label(
                                                         egui::RichText::new(format!(".{}", ext))
-                                                            .size(11.0)
+                                                            .size(10.0)
                                                             .color(egui::Color32::from_gray(80)),
                                                     );
                                                 });
@@ -809,10 +807,13 @@ impl AutoPipeApp {
                                     });
                                 }
                             });
+
+                        // End row after col_count items
+                        if (idx + 1) % col_count == 0 {
+                            ui.end_row();
+                        }
                     }
                 });
-                ui.add_space(6.0);
-            }
 
             if let Some((p, is_update)) = install_plugin {
                 self.plugin_confirm = Some(p);
