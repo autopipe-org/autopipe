@@ -1528,29 +1528,33 @@ impl AutoPipeServer {
             }
             exts
         };
-        // Check if any file needs a plugin that isn't installed
-        let missing_plugins: Vec<String> = file_paths.iter().filter_map(|p| {
-            let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-            if ext.is_empty() || installed_plugin_exts.contains(&ext) {
-                None
-            } else {
-                Some(ext)
+        // Filter out files without a matching viewer plugin (e.g. .bai, .tbi index files)
+        let has_viewer = |name: &str| -> bool {
+            let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            ext.is_empty() || installed_plugin_exts.contains(&ext)
+        };
+        {
+            let mut skipped: Vec<String> = file_paths.iter().filter_map(|p| {
+                if has_viewer(p) { None } else {
+                    Some(p.rsplit('.').next().unwrap_or("").to_lowercase())
+                }
+            }).collect();
+            skipped.sort();
+            skipped.dedup();
+            if !skipped.is_empty() {
+                let ext_list = skipped.iter().map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
+                errors.push(format!("Skipped files with no viewer plugin: {}", ext_list));
             }
-        }).collect();
-        if !missing_plugins.is_empty() {
-            let unique: Vec<String> = {
-                let mut v = missing_plugins;
-                v.sort();
-                v.dedup();
-                v
+        }
+        files.retain(|(name, _, _)| has_viewer(name));
+        remote_files.retain(|(name, _, _, _)| has_viewer(name));
+        if files.is_empty() && remote_files.is_empty() {
+            let msg = if errors.is_empty() {
+                format!("No viewable files found in '{}'", params.path)
+            } else {
+                format!("No viewable files found:\n{}", errors.join("\n"))
             };
-            let ext_list = unique.iter().map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "No viewer plugin installed for {} files.\n\
-                 The user must manually install the plugin from the Plugins tab in the AutoPipe app.\n\
-                 DO NOT attempt to install plugins automatically — just inform the user.",
-                ext_list
-            ))]));
+            return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
         // Detect genomics files
