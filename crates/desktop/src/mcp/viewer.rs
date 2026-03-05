@@ -254,13 +254,6 @@ pub async fn show_files(
     reference: Option<String>,
     ssh_config: Option<AppConfig>,
 ) -> Result<String, String> {
-    // Check if server is already running (to decide whether to open a new tab)
-    let already_running = {
-        let lock = get_viewer_lock().await;
-        let handle = lock.lock().await;
-        handle.is_some()
-    };
-
     // Update file store
     let store = get_file_store().await;
     {
@@ -309,11 +302,7 @@ pub async fn show_files(
 
     let url = format!("http://127.0.0.1:{}", port);
 
-    // Only open a new browser tab on first call; subsequent calls
-    // update files in-place and the existing tab auto-refreshes on focus.
-    if !already_running {
-        open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))?;
-    }
+    open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))?;
 
     Ok(url)
 }
@@ -798,6 +787,7 @@ var FILES = [];
 var REFERENCE = null;
 var currentFile = null;
 var loadedPlugins = {{}};
+var pluginInstances = {{}};
 
 // File icon mapping
 function getFileIcon(name) {{
@@ -912,20 +902,29 @@ async function renderPluginViewer(name, plugin, actions, content) {{
       loadedPlugins[plugin.name + '_css'] = true;
     }}
 
-    // Load plugin JS
-    await new Promise(function(resolve, reject) {{
-      if (loadedPlugins[plugin.name + '_js']) {{ resolve(); return; }}
-      var s = document.createElement('script');
-      s.src = '/plugin/' + encodeURIComponent(plugin.name) + '/' + plugin.entry;
-      s.onload = function() {{ loadedPlugins[plugin.name + '_js'] = true; resolve(); }};
-      s.onerror = function() {{ reject(new Error('Failed to load plugin JS')); }};
-      document.head.appendChild(s);
-    }});
+    // Load plugin JS and capture instance
+    if (!loadedPlugins[plugin.name + '_js']) {{
+      await new Promise(function(resolve, reject) {{
+        window.AutoPipePlugin = null;
+        var s = document.createElement('script');
+        s.src = '/plugin/' + encodeURIComponent(plugin.name) + '/' + plugin.entry;
+        s.onload = function() {{
+          loadedPlugins[plugin.name + '_js'] = true;
+          if (window.AutoPipePlugin) {{
+            pluginInstances[plugin.name] = window.AutoPipePlugin;
+          }}
+          resolve();
+        }};
+        s.onerror = function() {{ reject(new Error('Failed to load plugin JS')); }};
+        document.head.appendChild(s);
+      }});
+    }}
 
+    var inst = pluginInstances[plugin.name];
     var container = document.getElementById('pluginContainer');
-    if (container && window.AutoPipePlugin && window.AutoPipePlugin.render) {{
+    if (container && inst && inst.render) {{
       container.innerHTML = '';
-      window.AutoPipePlugin.render(container, '/file/' + encodeURIComponent(name), name);
+      inst.render(container, '/file/' + encodeURIComponent(name), name);
     }} else {{
       throw new Error('Plugin does not export AutoPipePlugin.render()');
     }}
