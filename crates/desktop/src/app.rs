@@ -87,9 +87,37 @@ struct PluginInfo {
     extensions: Vec<String>,
 }
 
+/// Default plugins embedded at compile time.
+/// Each entry: (folder_name, manifest.json content, index.js content)
+const DEFAULT_PLUGINS: &[(&str, &str, &str)] = &[
+    (
+        "vcf-viewer",
+        include_str!("default_plugins/vcf-viewer/manifest.json"),
+        include_str!("default_plugins/vcf-viewer/index.js"),
+    ),
+];
+
+/// Extract default plugins to the plugins directory if they don't already exist.
+fn install_default_plugins(plugins_dir: &str) {
+    for &(name, manifest, index_js) in DEFAULT_PLUGINS {
+        let dest = std::path::PathBuf::from(plugins_dir).join(name);
+        if dest.exists() {
+            continue;
+        }
+        if std::fs::create_dir_all(&dest).is_err() {
+            continue;
+        }
+        let _ = std::fs::write(dest.join("manifest.json"), manifest);
+        let _ = std::fs::write(dest.join("index.js"), index_js);
+    }
+}
+
 impl AutoPipeApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config = AppConfig::load();
+
+        // Auto-install default plugins on first launch
+        install_default_plugins(&config.full_plugins_dir());
         let (ssh_auth_type, ssh_key_path_input, ssh_password_input) = match &config.ssh_auth {
             SshAuth::Password { password } => (0, String::new(), password.clone()),
             SshAuth::Key { key_path } => (1, key_path.clone(), String::new()),
@@ -700,6 +728,7 @@ impl AutoPipeApp {
             let installed_names: Vec<String> =
                 self.installed_plugins.iter().map(|p| p.name.clone()).collect();
             let mut install_plugin: Option<RegistryPlugin> = None;
+            let mut delete_plugin_name: Option<String> = None;
 
             // Card grid layout: 2 columns
             let col_count = 2;
@@ -736,7 +765,9 @@ impl AutoPipeApp {
                                     });
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         if already {
-                                            ui.colored_label(egui::Color32::GREEN, "Installed");
+                                            if ui.button("Delete").clicked() {
+                                                delete_plugin_name = Some(plugin.name.clone());
+                                            }
                                         } else if ui.button("Install").clicked() {
                                             install_plugin = Some(plugin.clone());
                                         }
@@ -778,6 +809,16 @@ impl AutoPipeApp {
 
             if let Some(p) = install_plugin {
                 self.plugin_confirm = Some(p);
+            }
+
+            // Handle delete
+            if let Some(name) = delete_plugin_name {
+                let dest = std::path::PathBuf::from(self.config.full_plugins_dir()).join(&name);
+                if dest.exists() {
+                    let _ = std::fs::remove_dir_all(&dest);
+                }
+                self.installed_plugins = scan_installed_plugins(&self.config.full_plugins_dir());
+                self.plugin_status = format!("Deleted \"{}\".", name);
             }
 
         });
@@ -1197,31 +1238,41 @@ async fn install_plugin_from_github(
         }
     };
 
-    // Download manifest.json
-    let manifest_url = format!("{}/manifest.json", raw_base);
-    let manifest_text = match client
-        .get(&manifest_url)
-        .header("User-Agent", "autopipe-desktop")
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => match r.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                let _ = tx.send(PluginMsg::Error(format!("Failed to read manifest: {}", e)));
+    // Download manifest.json — if no explicit branch in URL, try main then master
+    let mut raw_base = raw_base;
+    let manifest_text = {
+        let branches: Vec<String> = if github_url.contains("/tree/") {
+            vec![raw_base.clone()]
+        } else {
+            let owner_repo = github_url
+                .trim()
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .trim_start_matches("https://github.com/");
+            vec![
+                format!("https://raw.githubusercontent.com/{}/main", owner_repo),
+                format!("https://raw.githubusercontent.com/{}/master", owner_repo),
+            ]
+        };
+        let mut result: Option<String> = None;
+        for base in &branches {
+            let url = format!("{}/manifest.json", base);
+            if let Ok(r) = client.get(&url).header("User-Agent", "autopipe-desktop").send().await {
+                if r.status().is_success() {
+                    if let Ok(t) = r.text().await {
+                        raw_base = base.clone();
+                        result = Some(t);
+                        break;
+                    }
+                }
+            }
+        }
+        match result {
+            Some(t) => t,
+            None => {
+                let _ = tx.send(PluginMsg::Error("manifest.json not found".to_string()));
                 return;
             }
-        },
-        Ok(r) => {
-            let _ = tx.send(PluginMsg::Error(format!(
-                "manifest.json not found ({})",
-                r.status()
-            )));
-            return;
-        }
-        Err(e) => {
-            let _ = tx.send(PluginMsg::Error(format!("Download failed: {}", e)));
-            return;
         }
     };
 

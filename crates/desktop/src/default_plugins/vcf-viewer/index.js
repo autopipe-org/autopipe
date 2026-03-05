@@ -1,0 +1,157 @@
+// AutoPipe Plugin: vcf-viewer
+// Variant Call Format viewer with colored bases, metadata, and server-side pagination
+// Supported extensions: vcf
+
+(function () {
+  var PAGE_SIZE = 100;
+  var _container = null;
+  var _metaCache = {};
+
+  // ── Inject scoped styles ──
+  var styleId = '__vcf_viewer_style__';
+  if (!document.getElementById(styleId)) {
+    var style = document.createElement('style');
+    style.id = styleId;
+    style.textContent =
+      '.vcf-viewer { overflow: auto; }' +
+      '.vcf-viewer table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: auto; }' +
+      '.vcf-viewer th { background: #f5f5f5; padding: 8px 12px; text-align: left; font-weight: 600; border-bottom: 2px solid #e5e5e5; position: sticky; top: 0; white-space: nowrap; }' +
+      '.vcf-viewer td { padding: 6px 12px; border-bottom: 1px solid #f0f0f0; font-family: "SF Mono","Fira Code","Consolas",monospace; font-size: 12px; white-space: nowrap; }' +
+      '.vcf-viewer tr:hover td { background: #f0f7ff; }' +
+      '.vcf-viewer .vcf-meta { font-size: 12px; color: #666; margin-bottom: 12px; }' +
+      '.vcf-viewer .vcf-seq { font-family: "SF Mono",monospace; font-size: 11px; letter-spacing: 1px; }' +
+      '.vcf-viewer .base-A { color: #2ecc71; font-weight: 600; }' +
+      '.vcf-viewer .base-T { color: #e74c3c; font-weight: 600; }' +
+      '.vcf-viewer .base-C { color: #3498db; font-weight: 600; }' +
+      '.vcf-viewer .base-G { color: #f39c12; font-weight: 600; }' +
+      '.vcf-viewer .vcf-pagination { display: flex; align-items: center; gap: 8px; padding: 10px 0; justify-content: center; font-size: 13px; color: #666; }' +
+      '.vcf-viewer .vcf-pagination button { padding: 4px 12px; border: 1px solid #ddd; border-radius: 4px; background: #f8f8f8; cursor: pointer; font-size: 12px; }' +
+      '.vcf-viewer .vcf-pagination button:hover { background: #eee; }' +
+      '.vcf-viewer .vcf-pagination button:disabled { color: #ccc; cursor: not-allowed; background: #fafafa; }';
+    document.head.appendChild(style);
+  }
+
+  function colorBases(seq) {
+    return seq.replace(/[ATCGN]/gi, function (b) {
+      var u = b.toUpperCase();
+      if (u === 'A') return '<span class="base-A">' + b + '</span>';
+      if (u === 'T') return '<span class="base-T">' + b + '</span>';
+      if (u === 'C') return '<span class="base-C">' + b + '</span>';
+      if (u === 'G') return '<span class="base-G">' + b + '</span>';
+      return b;
+    });
+  }
+
+  function escapeHtml(str) {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  async function fetchPage(name, page) {
+    var resp = await fetch(
+      '/data/' + encodeURIComponent(name) + '?page=' + page + '&page_size=' + PAGE_SIZE
+    );
+    return await resp.json();
+  }
+
+  function renderTable(name, headers, rows, total, page) {
+    var totalPages = Math.ceil(total / PAGE_SIZE) || 1;
+    var html = '<table><tr>';
+    headers.forEach(function (h) {
+      html += '<th>' + escapeHtml(h) + '</th>';
+    });
+    html += '</tr>';
+    rows.forEach(function (rec) {
+      html += '<tr>';
+      rec.forEach(function (val, i) {
+        if (headers[i] === 'REF' || headers[i] === 'ALT') {
+          html += '<td class="vcf-seq">' + colorBases(escapeHtml(val)) + '</td>';
+        } else {
+          html += '<td>' + escapeHtml(val) + '</td>';
+        }
+      });
+      html += '</tr>';
+    });
+    html += '</table>';
+
+    if (totalPages > 1) {
+      var safeName = name.replace(/'/g, "\\'");
+      html += '<div class="vcf-pagination">';
+      html +=
+        '<button onclick="window._vcfPluginPaginate(\'' +
+        safeName + "'," + (page - 1) + ')"' +
+        (page <= 0 ? ' disabled' : '') +
+        '>&laquo; Prev</button>';
+      html +=
+        '<span>Page ' + (page + 1) + ' / ' + totalPages +
+        ' (' + total.toLocaleString() + ' rows)</span>';
+      html +=
+        '<button onclick="window._vcfPluginPaginate(\'' +
+        safeName + "'," + (page + 1) + ')"' +
+        (page >= totalPages - 1 ? ' disabled' : '') +
+        '>Next &raquo;</button>';
+      html += '</div>';
+    }
+    return html;
+  }
+
+  async function renderPage(name, page) {
+    if (!_container) return;
+    if (page > 0) {
+      _container.innerHTML = '<div class="vcf-viewer"><p class="vcf-meta">Loading page...</p></div>';
+    }
+
+    var data = await fetchPage(name, page);
+    if (data.error) {
+      _container.innerHTML =
+        '<div class="vcf-viewer"><p style="color:red">Error: ' + escapeHtml(data.error) + '</p></div>';
+      return;
+    }
+
+    // Cache metadata from first page
+    if (page === 0 && data.meta) {
+      _metaCache[name] = { meta: data.meta, col_headers: data.col_headers || [] };
+    }
+    var cached = _metaCache[name] || {};
+    var hdrs = cached.col_headers || [];
+
+    var html = '<div class="vcf-viewer">';
+    html += '<p class="vcf-meta">' + (data.total || 0).toLocaleString() + ' variant(s)</p>';
+
+    // Collapsible metadata (## lines)
+    if (cached.meta) {
+      var metaLines = cached.meta.split('\n');
+      html +=
+        '<details style="margin-bottom:12px">' +
+        '<summary style="cursor:pointer;font-size:13px;color:#666">Show metadata (' +
+        metaLines.length + ' lines)</summary>' +
+        '<pre style="font-size:11px;color:#888;margin-top:4px;max-height:200px;overflow:auto">' +
+        escapeHtml(cached.meta) + '</pre></details>';
+    }
+
+    html += renderTable(name, hdrs, data.rows || [], data.total || 0, page);
+    html += '</div>';
+    _container.innerHTML = html;
+  }
+
+  // Global pagination handler
+  window._vcfPluginPaginate = function (name, page) {
+    if (page < 0) return;
+    renderPage(name, page);
+  };
+
+  window.AutoPipePlugin = {
+    render: function (container, fileUrl, filename) {
+      _container = container;
+      container.innerHTML = '<div class="vcf-viewer"><p class="vcf-meta">Loading VCF...</p></div>';
+      renderPage(filename, 0).catch(function (e) {
+        container.innerHTML =
+          '<div class="vcf-viewer"><p style="color:red">Error: ' + e.message + '</p></div>';
+      });
+    },
+    destroy: function () {
+      _container = null;
+      _metaCache = {};
+      delete window._vcfPluginPaginate;
+    },
+  };
+})();

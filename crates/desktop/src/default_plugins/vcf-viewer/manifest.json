@@ -1,0 +1,9 @@
+{
+  "name": "vcf-viewer",
+  "version": "1.0.0",
+  "description": "Variant Call Format viewer with colored bases and metadata",
+  "extensions": [
+    "vcf"
+  ],
+  "entry": "index.js"
+}
