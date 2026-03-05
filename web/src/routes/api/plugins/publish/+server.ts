@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db, schema } from '$lib/server/db.js';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 const { userPlugins } = schema;
 
@@ -95,24 +95,121 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'manifest.json must contain a "name" field' }, { status: 400 });
 		}
 
-		// 4. Always INSERT a new record (version tracking)
+		// 4. Determine INSERT vs UPDATE
 		let name = metadata.name as string;
 		const extensions = Array.isArray(metadata.extensions)
 			? (metadata.extensions as string[])
 			: [];
+		const newVersion = (metadata.version as string) || '1.0.0';
+
+		// 5. Create GitHub Release for version pinning
+		let releaseTag = `v${newVersion}`;
+		let releaseWarning: string | null = null;
+		try {
+			const releaseResp = await fetch(
+				`https://api.github.com/repos/${owner}/${repo}/releases`,
+				{
+					method: 'POST',
+					headers: {
+						Authorization: `Bearer ${github_token}`,
+						'Content-Type': 'application/json',
+						'User-Agent': 'autopipe-registry'
+					},
+					body: JSON.stringify({
+						tag_name: releaseTag,
+						name: releaseTag,
+						body: `${metadata.name} ${releaseTag}\n\nPublished via AutoPipe registry.`,
+						draft: false,
+						prerelease: false
+					})
+				}
+			);
+			if (!releaseResp.ok) {
+				const releaseErr = await releaseResp.json().catch(() => ({}));
+				if (releaseResp.status === 422 && JSON.stringify(releaseErr).includes('already_exists')) {
+					// Tag already exists — reuse it
+				} else {
+					releaseWarning = `GitHub release creation failed (HTTP ${releaseResp.status})`;
+					releaseTag = '';
+				}
+			}
+		} catch {
+			releaseWarning = 'GitHub release creation failed (network error)';
+			releaseTag = '';
+		}
+
+		// Build versioned github_url for DB storage
+		const baseGithubUrl = github_url.replace(/\/$/, '');
+		const versionedGithubUrl = releaseTag
+			? `${baseGithubUrl}/tree/${releaseTag}`
+			: baseGithubUrl;
 
 		// forked_from: trust the value the client sends (no auto-detection)
 		const resolvedForkedFrom: number | null =
 			typeof forked_from === 'number' ? forked_from : null;
 
-		// Name deduplication: if forked_from is NULL and same name exists, append suffix
 		if (resolvedForkedFrom === null) {
-			const existing = await db
+			// Check for existing plugin with same name AND same author → UPDATE
+			const sameAuthorMatch = await db
+				.select()
+				.from(userPlugins)
+				.where(and(eq(userPlugins.name, name), eq(userPlugins.author, author)))
+				.limit(1);
+
+			if (sameAuthorMatch.length > 0) {
+				const existing = sameAuthorMatch[0];
+				const previousVersion = existing.version ?? '1.0.0';
+				const existingHistory = Array.isArray(existing.versionHistory)
+					? (existing.versionHistory as Array<{ version: string; updated_at: string }>)
+					: [];
+
+				// Append previous version to history (with github_url for version pinning)
+				const updatedHistory = [
+					...existingHistory,
+					{
+						version: previousVersion,
+						updated_at: existing.updatedAt?.toISOString() ?? new Date().toISOString(),
+						github_url: existing.githubUrl
+					}
+				];
+
+				await db
+					.update(userPlugins)
+					.set({
+						version: newVersion,
+						description: (metadata.description as string) || '',
+						category: (metadata.category as string) || '',
+						extensions,
+						tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
+						githubUrl: versionedGithubUrl,
+						metadataJson: metadata,
+						readme: readme || '',
+						versionHistory: updatedHistory,
+						updatedAt: new Date()
+					})
+					.where(eq(userPlugins.pluginId, existing.pluginId));
+
+				return json(
+					{
+						plugin_id: existing.pluginId,
+						name,
+						author,
+						updated: true,
+						previous_version: previousVersion,
+						new_version: newVersion,
+						...(releaseWarning && { release_warning: releaseWarning })
+					},
+					{ status: 200 }
+				);
+			}
+
+			// Different author with same name → append suffix
+			const existingName = await db
 				.select({ pluginId: userPlugins.pluginId })
 				.from(userPlugins)
 				.where(eq(userPlugins.name, name))
 				.limit(1);
-			if (existing.length > 0) {
+			if (existingName.length > 0) {
 				let suffix = 2;
 				while (true) {
 					const candidate = `${metadata.name} ${suffix}`;
@@ -130,6 +227,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			}
 		}
 
+		// INSERT new plugin
 		const [row] = await db
 			.insert(userPlugins)
 			.values({
@@ -138,11 +236,11 @@ export const POST: RequestHandler = async ({ request }) => {
 				category: (metadata.category as string) || '',
 				extensions,
 				tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
-				githubUrl: github_url,
+				githubUrl: versionedGithubUrl,
 				metadataJson: metadata,
 				readme: readme || '',
 				author,
-				version: (metadata.version as string) || '1.0.0',
+				version: newVersion,
 				verified: false,
 				forkedFrom: resolvedForkedFrom
 			})
@@ -158,7 +256,12 @@ export const POST: RequestHandler = async ({ request }) => {
 				.where(eq(userPlugins.pluginId, pluginId));
 		}
 
-		return json({ plugin_id: pluginId, name, author }, { status: 200 });
+		return json({
+			plugin_id: pluginId,
+			name,
+			author,
+			...(releaseWarning && { release_warning: releaseWarning })
+		}, { status: 200 });
 	} catch (e: unknown) {
 		const message = e instanceof Error ? e.message : String(e);
 		return json({ error: message }, { status: 500 });

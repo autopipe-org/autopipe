@@ -1,4 +1,5 @@
 use eframe::egui;
+use std::collections::HashMap;
 use std::sync::mpsc;
 
 use crate::claude_config;
@@ -76,6 +77,7 @@ pub struct AutoPipeApp {
     plugin_loading: bool,
     plugin_search: String,
     plugin_confirm: Option<RegistryPlugin>,
+    plugin_is_update: bool,
     plugin_status: String,
 }
 
@@ -151,6 +153,7 @@ impl AutoPipeApp {
             plugin_loading: false,
             plugin_search: String::new(),
             plugin_confirm: None,
+            plugin_is_update: false,
             plugin_status: String::new(),
         }
     }
@@ -561,10 +564,22 @@ impl AutoPipeApp {
     }
 
     fn draw_plugins_tab(&mut self, ui: &mut egui::Ui) {
-        // Scan installed plugins on first load
+        // Scan installed plugins and auto-load registry on first load
         if !self.plugins_loaded {
             self.installed_plugins = scan_installed_plugins(&self.config.full_plugins_dir());
             self.plugins_loaded = true;
+
+            // Auto-fetch registry
+            let registry_url = self.config.registry_url.clone();
+            let (tx, rx) = mpsc::channel();
+            self.plugin_rx = Some(rx);
+            self.plugin_loading = true;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    fetch_registry_plugins(&registry_url, "", tx).await;
+                });
+            });
         }
 
         // Install confirmation dialog (modal window)
@@ -573,7 +588,10 @@ impl AutoPipeApp {
         if let Some(ref plugin) = self.plugin_confirm {
             let name = plugin.name.clone();
             let author = plugin.author.clone();
-            egui::Window::new("Install Plugin")
+            let is_update = self.plugin_is_update;
+            let title = if is_update { "Update Plugin" } else { "Install Plugin" };
+            let action_label = if is_update { "Update" } else { "Install" };
+            egui::Window::new(title)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -590,7 +608,7 @@ impl AutoPipeApp {
                     ui.label("Do you trust this plugin author?");
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Install").clicked() {
+                        if ui.button(action_label).clicked() {
                             confirm_install = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -698,21 +716,6 @@ impl AutoPipeApp {
                         });
                     });
                 }
-                if !self.plugin_registry_loaded && !self.plugin_loading {
-                    if ui.button("Load All").clicked() {
-                        let registry_url = self.config.registry_url.clone();
-                        let (tx, rx) = mpsc::channel();
-                        self.plugin_rx = Some(rx);
-                        self.plugin_loading = true;
-                        self.plugin_status = String::new();
-                        std::thread::spawn(move || {
-                            let rt = tokio::runtime::Runtime::new().unwrap();
-                            rt.block_on(async {
-                                fetch_registry_plugins(&registry_url, "", tx).await;
-                            });
-                        });
-                    }
-                }
             });
             ui.add_space(5.0);
 
@@ -725,9 +728,12 @@ impl AutoPipeApp {
             }
 
             // Collect install actions to avoid borrow issues
-            let installed_names: Vec<String> =
-                self.installed_plugins.iter().map(|p| p.name.clone()).collect();
-            let mut install_plugin: Option<RegistryPlugin> = None;
+            let installed_map: HashMap<String, String> = self
+                .installed_plugins
+                .iter()
+                .map(|p| (p.name.clone(), p.version.clone()))
+                .collect();
+            let mut install_plugin: Option<(RegistryPlugin, bool)> = None; // (plugin, is_update)
             let mut delete_plugin_name: Option<String> = None;
 
             // Card grid layout: 2 columns
@@ -746,7 +752,10 @@ impl AutoPipeApp {
 
                                 // Header row: icon + name + Install button (right-aligned)
                                 let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                                let already = installed_names.contains(&plugin.name);
+                                let installed_ver = installed_map.get(&plugin.name);
+                                let needs_update = installed_ver
+                                    .map(|iv| is_version_outdated(iv, &plugin.version))
+                                    .unwrap_or(false);
                                 ui.horizontal(|ui| {
                                     egui::Frame::none()
                                         .inner_margin(egui::Margin::same(6))
@@ -764,12 +773,17 @@ impl AutoPipeApp {
                                         );
                                     });
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if already {
+                                        if installed_ver.is_some() {
                                             if ui.button("Delete").clicked() {
                                                 delete_plugin_name = Some(plugin.name.clone());
                                             }
+                                            if needs_update {
+                                                if ui.button("Update").clicked() {
+                                                    install_plugin = Some((plugin.clone(), true));
+                                                }
+                                            }
                                         } else if ui.button("Install").clicked() {
-                                            install_plugin = Some(plugin.clone());
+                                            install_plugin = Some((plugin.clone(), false));
                                         }
                                     });
                                 });
@@ -807,8 +821,9 @@ impl AutoPipeApp {
                 ui.add_space(6.0);
             }
 
-            if let Some(p) = install_plugin {
+            if let Some((p, is_update)) = install_plugin {
                 self.plugin_confirm = Some(p);
+                self.plugin_is_update = is_update;
             }
 
             // Handle delete
@@ -1366,6 +1381,19 @@ fn parse_github_raw_url(url: &str) -> Option<String> {
             None
         }
     }
+}
+
+/// Compare semver strings: returns true if `installed` < `registry`.
+fn is_version_outdated(installed: &str, registry: &str) -> bool {
+    fn parse(v: &str) -> (u32, u32, u32) {
+        let parts: Vec<u32> = v.split('.').filter_map(|s| s.parse().ok()).collect();
+        (
+            *parts.first().unwrap_or(&0),
+            *parts.get(1).unwrap_or(&0),
+            *parts.get(2).unwrap_or(&0),
+        )
+    }
+    parse(installed) < parse(registry)
 }
 
 fn scan_installed_plugins(plugins_dir: &str) -> Vec<PluginInfo> {

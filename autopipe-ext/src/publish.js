@@ -75,7 +75,14 @@ export async function publish(options = {}) {
     throw new Error(`Publish failed: ${body.error || resp.statusText}`);
   }
 
-  console.log(chalk.green(`✓ Published ${body.name} by ${body.author}`));
+  if (body.updated) {
+    console.log(chalk.green(`✓ Updated ${body.name}: v${body.previous_version} → v${body.new_version}`));
+  } else {
+    console.log(chalk.green(`✓ Published ${body.name} by ${body.author}`));
+  }
+  if (body.release_warning) {
+    console.log(chalk.yellow(`  ⚠ ${body.release_warning}`));
+  }
   console.log(`  Registry: ${registry}/plugins/${body.plugin_id}`);
   console.log('');
 }

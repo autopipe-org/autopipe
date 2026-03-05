@@ -230,7 +230,8 @@ fn extract_absolute_path(value: &str) -> Option<String> {
 /// Supports formats like:
 ///   https://github.com/{owner}/{repo}/tree/{branch}/{path}
 ///   https://github.com/{owner}/{repo}
-fn parse_github_url(url: &str) -> Option<(String, String, String)> {
+/// Parse a GitHub URL into (owner, repo, branch_or_tag, subpath).
+fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String)> {
     let url = url.trim().trim_end_matches('/');
     let url = url.strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("http://github.com/"))?;
@@ -240,20 +241,19 @@ fn parse_github_url(url: &str) -> Option<(String, String, String)> {
     }
     let owner = parts[0].to_string();
     let repo = parts[1].to_string();
-    // Extract path from tree/{branch}/{path}
-    let path = if parts.len() >= 4 && parts[2] == "tree" {
-        // parts[3] = "main/pipeline_name" or "main/path/to/pipeline"
+    // Extract branch and path from tree/{branch}/{path}
+    if parts.len() >= 4 && parts[2] == "tree" {
         let rest = parts[3];
-        // Skip the branch name (first segment)
         if let Some(slash_pos) = rest.find('/') {
-            rest[slash_pos + 1..].to_string()
+            let branch = rest[..slash_pos].to_string();
+            let path = rest[slash_pos + 1..].to_string();
+            Some((owner, repo, Some(branch), path))
         } else {
-            String::new()
+            Some((owner, repo, Some(rest.to_string()), String::new()))
         }
     } else {
-        String::new()
-    };
-    Some((owner, repo, path))
+        Some((owner, repo, None, String::new()))
+    }
 }
 
 /// Fetch a single file from GitHub Contents API.
@@ -493,7 +493,7 @@ impl AutoPipeServer {
         };
 
         // 2. Parse GitHub URL
-        let (owner, repo, path) = match parse_github_url(&pipeline.github_url) {
+        let (owner, repo, _branch, path) = match parse_github_url(&pipeline.github_url) {
             Some(parsed) => parsed,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1815,7 +1815,7 @@ impl AutoPipeServer {
         let author = plugin["author"].as_str().unwrap_or("unknown");
 
         // 2. Parse GitHub URL to get owner/repo/path
-        let (gh_owner, gh_repo, gh_path) = match parse_github_url(&github_url) {
+        let (gh_owner, gh_repo, gh_branch, gh_path) = match parse_github_url(&github_url) {
             Some(parsed) => parsed,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1825,15 +1825,16 @@ impl AutoPipeServer {
         };
 
         // 3. Download manifest.json from GitHub
+        let branch = gh_branch.as_deref().unwrap_or("main");
         let manifest_url = if gh_path.is_empty() {
             format!(
-                "https://raw.githubusercontent.com/{}/{}/main/manifest.json",
-                gh_owner, gh_repo
+                "https://raw.githubusercontent.com/{}/{}/{}/manifest.json",
+                gh_owner, gh_repo, branch
             )
         } else {
             format!(
-                "https://raw.githubusercontent.com/{}/{}/main/{}/manifest.json",
-                gh_owner, gh_repo, gh_path
+                "https://raw.githubusercontent.com/{}/{}/{}/{}/manifest.json",
+                gh_owner, gh_repo, branch, gh_path
             )
         };
 
@@ -1890,13 +1891,13 @@ impl AutoPipeServer {
         // 6. Download and save entry file (index.js)
         let entry_url = if gh_path.is_empty() {
             format!(
-                "https://raw.githubusercontent.com/{}/{}/main/{}",
-                gh_owner, gh_repo, entry
+                "https://raw.githubusercontent.com/{}/{}/{}/{}",
+                gh_owner, gh_repo, branch, entry
             )
         } else {
             format!(
-                "https://raw.githubusercontent.com/{}/{}/main/{}/{}",
-                gh_owner, gh_repo, gh_path, entry
+                "https://raw.githubusercontent.com/{}/{}/{}/{}/{}",
+                gh_owner, gh_repo, branch, gh_path, entry
             )
         };
 
@@ -1927,13 +1928,13 @@ impl AutoPipeServer {
         if let Some(style_file) = style {
             let style_url = if gh_path.is_empty() {
                 format!(
-                    "https://raw.githubusercontent.com/{}/{}/main/{}",
-                    gh_owner, gh_repo, style_file
+                    "https://raw.githubusercontent.com/{}/{}/{}/{}",
+                    gh_owner, gh_repo, branch, style_file
                 )
             } else {
                 format!(
-                    "https://raw.githubusercontent.com/{}/{}/main/{}/{}",
-                    gh_owner, gh_repo, gh_path, style_file
+                    "https://raw.githubusercontent.com/{}/{}/{}/{}/{}",
+                    gh_owner, gh_repo, branch, gh_path, style_file
                 )
             };
 

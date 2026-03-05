@@ -15,6 +15,7 @@ export interface PluginSummary {
 	version: string;
 	verified: boolean;
 	forked_from: number | null;
+	version_history: Array<{ version: string; updated_at: string }>;
 	created_at: string | null;
 }
 
@@ -32,6 +33,7 @@ export interface Plugin {
 	version: string;
 	verified: boolean;
 	forked_from?: number | null;
+	version_history: Array<{ version: string; updated_at: string }>;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -49,6 +51,9 @@ function rowToSummary(r: typeof userPlugins.$inferSelect): PluginSummary {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
+		version_history: Array.isArray(r.versionHistory)
+			? (r.versionHistory as Array<{ version: string; updated_at: string }>)
+			: [],
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -68,6 +73,9 @@ function rowToPlugin(r: typeof userPlugins.$inferSelect): Plugin {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
+		version_history: Array.isArray(r.versionHistory)
+			? (r.versionHistory as Array<{ version: string; updated_at: string }>)
+			: [],
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};

@@ -4,10 +4,14 @@
 	let { data } = $props();
 	const p = data.plugin;
 
-	let showAll = $state(false);
+	// Version history from JSONB (previous versions, newest first)
+	const versionHistory = $derived(
+		[...(p.version_history || [])].reverse()
+	);
 
-	const displayedVersions = $derived(
-		showAll ? data.versionChain : data.versionChain.slice(0, 3)
+	// Related plugins (forks) — exclude self
+	const relatedPlugins = $derived(
+		data.versionChain.filter((v: { plugin_id: number }) => v.plugin_id !== p.plugin_id)
 	);
 
 	const readmeHtml = p.readme ? marked(p.readme) : '';
@@ -59,23 +63,44 @@
 			{/if}
 		</div>
 		<div class="detail-sidebar">
-			<div class="sidebar-title">VERSIONS</div>
+			<div class="sidebar-title">VERSION HISTORY</div>
 			<div class="version-timeline">
 				<div class="version-line"></div>
-				{#each displayedVersions as v (v.plugin_id)}
-					<a href="/plugins/{v.plugin_id}" class="version-item">
-						<div class="version-dot" class:current={v.plugin_id === p.plugin_id}></div>
-						<div class="version-card" class:current={v.plugin_id === p.plugin_id}>
-							<span class="version-ver">v{v.version}</span>
-							{#if v.verified}<span class="version-badge">verified</span>{/if}
-							<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
+				<!-- Current version -->
+				<div class="version-item">
+					<div class="version-dot current"></div>
+					<div class="version-card current">
+						<span class="version-ver">v{p.version}</span>
+						<span class="version-badge">current</span>
+						<div class="version-meta">{p.updated_at?.split('T')[0] || p.created_at?.split('T')[0] || '—'}</div>
+					</div>
+				</div>
+				<!-- Previous versions -->
+				{#each versionHistory as vh, i (i)}
+					<div class="version-item">
+						<div class="version-dot"></div>
+						<div class="version-card">
+							<span class="version-ver">v{vh.version}</span>
+							<div class="version-meta">{vh.updated_at?.split('T')[0] || '—'}</div>
 						</div>
-					</a>
+					</div>
 				{/each}
-				{#if data.versionChain.length > 3 && !showAll}
-					<button class="version-more" onclick={() => showAll = true}>show more ({data.versionChain.length - 3} more)</button>
-				{/if}
 			</div>
+			{#if relatedPlugins.length > 0}
+				<div class="sidebar-title" style="margin-top:24px">RELATED PLUGINS</div>
+				<div class="version-timeline">
+					<div class="version-line"></div>
+					{#each relatedPlugins as v (v.plugin_id)}
+						<a href="/plugins/{v.plugin_id}" class="version-item">
+							<div class="version-dot"></div>
+							<div class="version-card">
+								<span class="version-ver">v{v.version}</span>
+								<div class="version-meta">{v.created_at?.split('T')[0] || '—'} · {v.author || 'unknown'}</div>
+							</div>
+						</a>
+					{/each}
+				</div>
+			{/if}
 		</div>
 	</div>
 </main>
