@@ -728,93 +728,103 @@ impl AutoPipeApp {
             let mut install_plugin: Option<(RegistryPlugin, bool)> = None; // (plugin, is_update)
             let mut delete_plugin_name: Option<String> = None;
 
-            // Responsive card grid: 2 columns if wide enough, 1 column if narrow
+            // Card grid: 2 columns using horizontal chunks
             let available = ui.available_width();
-            let col_count = if available >= 500.0 { 2 } else { 1 };
-            let card_width = ((available - (col_count as f32 - 1.0) * 8.0) / col_count as f32).max(100.0);
+            let col_count: usize = if available >= 500.0 { 2 } else { 1 };
+            let spacing = 8.0_f32;
+            let card_width = ((available - (col_count as f32 - 1.0) * spacing) / col_count as f32).floor();
+            let inner_width = card_width - 22.0; // minus Frame margin(10*2) + stroke(1*2)
 
-            egui::Grid::new("plugin_grid")
-                .num_columns(col_count)
-                .spacing([8.0, 8.0])
-                .show(ui, |ui| {
-                    for (idx, plugin) in self.plugin_registry.iter().enumerate() {
-                        egui::Frame::none()
-                            .inner_margin(egui::Margin::same(10))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
-                            .corner_radius(8.0)
-                            .show(ui, |ui| {
-                                ui.set_width(card_width - 22.0);
+            let registry_len = self.plugin_registry.len();
+            let mut idx = 0;
+            while idx < registry_len {
+                ui.horizontal(|ui| {
+                    for col in 0..col_count {
+                        let pidx = idx + col;
+                        if pidx >= registry_len { break; }
+                        let plugin = &self.plugin_registry[pidx];
 
-                                let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                                let installed_ver = installed_map.get(&plugin.name);
-                                let needs_update = installed_ver
-                                    .map(|iv| is_version_outdated(iv, &plugin.version))
-                                    .unwrap_or(false);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(card_width, 0.0),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                            egui::Frame::none()
+                                .inner_margin(egui::Margin::same(10))
+                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
+                                .corner_radius(8.0)
+                                .show(ui, |ui| {
+                                    ui.set_width(inner_width);
 
-                                // Header: icon + name + buttons
-                                ui.horizontal(|ui| {
-                                    egui::Frame::none()
-                                        .inner_margin(egui::Margin::same(4))
-                                        .fill(egui::Color32::from_gray(240))
-                                        .corner_radius(4.0)
-                                        .show(ui, |ui| {
-                                            ui.strong(&initial);
-                                        });
-                                    ui.strong(&plugin.name);
-                                    ui.label(
-                                        egui::RichText::new(format!("v{}", plugin.version))
-                                            .size(11.0)
-                                            .color(egui::Color32::GRAY),
-                                    );
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if installed_ver.is_some() {
-                                            if ui.button("Delete").clicked() {
-                                                delete_plugin_name = Some(plugin.name.clone());
-                                            }
-                                            if needs_update {
-                                                if ui.button("Update").clicked() {
-                                                    install_plugin = Some((plugin.clone(), true));
+                                    let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                    let installed_ver = installed_map.get(&plugin.name);
+                                    let needs_update = installed_ver
+                                        .map(|iv| is_version_outdated(iv, &plugin.version))
+                                        .unwrap_or(false);
+
+                                    // Header: icon + name + buttons
+                                    ui.horizontal(|ui| {
+                                        egui::Frame::none()
+                                            .inner_margin(egui::Margin::same(4))
+                                            .fill(egui::Color32::from_gray(240))
+                                            .corner_radius(4.0)
+                                            .show(ui, |ui| {
+                                                ui.strong(&initial);
+                                            });
+                                        ui.strong(&plugin.name);
+                                        ui.label(
+                                            egui::RichText::new(format!("v{}", plugin.version))
+                                                .size(11.0)
+                                                .color(egui::Color32::GRAY),
+                                        );
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if installed_ver.is_some() {
+                                                if ui.button("Delete").clicked() {
+                                                    delete_plugin_name = Some(plugin.name.clone());
                                                 }
+                                                if needs_update {
+                                                    if ui.button("Update").clicked() {
+                                                        install_plugin = Some((plugin.clone(), true));
+                                                    }
+                                                }
+                                            } else if ui.button("Install").clicked() {
+                                                install_plugin = Some((plugin.clone(), false));
                                             }
-                                        } else if ui.button("Install").clicked() {
-                                            install_plugin = Some((plugin.clone(), false));
-                                        }
+                                        });
                                     });
-                                });
 
-                                if !plugin.description.is_empty() {
-                                    ui.label(
-                                        egui::RichText::new(&plugin.description)
-                                            .size(11.0)
-                                            .color(egui::Color32::from_gray(100)),
-                                    );
-                                }
+                                    if !plugin.description.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new(&plugin.description)
+                                                .size(11.0)
+                                                .color(egui::Color32::from_gray(100)),
+                                        );
+                                    }
 
-                                if !plugin.extensions.is_empty() {
-                                    ui.horizontal_wrapped(|ui| {
-                                        for ext in &plugin.extensions {
-                                            egui::Frame::none()
-                                                .inner_margin(egui::Margin::symmetric(5, 1))
-                                                .fill(egui::Color32::from_gray(240))
-                                                .corner_radius(3.0)
-                                                .show(ui, |ui| {
-                                                    ui.label(
+                                    if !plugin.extensions.is_empty() {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = egui::vec2(4.0, 3.0);
+                                            for ext in &plugin.extensions {
+                                                ui.add(
+                                                    egui::Button::new(
                                                         egui::RichText::new(format!(".{}", ext))
                                                             .size(10.0)
                                                             .color(egui::Color32::from_gray(80)),
-                                                    );
-                                                });
-                                        }
-                                    });
-                                }
-                            });
-
-                        // End row after col_count items
-                        if (idx + 1) % col_count == 0 {
-                            ui.end_row();
-                        }
+                                                    )
+                                                    .fill(egui::Color32::from_gray(240))
+                                                    .stroke(egui::Stroke::NONE)
+                                                    .corner_radius(3.0)
+                                                    .small(),
+                                                );
+                                            }
+                                        });
+                                    }
+                                });
+                        });
                     }
                 });
+                ui.add_space(spacing);
+                idx += col_count;
+            }
 
             if let Some((p, is_update)) = install_plugin {
                 self.plugin_confirm = Some(p);
