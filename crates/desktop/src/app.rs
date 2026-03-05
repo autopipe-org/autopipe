@@ -728,20 +728,22 @@ impl AutoPipeApp {
             let mut delete_plugin_name: Option<String> = None;
 
             // Card grid layout: 2 columns
-            let col_count = 2;
-            let chunks: Vec<&[RegistryPlugin]> = self.plugin_registry.chunks(col_count).collect();
+            let available = ui.available_width();
+            let spacing = 8.0;
+            let card_width = (available - spacing) / 2.0;
+
+            let chunks: Vec<&[RegistryPlugin]> = self.plugin_registry.chunks(2).collect();
             for chunk in &chunks {
-                ui.columns(col_count, |cols| {
-                    for (i, plugin) in chunk.iter().enumerate() {
-                        let ui = &mut cols[i];
+                ui.horizontal(|ui| {
+                    for plugin in chunk.iter() {
                         egui::Frame::none()
                             .inner_margin(egui::Margin::same(12))
                             .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
                             .corner_radius(8.0)
                             .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
+                                ui.set_width(card_width - 28.0); // account for margin + stroke
 
-                                // Header row: icon + name + Install button (right-aligned)
+                                // Header row: icon + name + Install button
                                 let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
                                 let installed_ver = installed_map.get(&plugin.name);
                                 let needs_update = installed_ver
