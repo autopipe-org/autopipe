@@ -1308,7 +1308,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser to display ALL result files. ALWAYS use this tool when the user wants to view results — NEVER use read_file for viewing results. Pass a DIRECTORY path (not individual files). The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). IMPORTANT workflow for genomics files (BAM/VCF/BED/GFF/CRAM/BCF): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM/BCF files cannot be displayed without a reference.")]
+    #[tool(description = "Open the Results Viewer in a browser. ALWAYS use this tool when the user wants to view results — NEVER use read_file for viewing results. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files (BAM/VCF/BED/GFF/CRAM/BCF): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM/BCF files cannot be displayed without a reference.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -1548,9 +1548,9 @@ impl AutoPipeServer {
             let ext_list = unique.iter().map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "No viewer plugin installed for {} files.\n\
-                 Install the plugin from the Plugins tab in the AutoPipe app, or create a custom plugin.\n\
-                 Plugins directory: {}",
-                ext_list, plugins_dir_path
+                 The user must manually install the plugin from the Plugins tab in the AutoPipe app.\n\
+                 DO NOT attempt to install plugins automatically — just inform the user.",
+                ext_list
             ))]));
         }
 
