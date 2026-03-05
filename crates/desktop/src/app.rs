@@ -89,37 +89,28 @@ struct PluginInfo {
     extensions: Vec<String>,
 }
 
-/// Default plugins embedded at compile time.
-/// Each entry: (folder_name, manifest.json content, index.js content)
-const DEFAULT_PLUGINS: &[(&str, &str, &str)] = &[
-    (
-        "vcf-viewer",
-        include_str!("default_plugins/vcf-viewer/manifest.json"),
-        include_str!("default_plugins/vcf-viewer/index.js"),
-    ),
+/// Default plugin names to auto-install from the registry on first launch.
+const DEFAULT_PLUGIN_NAMES: &[&str] = &[
+    "vcf-viewer",
+    "bam-viewer",
+    "bcf-viewer",
+    "bed-viewer",
+    "cram-viewer",
+    "csv-viewer",
+    "fasta-viewer",
+    "fastq-viewer",
+    "gff-viewer",
+    "hdf5-viewer",
+    "image-viewer",
+    "text-viewer",
 ];
-
-/// Extract default plugins to the plugins directory if they don't already exist.
-fn install_default_plugins(plugins_dir: &str) {
-    for &(name, manifest, index_js) in DEFAULT_PLUGINS {
-        let dest = std::path::PathBuf::from(plugins_dir).join(name);
-        if dest.exists() {
-            continue;
-        }
-        if std::fs::create_dir_all(&dest).is_err() {
-            continue;
-        }
-        let _ = std::fs::write(dest.join("manifest.json"), manifest);
-        let _ = std::fs::write(dest.join("index.js"), index_js);
-    }
-}
 
 impl AutoPipeApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let config = AppConfig::load();
 
-        // Auto-install default plugins on first launch
-        install_default_plugins(&config.full_plugins_dir());
+        // Auto-install default plugins from registry on first launch
+        auto_install_default_plugins(&config.registry_url, &config.full_plugins_dir());
         let (ssh_auth_type, ssh_key_path_input, ssh_password_input) = match &config.ssh_auth {
             SshAuth::Password { password } => (0, String::new(), password.clone()),
             SshAuth::Key { key_path } => (1, key_path.clone(), String::new()),
@@ -1230,6 +1221,68 @@ async fn fetch_registry_plugins(
         .collect();
 
     let _ = tx.send(PluginMsg::RegistryList(plugins));
+}
+
+/// Auto-install default plugins from registry if not already installed.
+/// Runs synchronously at startup — fetches the registry list and installs missing plugins.
+fn auto_install_default_plugins(registry_url: &str, plugins_dir: &str) {
+    let missing: Vec<&str> = DEFAULT_PLUGIN_NAMES
+        .iter()
+        .filter(|name| !std::path::Path::new(plugins_dir).join(name).exists())
+        .copied()
+        .collect();
+
+    if missing.is_empty() {
+        return;
+    }
+
+    let registry_url = registry_url.to_string();
+    let plugins_dir = plugins_dir.to_string();
+
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return,
+    };
+
+    rt.block_on(async {
+        let client = reqwest::Client::new();
+        let base = registry_url.trim_end_matches('/');
+        let url = format!("{}/api/plugins", base);
+
+        let resp = match client
+            .get(&url)
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let arr = match body.as_array() {
+            Some(a) => a,
+            None => return,
+        };
+
+        for plugin_val in arr {
+            let name = plugin_val["name"].as_str().unwrap_or("");
+            if !missing.contains(&name) {
+                continue;
+            }
+            let github_url = plugin_val["github_url"].as_str().unwrap_or("");
+            if github_url.is_empty() {
+                continue;
+            }
+
+            let (tx, _rx) = mpsc::channel();
+            install_plugin_from_github(github_url, &plugins_dir, name, tx).await;
+        }
+    });
 }
 
 async fn install_plugin_from_github(
