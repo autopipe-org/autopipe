@@ -580,7 +580,7 @@ impl AutoPipeApp {
                 .show(ui.ctx(), |ui| {
                     ui.add_space(5.0);
                     ui.colored_label(
-                        egui::Color32::YELLOW,
+                        egui::Color32::RED,
                         "⚠ Warning: Plugins execute JavaScript in your browser.",
                     );
                     ui.add_space(10.0);

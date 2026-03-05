@@ -1350,7 +1350,7 @@ impl AutoPipeServer {
                 Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
             }
         } else {
-            // Single file: check it exists, then load ALL files from parent directory
+            // Single file: check it exists, then load only that file
             match self
                 .ssh_run(&format!(
                     "test -f '{}' && echo OK || echo NOT_FOUND",
@@ -1359,37 +1359,7 @@ impl AutoPipeServer {
                 .await
             {
                 Ok((output, 0)) if clean_content(&output).trim() == "OK" => {
-                    // Get parent directory and list all files from it
-                    let parent = std::path::Path::new(&params.path)
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    if !parent.is_empty() {
-                        match self
-                            .ssh_run(&format!(
-                                "find '{}' -maxdepth 1 -type f ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
-                                parent
-                            ))
-                            .await
-                        {
-                            Ok((dir_output, 0)) => {
-                                let dir_files: Vec<String> = clean_content(&dir_output)
-                                    .trim()
-                                    .lines()
-                                    .filter(|l| !l.is_empty())
-                                    .map(|l| l.to_string())
-                                    .collect();
-                                if dir_files.is_empty() {
-                                    vec![params.path.clone()]
-                                } else {
-                                    dir_files
-                                }
-                            }
-                            _ => vec![params.path.clone()],
-                        }
-                    } else {
-                        vec![params.path.clone()]
-                    }
+                    vec![params.path.clone()]
                 }
                 _ => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1535,6 +1505,54 @@ impl AutoPipeServer {
         } else {
             params.reference.clone()
         };
+
+        // Check if any file requires a plugin that is not installed
+        let plugins_dir_path = self.config.full_plugins_dir();
+        let installed_plugin_exts: Vec<String> = {
+            let mut exts = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&plugins_dir_path) {
+                for entry in entries.flatten() {
+                    let manifest_path = entry.path().join("manifest.json");
+                    if let Ok(text) = std::fs::read_to_string(&manifest_path) {
+                        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(arr) = manifest["extensions"].as_array() {
+                                for e in arr {
+                                    if let Some(s) = e.as_str() {
+                                        exts.push(s.to_lowercase());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            exts
+        };
+        // Extensions that are only viewable via plugins (removed from built-in)
+        let plugin_only_exts = ["vcf"];
+        let missing_plugins: Vec<String> = file_paths.iter().filter_map(|p| {
+            let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            if plugin_only_exts.contains(&ext.as_str()) && !installed_plugin_exts.contains(&ext) {
+                Some(ext)
+            } else {
+                None
+            }
+        }).collect();
+        if !missing_plugins.is_empty() {
+            let unique: Vec<String> = {
+                let mut v = missing_plugins;
+                v.sort();
+                v.dedup();
+                v
+            };
+            let ext_list = unique.iter().map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "No viewer plugin installed for {} files.\n\
+                 Install the plugin from the Plugins tab in the AutoPipe app, or create a custom plugin.\n\
+                 Plugins directory: {}",
+                ext_list, plugins_dir_path
+            ))]));
+        }
 
         // Detect genomics files
         let genomics_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf"];
