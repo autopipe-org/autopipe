@@ -1528,14 +1528,13 @@ impl AutoPipeServer {
             }
             exts
         };
-        // Extensions that are only viewable via plugins (removed from built-in)
-        let plugin_only_exts = ["vcf"];
+        // Check if any file needs a plugin that isn't installed
         let missing_plugins: Vec<String> = file_paths.iter().filter_map(|p| {
             let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-            if plugin_only_exts.contains(&ext.as_str()) && !installed_plugin_exts.contains(&ext) {
-                Some(ext)
-            } else {
+            if ext.is_empty() || installed_plugin_exts.contains(&ext) {
                 None
+            } else {
+                Some(ext)
             }
         }).collect();
         if !missing_plugins.is_empty() {

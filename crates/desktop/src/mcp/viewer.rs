@@ -724,18 +724,6 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoPipe Results Viewer</title>
 <link rel="icon" href="/logo.png" type="image/png">
-<script src="https://cdn.jsdelivr.net/npm/jsfive@0.3.10/dist/browser/hdf5.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css">
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/dockerfile.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/yaml.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/python.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/markdown.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/json.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/bash.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/r.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/xml.min.js"></script>
-<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/languages/ini.min.js"></script>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
   html, body {{ height: 100%; overflow: hidden; }}
@@ -933,101 +921,19 @@ function renderSidebar() {{
   }});
 }}
 
-// IGV-compatible extensions (can show Data tab, IGV tab, or both)
-var igvDualExts = ['bam','bed','gff','gtf','gff3','fasta','fa'];
-var igvOnlyExts = ['cram','bcf'];
-
-function hasReference() {{
-  return !!REFERENCE;
-}}
-
-function getIgvReference() {{
-  // If reference is a filename in our files → use local URL
-  if (REFERENCE && FILES.some(function(f) {{ return f.name === REFERENCE; }})) {{
-    return {{ fastaURL: '/file/' + encodeURIComponent(REFERENCE), indexed: false }};
-  }}
-  // Otherwise treat as genome ID (hg38, mm10, etc.)
-  return null;
-}}
-
-function getIgvGenomeId() {{
-  if (!REFERENCE) return null;
-  var knownGenomes = KNOWN_GENOMES.map(function(g) {{ return g.id; }});
-  if (knownGenomes.indexOf(REFERENCE) >= 0) return REFERENCE;
-  if (FILES.some(function(f) {{ return f.name === REFERENCE; }})) return null;
-  return REFERENCE;
-}}
-
-// ── Genome dropdown for IGV ──
-var KNOWN_GENOMES = [
-  {{id:'hg38', label:'Human (GRCh38/hg38)'}},
-  {{id:'hg19', label:'Human (GRCh37/hg19)'}},
-  {{id:'mm39', label:'Mouse (GRCm39/mm39)'}},
-  {{id:'mm10', label:'Mouse (GRCm38/mm10)'}},
-  {{id:'rn7',  label:'Rat (mRatBN7.2/rn7)'}},
-  {{id:'rn6',  label:'Rat (Rnor_6.0/rn6)'}},
-  {{id:'dm6',  label:'Fruit fly (BDGP6/dm6)'}},
-  {{id:'ce11', label:'C. elegans (WBcel235/ce11)'}},
-  {{id:'danRer11', label:'Zebrafish (GRCz11/danRer11)'}},
-  {{id:'sacCer3',  label:'Yeast (sacCer3)'}},
-  {{id:'tair10',   label:'Arabidopsis (TAIR10)'}},
-  {{id:'galGal6',  label:'Chicken (GRCg6a/galGal6)'}}
-];
-var selectedGenome = null;
-
-function buildGenomeDropdown() {{
-  var current = selectedGenome || REFERENCE || '';
-  var html = '<span style="font-size:12px;color:#888;font-weight:500;margin-right:4px">Reference:</span>';
-  html += '<select class="btn" id="genomeSelect" onchange="onGenomeChange(this.value)" style="font-size:12px;padding:4px 8px;max-width:220px">';
-  // If REFERENCE is a local FASTA file
-  var localFasta = FILES.find(function(f) {{ return f.name === REFERENCE; }});
-  if (localFasta) {{
-    html += '<option value="' + REFERENCE + '"' + (current === REFERENCE ? ' selected' : '') + '>Local: ' + REFERENCE + '</option>';
-  }}
-  // Known genomes
-  KNOWN_GENOMES.forEach(function(g) {{
-    html += '<option value="' + g.id + '"' + (current === g.id ? ' selected' : '') + '>' + g.label + '</option>';
-  }});
-  html += '</select>';
-  return html;
-}}
-
-function onGenomeChange(val) {{
-  selectedGenome = val;
-  if (currentFile) {{
-    var ext = currentFile.split('.').pop().toLowerCase();
-    var content = document.getElementById('viewerContent');
-    if (currentViewMode === 'igv' || igvOnlyExts.indexOf(ext) >= 0) {{
-      renderIgvViewer(currentFile, ext, content);
-    }}
-  }}
-}}
-
-// Files recognized as text by filename (no extension match needed)
-var textFileNames = ['snakefile','dockerfile','makefile','readme','readme.md','license','license.md'];
-function isTextByName(name) {{
-  var lower = name.toLowerCase();
-  var base = lower.split('/').pop() || lower;
-  return textFileNames.indexOf(base) >= 0;
-}}
-
-// Map filename/extension to highlight.js language
-function detectHljsLang(name) {{
-  var lower = name.toLowerCase();
-  var base = lower.split('/').pop() || lower;
-  if (base === 'snakefile' || lower.endsWith('.smk')) return 'python';
-  if (base === 'dockerfile' || lower.endsWith('.dockerfile')) return 'dockerfile';
-  if (base === 'makefile') return 'makefile';
-  var ext = lower.split('.').pop();
-  var langMap = {{
-    'py': 'python', 'r': 'r', 'sh': 'bash', 'bash': 'bash',
-    'json': 'json', 'yaml': 'yaml', 'yml': 'yaml',
-    'xml': 'xml', 'md': 'markdown',
-    'cfg': 'ini', 'ini': 'ini', 'toml': 'ini',
-    'nf': 'groovy', 'js': 'javascript', 'ts': 'typescript'
-  }};
-  return langMap[ext] || null;
-}}
+// [COMMENTED OUT] Built-in viewer helpers — moved to plugins
+// var igvDualExts = ['bam','bed','gff','gtf','gff3','fasta','fa'];
+// var igvOnlyExts = ['cram','bcf'];
+// function hasReference() {{ return !!REFERENCE; }}
+// function getIgvReference() {{ ... }}
+// function getIgvGenomeId() {{ ... }}
+// var KNOWN_GENOMES = [ ... ];
+// var selectedGenome = null;
+// function buildGenomeDropdown() {{ ... }}
+// function onGenomeChange(val) {{ ... }}
+// var textFileNames = [ ... ];
+// function isTextByName(name) {{ ... }}
+// function detectHljsLang(name) {{ ... }}
 
 function selectFile(name) {{
   selectFileWithMode(name, 'data');
@@ -1054,75 +960,16 @@ function selectFileWithMode(name, mode) {{
   toolbar.style.display = 'flex';
   title.textContent = name;
 
-  var imageExts = ['png','jpg','jpeg','gif','svg','webp','bmp','tiff','tif'];
-  var delimExts = ['csv','tsv','tab'];
-  var textExts = ['txt','log','json','yaml','yml','xml','md','sh','py','r','R','nf','smk','cfg','ini','toml','fastq','fq','dockerfile'];
-  var hdf5Exts = ['h5ad','h5','hdf5'];
-
-  // Dual-tab files: Data + IGV
-  if (igvDualExts.indexOf(ext) >= 0) {{
-    var ref = hasReference();
-    if (ref) {{
-      // Reference available: show both Data and IGV tabs
-      var tabsHtml = '<div class="view-tabs">';
-      tabsHtml += '<button class="view-tab' + (mode === 'data' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'data\')">Data</button>';
-      tabsHtml += '<button class="view-tab' + (mode === 'igv' ? ' active' : '') + '" onclick="selectFileWithMode(\'' + name.replace(/'/g,"\\'") + '\',\'igv\')">IGV</button>';
-      tabsHtml += '</div>';
-      var genomeHtml = (mode === 'igv') ? buildGenomeDropdown() : '';
-      actions.innerHTML = tabsHtml + genomeHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-      if (mode === 'igv') {{
-        renderIgvViewer(name, ext, content);
-      }} else {{
-        renderDataViewer(name, ext, content);
-      }}
-    }} else {{
-      // No reference: show Data only (no tabs)
-      actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-      renderDataViewer(name, ext, content);
-    }}
-    return;
-  }}
-
-  // IGV-only files: CRAM/BCF
-  if (igvOnlyExts.indexOf(ext) >= 0) {{
-    if (hasReference()) {{
-      var genomeHtml = buildGenomeDropdown();
-      actions.innerHTML = genomeHtml + '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-      renderIgvViewer(name, ext, content);
-    }} else {{
-      actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-      content.innerHTML =
-        '<div class="no-preview">' +
-          '<div class="no-preview-icon">🧬</div>' +
-          '<p class="no-preview-title">' + name + '</p>' +
-          '<p class="no-preview-msg">.' + ext + ' files require a reference genome for IGV viewer.<br>Provide a reference path or genome ID (e.g., hg38) when calling show_results.</p>' +
-          '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>' +
-        '</div>';
-    }}
-    return;
-  }}
-
-  // Other file types (no tabs)
-  if (imageExts.indexOf(ext) >= 0) {{
-    renderImageViewer(name, actions, content);
-  }} else if (ext === 'pdf') {{
-    renderPdfViewer(name, actions, content);
-  }} else if (delimExts.indexOf(ext) >= 0) {{
-    renderDelimitedViewer(name, ext, actions, content);
-  }} else if (textExts.indexOf(ext) >= 0 || isTextByName(name)) {{
-    renderTextViewer(name, actions, content);
-  }} else if (hdf5Exts.indexOf(ext) >= 0) {{
-    renderHdf5Viewer(name, actions, content);
+  // Plugin-first routing: check installed plugins, fallback to no-preview
+  var plugin = findPlugin(ext);
+  if (plugin) {{
+    renderPluginViewer(name, plugin, actions, content);
   }} else {{
-    var plugin = findPlugin(ext);
-    if (plugin) {{
-      renderPluginViewer(name, plugin, actions, content);
-    }} else {{
-      renderNoPreview(name, ext, actions, content);
-    }}
+    renderNoPreview(name, ext, actions, content);
   }}
 }}
 
+/* [COMMENTED OUT] Built-in render functions — moved to plugins
 // Route to the correct Data viewer based on extension
 function renderDataViewer(name, ext, content) {{
   if (ext === 'vcf') renderVcfViewer(name, content);
@@ -1760,8 +1607,8 @@ function _renderHdf5Values2D(value, shape, path, page) {{
 window._hdf5PageVal = function(path, page) {{
   if (page < 0) return;
   _hdf5ValuePage[path] = page;
-  _hdf5ShowItem(path);
 }};
+[COMMENTED OUT] Built-in render functions end */
 
 // ── Plugin Viewer ──
 function findPlugin(ext) {{
@@ -1817,7 +1664,7 @@ function renderNoPreview(name, ext, actions, content) {{
     '<div class="no-preview">' +
       '<div class="no-preview-icon">📄</div>' +
       '<p class="no-preview-title">' + name + '</p>' +
-      '<p class="no-preview-msg">No built-in viewer for .' + ext + ' files.<br>Install a plugin that supports this format to enable preview.</p>' +
+      '<p class="no-preview-msg">No viewer plugin installed for .' + ext + ' files.<br>Install a plugin from the <b>Plugins</b> tab in the AutoPipe desktop app.</p>' +
       '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>' +
     '</div>';
 }}

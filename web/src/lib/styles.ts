@@ -41,7 +41,9 @@ main { padding: 32px 48px; }
 .card-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag { display: inline-block; padding: 3px 10px; border-radius: 100px; font-size: 11px; background: #f0f0f0; color: #666; font-weight: 500; }
 .tag.tool { background: #111; color: #fff; }
-.empty { text-align: center; color: #999; padding: 60px 20px; font-size: 14px; background: #fff; }
+.empty { text-align: center; color: #999; padding: 60px 20px; font-size: 14px; grid-column: 1 / -1; }
+.grid:has(.empty) { background: none; border: none; }
+.plugin-grid:has(.empty) { display: block; }
 
 /* List layout with filter sidebar */
 .list-layout { display: flex; gap: 32px; }
@@ -146,8 +148,8 @@ main { padding: 32px 48px; }
 .plugin-card-meta { min-width: 0; }
 .plugin-card-name { font-size: 15px; font-weight: 600; color: #111; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .plugin-card-version { font-size: 12px; color: #999; }
-.plugin-card-desc { font-size: 13px; color: #666; line-height: 1.5; flex: 1; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.plugin-card-exts { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.plugin-card-desc { font-size: 13px; color: #666; line-height: 1.5; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.plugin-card-exts { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; margin-top: auto; }
 .plugin-ext-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; background: #f0f0f0; color: #555; font-family: 'SF Mono', 'Consolas', monospace; }
 .plugin-card-footer { display: flex; flex-wrap: wrap; gap: 6px; }
 .plugin-card-author { font-size: 12px; color: #999; }

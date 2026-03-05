@@ -4,7 +4,7 @@
 	let searchValue = $state(data.q);
 	let currentPage = $state(1);
 
-	const PAGE_SIZE = 10;
+	const PAGE_SIZE = 12;
 
 	const filteredPlugins = $derived(() => {
 		const q = searchValue.toLowerCase();

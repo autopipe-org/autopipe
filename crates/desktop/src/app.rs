@@ -102,6 +102,7 @@ const DEFAULT_PLUGIN_NAMES: &[&str] = &[
     "gff-viewer",
     "hdf5-viewer",
     "image-viewer",
+    "pdf-viewer",
     "text-viewer",
 ];
 
@@ -730,7 +731,7 @@ impl AutoPipeApp {
             // Responsive card grid: 2 columns if wide enough, 1 column if narrow
             let available = ui.available_width();
             let col_count = if available >= 500.0 { 2 } else { 1 };
-            let card_width = (available - (col_count as f32 - 1.0) * ui.spacing().item_spacing.x) / col_count as f32;
+            let card_width = ((available - (col_count as f32 - 1.0) * 8.0) / col_count as f32).max(100.0);
 
             egui::Grid::new("plugin_grid")
                 .num_columns(col_count)
@@ -742,7 +743,7 @@ impl AutoPipeApp {
                             .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(220)))
                             .corner_radius(8.0)
                             .show(ui, |ui| {
-                                ui.set_width(card_width - 24.0);
+                                ui.set_width(card_width - 22.0);
 
                                 let initial = plugin.name.chars().next().unwrap_or('?').to_uppercase().to_string();
                                 let installed_ver = installed_map.get(&plugin.name);
