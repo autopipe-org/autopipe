@@ -1155,7 +1155,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "List files and directories at a remote path on the SSH server")]
+    #[tool(description = "List files and directories at a remote path on the SSH server. IMPORTANT: When the user asks to view, check, or see results/output files, follow this workflow: (1) Call list_files to see what files exist in the output directory. (2) Show the file list to the user and ask: 'Would you like to open the viewer, or see the contents in chat?' (3) If viewer: call show_results. If chat: call read_file for the requested file.")]
     async fn list_files(
         &self,
         Parameters(params): Parameters<ListFilesParams>,
@@ -1171,7 +1171,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Read the contents of a file on the remote SSH server. Use this to view result files directly from the output directory. IMPORTANT: After showing the file contents to the user, ALWAYS ask '이 파일을 로컬에 저장할까요?' (Do you want to save this file locally?). If the user says yes, use the download_results tool to download it.")]
+    #[tool(description = "Read the contents of a file on the remote SSH server and display it in chat. Use this only when the user explicitly chooses to see file contents in chat (not in the viewer). Do NOT call this directly when the user asks to view results — first use list_files, ask the user whether they want the viewer or chat, then proceed accordingly. IMPORTANT: After showing file contents, ALWAYS ask if the user wants to save the file locally. If yes, use download_results.")]
     async fn read_file(
         &self,
         Parameters(params): Parameters<ReadFileParams>,
@@ -1308,7 +1308,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser. ALWAYS use this tool when the user wants to view results — NEVER use read_file for viewing results. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files (BAM/VCF/BED/GFF/CRAM/BCF): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM/BCF files cannot be displayed without a reference.")]
+    #[tool(description = "Open the Results Viewer in a browser. Use this when the user chooses to view results in the viewer (after being asked via list_files workflow). Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files (BAM/VCF/BED/GFF/CRAM/BCF): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM/BCF files cannot be displayed without a reference.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
