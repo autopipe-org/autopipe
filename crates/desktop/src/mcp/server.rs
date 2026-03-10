@@ -417,7 +417,14 @@ impl AutoPipeServer {
 impl AutoPipeServer {
     pub fn new(config: AppConfig) -> Self {
         let registry = RegistryClient::new(&config.registry_url);
-        let workflowhub = WorkflowHubClient::new("https://workflowhub.eu");
+        // Use WorkflowHub URL from config registry_urls, fallback to default
+        let wfhub_url = config
+            .registry_urls
+            .iter()
+            .find(|u| u.contains("workflowhub.eu"))
+            .cloned()
+            .unwrap_or_else(|| "https://workflowhub.eu".into());
+        let workflowhub = WorkflowHubClient::new(&wfhub_url);
         Self {
             registry,
             workflowhub,
@@ -522,7 +529,12 @@ impl AutoPipeServer {
         Parameters(params): Parameters<ImportWorkflowHubParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let workflow_id = params.workflow_id;
-        let workflowhub_url = format!("https://workflowhub.eu/workflows/{}", workflow_id);
+        let wfhub_base = self.config.registry_urls
+            .iter()
+            .find(|u| u.contains("workflowhub.eu"))
+            .map(|u| u.trim_end_matches('/').to_string())
+            .unwrap_or_else(|| "https://workflowhub.eu".into());
+        let workflowhub_url = format!("{}/workflows/{}", wfhub_base, workflow_id);
 
         // 1. Get workflow detail for name
         let detail = match self.workflowhub.get_workflow_detail(workflow_id).await {

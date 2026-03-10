@@ -35,11 +35,14 @@
 				splashVisible = false;
 				appReady = true;
 			}, 500);
-		}, 1200);
+		}, 1500);
 	});
 </script>
 
 <svelte:head>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="anonymous">
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 	{@html `<style>${CSS}</style>`}
 </svelte:head>
 
@@ -61,9 +64,21 @@
 
 <div class:app-hidden={!appReady}>
 	<header>
-		<div class="header-top">
-			<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">Autopipe Hub</a>
-		</div>
+		<nav>
+			<a href="/" class="logo">
+				<img src="/logo.png" alt="Autopipe Hub" />
+				<span>Autopipe Hub</span>
+			</a>
+		</nav>
 	</header>
 	{@render children()}
+	<footer>
+		<div class="footer-content">
+			<a href="/" class="footer-logo">
+				<img src="/logo.png" alt="Autopipe Hub" />
+				<span>Autopipe Hub</span>
+			</a>
+			<span class="footer-copy">&copy; 2025 Autopipe</span>
+		</div>
+	</footer>
 </div>

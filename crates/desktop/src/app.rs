@@ -467,11 +467,10 @@ impl AutoPipeApp {
     }
 
     fn draw_connection_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("AutoPipeHub URLs");
+        ui.heading("Hub URLs");
         ui.add_space(10.0);
 
-        ui.label("The first URL is used as the active hub for MCP tools.");
-        ui.label("Example: http://192.168.100.30:8090");
+        ui.label("Registry URLs for pipeline search.");
         ui.add_space(10.0);
 
         let mut remove_idx: Option<usize> = None;

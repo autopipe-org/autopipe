@@ -131,6 +131,11 @@ impl AppConfig {
             config.plugins_dir = default_plugins_dir();
         }
 
+        // Ensure WorkflowHub URL is present for existing configs
+        if !config.registry_urls.iter().any(|u| u.contains("workflowhub.eu")) {
+            config.registry_urls.push("https://workflowhub.eu".into());
+        }
+
         config
     }
 
