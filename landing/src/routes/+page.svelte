@@ -1,4 +1,8 @@
 <script lang="ts">
+	import { env } from '$env/dynamic/public';
+
+	const hubUrl = env.PUBLIC_HUB_URL;
+
 	const features = [
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>`,
@@ -69,22 +73,12 @@
 <section class="hero">
 	<div class="hero-content">
 		<div class="hero-text">
-			<h1>Automate your bioinformatics pipelines effortlessly.</h1>
-			<p>Generate, execute, and share reproducible Snakemake pipelines with AI. From raw data to publication-ready results in minutes.</p>
+			<h1>End-to-End Pipeline Automation</h1>
+			<p>Generate, execute, visualize, and share reproducible Snakemake pipelines with AI.</p>
 			<a href="/getting-started" class="btn-primary">Get Started</a>
 		</div>
 		<div class="hero-visual">
-			<div class="hero-illustration">
-				<div class="node n1"></div>
-				<div class="node n2"></div>
-				<div class="node n3"></div>
-				<div class="node n4"></div>
-				<div class="node n5"></div>
-				<div class="connector c1"></div>
-				<div class="connector c2"></div>
-				<div class="connector c3"></div>
-				<div class="connector c4"></div>
-			</div>
+			<img src="/autopipe_landing.webp" alt="Autopipe architecture overview" class="hero-img" />
 		</div>
 	</div>
 </section>
@@ -129,7 +123,7 @@
 	<p>Download the desktop app to create, execute, and manage bioinformatics pipelines with Claude AI.</p>
 	<div class="download-buttons">
 		<a href="/getting-started" class="btn-primary">Get Started</a>
-		<a href="http://10.125.208.41:8090" target="_blank" rel="noopener" class="btn-secondary">Browse AutoPipeHub</a>
+		<a href={hubUrl} target="_blank" rel="noopener" class="btn-secondary">Browse AutoPipeHub</a>
 	</div>
 </section>
 
@@ -259,46 +253,17 @@
 		background: #f0fdf4;
 	}
 
-	/* Hero illustration */
+	/* Hero image */
 	.hero-visual {
 		display: flex;
 		justify-content: center;
 		align-items: center;
 	}
-	.hero-illustration {
-		position: relative;
-		width: 400px;
-		height: 300px;
-	}
-	.node {
-		position: absolute;
-		width: 60px;
-		height: 60px;
-		border-radius: 16px;
-		background: rgba(255, 255, 255, 0.15);
-		backdrop-filter: blur(10px);
-		border: 2px solid rgba(255, 255, 255, 0.3);
-		animation: float 3s ease-in-out infinite;
-	}
-	.n1 { top: 20px; left: 40px; animation-delay: 0s; background: rgba(16, 185, 129, 0.3); }
-	.n2 { top: 60px; left: 170px; animation-delay: 0.5s; background: rgba(59, 130, 246, 0.3); }
-	.n3 { top: 20px; right: 60px; animation-delay: 1s; background: rgba(245, 158, 11, 0.3); }
-	.n4 { bottom: 60px; left: 100px; animation-delay: 1.5s; background: rgba(139, 92, 246, 0.3); }
-	.n5 { bottom: 40px; right: 80px; animation-delay: 2s; background: rgba(236, 72, 153, 0.3); }
-	.connector {
-		position: absolute;
-		height: 2px;
-		background: rgba(255, 255, 255, 0.2);
-		transform-origin: left center;
-	}
-	.c1 { top: 50px; left: 100px; width: 70px; transform: rotate(10deg); }
-	.c2 { top: 90px; left: 230px; width: 80px; transform: rotate(-20deg); }
-	.c3 { top: 160px; left: 160px; width: 100px; transform: rotate(30deg); }
-	.c4 { bottom: 80px; left: 200px; width: 90px; transform: rotate(-10deg); }
-
-	@keyframes float {
-		0%, 100% { transform: translateY(0); }
-		50% { transform: translateY(-10px); }
+	.hero-img {
+		width: 100%;
+		max-width: 560px;
+		height: auto;
+		border-radius: 12px;
 	}
 
 	/* Features */
@@ -423,8 +388,8 @@
 		.hero h1 {
 			font-size: 2rem;
 		}
-		.hero-visual {
-			display: none;
+		.hero-img {
+			max-width: 100%;
 		}
 		.features-grid {
 			grid-template-columns: 1fr 1fr;

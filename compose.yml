@@ -23,6 +23,7 @@ services:
       - "8091:8091"
     environment:
       PORT: "8091"
+      PUBLIC_HUB_URL: "${PUBLIC_HUB_URL:-http://10.125.208.41:8090}"
       POSTGRES_HOST: "10.125.208.41"
       POSTGRES_PORT: "5433"
       POSTGRES_DB: autopipe_wf

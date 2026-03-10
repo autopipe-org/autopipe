@@ -1,3 +1,9 @@
+<script lang="ts">
+	import { env } from '$env/dynamic/public';
+
+	const hubUrl = env.PUBLIC_HUB_URL;
+</script>
+
 <svelte:head>
 	<title>Install Autopipe App</title>
 </svelte:head>
@@ -139,14 +145,14 @@
 				<div class="example-chat">
 					<div class="user-msg">Upload this pipeline to GitHub and publish it to AutoPipeHub</div>
 				</div>
-				<p>Your pipeline will be searchable on <a href="http://10.125.208.41:8090" target="_blank" rel="noopener">AutoPipeHub</a> and downloadable by anyone.</p>
+				<p>Your pipeline will be searchable on <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> and downloadable by anyone.</p>
 			</div>
 		</section>
 
 		<div class="next-steps">
 			<h3>What's Next?</h3>
 			<div class="next-grid">
-				<a href="http://10.125.208.41:8090" target="_blank" rel="noopener" class="next-card">
+				<a href={hubUrl} target="_blank" rel="noopener" class="next-card">
 					<strong>AutoPipeHub</strong>
 					<span>Browse and download community pipelines</span>
 				</a>

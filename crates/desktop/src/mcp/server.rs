@@ -77,6 +77,16 @@ struct StatusParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct CleanupFailedParams {
+    /// Docker image name (e.g. autopipe-my-pipeline)
+    image_name: String,
+    /// Run name of the failed run (matches the output subdirectory name)
+    run_name: String,
+    /// Remote output directory (optional, defaults to configured output directory under run_name)
+    output_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct CreateSymlinkParams {
     /// Source path on the remote server (the existing file/directory to link to)
     source: String,
@@ -965,7 +975,7 @@ impl AutoPipeServer {
 
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. If the build fails, analyze the error output, then call cleanup_failed to remove the broken image and any failed output directory, fix the pipeline code based on the error, and retry the build.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
@@ -981,7 +991,7 @@ impl AutoPipeServer {
                 params.image_name, output
             ))])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Docker build failed:\n{}",
+                "Docker build failed:\n{}\n\nNext steps: Analyze the error above, call cleanup_failed to remove the broken image, fix the pipeline code, then retry build_image.",
                 output
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
@@ -1018,7 +1028,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask. If the pipeline fails (check via check_status), analyze the log, call cleanup_failed to remove the failed output directory and Docker image, fix the pipeline code, rebuild, and retry.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1089,6 +1099,70 @@ impl AutoPipeServer {
             "Status: {}\nContainer: {}\nOutput: {}\nLog ({}):\n{}",
             status_str, container_name, output_dir, log_path, log_output
         ))]))
+    }
+
+    // ── Cleanup tools ────────────────────────────────────────────
+
+    #[tool(description = "Clean up artifacts from a failed pipeline build or execution. Removes the failed output directory and the Docker image. Call this ONLY after a build_image failure or after check_status confirms a pipeline execution failed. Steps: (1) checks if the Docker image has running containers — refuses to remove if so, (2) removes the output directory, (3) removes the Docker image and dangling build layers. After cleanup, fix the pipeline code and retry.")]
+    async fn cleanup_failed(
+        &self,
+        Parameters(params): Parameters<CleanupFailedParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let output_dir = self.resolve_output_dir(&params.output_dir, &params.run_name);
+        let mut results = Vec::new();
+
+        // 1. Check if image has running containers
+        let running_check = format!(
+            "docker ps -q --filter ancestor='{}' 2>/dev/null",
+            params.image_name
+        );
+        if let Ok((output, 0)) = self.ssh_run(&running_check).await {
+            if !output.trim().is_empty() {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot clean up: image '{}' has running containers. Stop them first with:\n  docker stop $(docker ps -q --filter ancestor='{}')",
+                    params.image_name, params.image_name
+                ))]));
+            }
+        }
+
+        // 2. Remove failed output directory
+        let check_dir = format!("test -d '{}'", output_dir);
+        if let Ok((_, 0)) = self.ssh_run(&check_dir).await {
+            let rm_cmd = format!("rm -rf '{}'", output_dir);
+            match self.ssh_run(&rm_cmd).await {
+                Ok((_, 0)) => results.push(format!("Removed output directory: {}", output_dir)),
+                Ok((err, _)) => results.push(format!("Failed to remove output directory: {}", err.trim())),
+                Err(e) => results.push(format!("Error removing output directory: {}", e)),
+            }
+        } else {
+            results.push(format!("Output directory not found (already clean): {}", output_dir));
+        }
+
+        // 3. Remove Docker image
+        let check_img = format!(
+            "docker images -q '{}' 2>/dev/null",
+            params.image_name
+        );
+        if let Ok((output, 0)) = self.ssh_run(&check_img).await {
+            if !output.trim().is_empty() {
+                let rmi_cmd = format!("docker rmi '{}' 2>/dev/null", params.image_name);
+                match self.ssh_run(&rmi_cmd).await {
+                    Ok((_, 0)) => results.push(format!("Removed Docker image: {}", params.image_name)),
+                    Ok((err, _)) => results.push(format!("Failed to remove image: {}", err.trim())),
+                    Err(e) => results.push(format!("Error removing image: {}", e)),
+                }
+            } else {
+                results.push(format!("Docker image not found (already clean): {}", params.image_name));
+            }
+        }
+
+        // 4. Prune dangling images from failed builds
+        let _ = self.ssh_run("docker image prune -f --filter dangling=true 2>/dev/null").await;
+        results.push("Pruned dangling images from incomplete builds.".to_string());
+
+        Ok(CallToolResult::success(vec![Content::text(
+            results.join("\n"),
+        )]))
     }
 
     // ── Remote file tools ───────────────────────────────────────
