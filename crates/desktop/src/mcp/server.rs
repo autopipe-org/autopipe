@@ -1,4 +1,4 @@
-use common::api_client::{RegistryClient, WorkflowHubClient};
+use common::api_client::RegistryClient;
 use common::models::{clean_content, parse_ro_crate_metadata, PipelineMetadata};
 use common::templates;
 use rmcp::handler::server::tool::ToolRouter;
@@ -164,20 +164,11 @@ struct InstallPluginParams {
     plugin_name: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-struct ImportWorkflowHubParams {
-    /// WorkflowHub workflow ID (numeric)
-    workflow_id: i32,
-    /// Remote directory path (optional, defaults to configured pipelines directory)
-    output_dir: Option<String>,
-}
-
 // ── Server ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub struct AutoPipeServer {
     registry: RegistryClient,
-    workflowhub: WorkflowHubClient,
     config: AppConfig,
     tool_router: ToolRouter<Self>,
 }
@@ -417,17 +408,8 @@ impl AutoPipeServer {
 impl AutoPipeServer {
     pub fn new(config: AppConfig) -> Self {
         let registry = RegistryClient::new(&config.registry_url);
-        // Use WorkflowHub URL from config registry_urls, fallback to default
-        let wfhub_url = config
-            .registry_urls
-            .iter()
-            .find(|u| u.contains("workflowhub.eu"))
-            .cloned()
-            .unwrap_or_else(|| "https://workflowhub.eu".into());
-        let workflowhub = WorkflowHubClient::new(&wfhub_url);
         Self {
             registry,
-            workflowhub,
             config,
             tool_router: Self::tool_router(),
         }
@@ -463,50 +445,21 @@ impl AutoPipeServer {
 
     // ── Pipeline registry tools ─────────────────────────────────
 
-    #[tool(description = "Search pipelines by keyword across AutoPipeHub and WorkflowHub registries. Results include a 'source' field: null/absent means AutoPipeHub, 'workflowhub' means WorkflowHub. For WorkflowHub results, use import_from_workflowhub to import them.")]
+    #[tool(description = "Search pipelines by keyword in the registry")]
     async fn search_pipelines(
         &self,
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Search both registries concurrently
-        let (autopipe_result, workflowhub_result) = tokio::join!(
-            self.registry.search(&params.query),
-            self.workflowhub.search(&params.query)
-        );
-
-        let mut results = Vec::new();
-
-        // Add AutoPipeHub results
-        match autopipe_result {
-            Ok(mut items) => results.append(&mut items),
-            Err(e) => {
-                results.push(common::models::PipelineSummary {
-                    pipeline_id: -1,
-                    name: format!("[AutoPipeHub search error: {}]", e),
-                    description: String::new(),
-                    tools: vec![],
-                    input_formats: vec![],
-                    output_formats: vec![],
-                    tags: vec![],
-                    github_url: String::new(),
-                    author: String::new(),
-                    version: String::new(),
-                    verified: false,
-                    forked_from: None,
-                    created_at: None,
-                    source: None,
-                });
+        match self.registry.search(&params.query).await {
+            Ok(results) => {
+                let text = serde_json::to_string_pretty(&results).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(text)]))
             }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Search failed: {}",
+                e
+            ))])),
         }
-
-        // Add WorkflowHub results (already have source: "workflowhub")
-        match workflowhub_result {
-            Ok(mut items) => results.append(&mut items),
-            Err(_) => {} // Silently skip WorkflowHub errors
-        }
-
-        let text = serde_json::to_string_pretty(&results).unwrap_or_default();
-        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "List all pipelines in the registry")]
@@ -521,123 +474,6 @@ impl AutoPipeServer {
                 e
             ))])),
         }
-    }
-
-    #[tool(description = "Import a Snakemake workflow from WorkflowHub into a local pipeline directory. Downloads the Snakefile from WorkflowHub and creates a pipeline directory on the SSH server. The pipeline will NOT have a Dockerfile, config.yaml, ro-crate-metadata.json, or README.md yet — those need to be generated. After calling this tool, create the missing files (Dockerfile, config.yaml, ro-crate-metadata.json with isBasedOn pointing to the WorkflowHub URL, and README.md), then upload_workflow and publish_workflow as usual.")]
-    async fn import_from_workflowhub(
-        &self,
-        Parameters(params): Parameters<ImportWorkflowHubParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let workflow_id = params.workflow_id;
-        let wfhub_base = self.config.registry_urls
-            .iter()
-            .find(|u| u.contains("workflowhub.eu"))
-            .map(|u| u.trim_end_matches('/').to_string())
-            .unwrap_or_else(|| "https://workflowhub.eu".into());
-        let workflowhub_url = format!("{}/workflows/{}", wfhub_base, workflow_id);
-
-        // 1. Get workflow detail for name
-        let detail = match self.workflowhub.get_workflow_detail(workflow_id).await {
-            Ok(d) => d,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to get workflow detail from WorkflowHub: {}", e
-                ))]));
-            }
-        };
-
-        let workflow_name = detail
-            .get("data")
-            .and_then(|d| d.get("attributes"))
-            .and_then(|a| a.get("title"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("unknown-workflow");
-
-        // Sanitize name for directory
-        let dir_name: String = workflow_name
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string();
-
-        let description = detail
-            .get("data")
-            .and_then(|d| d.get("attributes"))
-            .and_then(|a| a.get("description"))
-            .and_then(|d| d.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        // 2. Download Snakefile(s) via TRS API
-        let files = match self.workflowhub.get_workflow_files(workflow_id).await {
-            Ok(f) => f,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to download workflow files from WorkflowHub: {}", e
-                ))]));
-            }
-        };
-
-        if files.is_empty() {
-            return Ok(CallToolResult::error(vec![Content::text(
-                "No Snakemake files found for this workflow on WorkflowHub. \
-                 It may not be a Snakemake workflow."
-            )]));
-        }
-
-        // 3. Create pipeline directory on SSH server
-        let base_dir = params
-            .output_dir
-            .unwrap_or_else(|| self.config.full_pipelines_dir());
-        let dir = format!("{}/{}", base_dir.trim_end_matches('/'), dir_name);
-
-        match self.ssh_run(&format!("mkdir -p '{}'", dir)).await {
-            Ok((_, 0)) => {}
-            Ok((output, _)) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot create directory '{}': {}", dir, output.trim()
-                ))]));
-            }
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "SSH error: {}", e
-                ))]));
-            }
-        }
-
-        // 4. Write Snakefile(s) to SSH server
-        let mut written = Vec::new();
-        for (filename, content) in &files {
-            let remote_path = format!("{}/{}", dir, filename);
-            if let Err(e) = self.ssh_write_file(&remote_path, content).await {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to write {}: {}", filename, e
-                ))]));
-            }
-            written.push(filename.as_str());
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Successfully imported workflow from WorkflowHub!\n\
-             Source: {}\n\
-             Pipeline directory: {}\n\
-             Files written: {}\n\n\
-             ⚠️ This pipeline is missing required files. Please create:\n\
-             1. Dockerfile — container environment with all tools\n\
-             2. config.yaml — pipeline parameters\n\
-             3. ro-crate-metadata.json — include `\"isBasedOn\": {{\"@id\": \"{}\"}}` in the Dataset node\n\
-             4. README.md — usage instructions\n\n\
-             Original workflow name: {}\n\
-             Description: {}",
-            workflowhub_url,
-            dir,
-            written.join(", "),
-            workflowhub_url,
-            workflow_name,
-            if description.len() > 500 { &description[..500] } else { &description }
-        ))]))
     }
 
     #[tool(description = "Download a pipeline by ID from the registry and save it to the remote SSH server. Fetches pipeline files from its GitHub repository. If output_dir is omitted, saves to the configured pipelines directory.")]

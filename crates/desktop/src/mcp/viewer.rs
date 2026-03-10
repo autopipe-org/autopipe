@@ -711,7 +711,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AutoPipe Results Viewer</title>
+<title>Autopipe Viewer</title>
 <link rel="icon" href="/logo.png" type="image/png">
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -762,8 +762,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 </head>
 <body>
 <div class="header">
-  <span class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</span>
-  <span class="header-sub">Results Viewer</span>
+  <span class="logo"><img src="/logo.png" alt="" class="logo-icon">Autopipe Viewer</span>
 </div>
 <div class="layout">
   <div class="sidebar">

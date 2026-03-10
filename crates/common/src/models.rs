@@ -42,9 +42,6 @@ pub struct PipelineSummary {
     pub forked_from: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    /// Source registry: "autopipehub" or "workflowhub". Absent means autopipehub.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<String>,
 }
 
 /// Metadata parsed from ro-crate-metadata.json inside a pipeline directory.

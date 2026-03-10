@@ -56,7 +56,6 @@ fn default_registry_url() -> String {
 fn default_registry_urls() -> Vec<String> {
     vec![
         "http://localhost:8090".into(),
-        "https://workflowhub.eu".into(),
     ]
 }
 
@@ -129,11 +128,6 @@ impl AppConfig {
         // Migrate old relative "plugins" default to platform-specific path
         if config.plugins_dir == "plugins" {
             config.plugins_dir = default_plugins_dir();
-        }
-
-        // Ensure WorkflowHub URL is present for existing configs
-        if !config.registry_urls.iter().any(|u| u.contains("workflowhub.eu")) {
-            config.registry_urls.push("https://workflowhub.eu".into());
         }
 
         config

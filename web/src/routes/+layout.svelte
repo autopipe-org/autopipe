@@ -78,7 +78,7 @@
 				<img src="/logo.png" alt="Autopipe Hub" />
 				<span>Autopipe Hub</span>
 			</a>
-			<span class="footer-copy">&copy; 2025 Autopipe</span>
+			<span class="footer-copy">&copy; 2026 Autopipe</span>
 		</div>
 	</footer>
 </div>
