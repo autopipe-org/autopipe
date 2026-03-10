@@ -16,6 +16,7 @@ export interface PipelineSummary {
 	version: string;
 	verified: boolean;
 	forked_from: number | null;
+	based_on_url: string | null;
 	created_at: string | null;
 }
 
@@ -33,6 +34,7 @@ export interface Pipeline {
 	version: string;
 	verified: boolean;
 	forked_from?: number | null;
+	based_on_url?: string | null;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -51,6 +53,7 @@ function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
+		based_on_url: r.basedOnUrl ?? null,
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -70,6 +73,7 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		version: r.version ?? '1.0.0',
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
+		based_on_url: r.basedOnUrl ?? null,
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};

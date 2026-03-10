@@ -34,7 +34,7 @@ export const GET: RequestHandler = async ({ params, url }) => {
 		['Snakefile', files.snakefile],
 		['Dockerfile', files.dockerfile],
 		['config.yaml', files.config_yaml],
-		['metadata.json', files.metadata_json],
+		['ro-crate-metadata.json', files.metadata_json],
 		['README.md', files.readme]
 	];
 

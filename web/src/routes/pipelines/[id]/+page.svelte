@@ -15,14 +15,14 @@
 	type FileTab = { name: string; content: string; lang: string };
 	const langMap: Record<string, string> = {
 		'Snakefile': 'python', 'Dockerfile': 'dockerfile',
-		'config.yaml': 'yaml', 'metadata.json': 'json', 'README.md': 'markdown'
+		'config.yaml': 'yaml', 'ro-crate-metadata.json': 'json', 'README.md': 'markdown'
 	};
 	const files: FileTab[] = [];
 	if (f.snakefile) files.push({ name: 'Snakefile', content: f.snakefile, lang: 'python' });
 	if (f.dockerfile) files.push({ name: 'Dockerfile', content: f.dockerfile, lang: 'dockerfile' });
 	if (f.config_yaml) files.push({ name: 'config.yaml', content: f.config_yaml, lang: 'yaml' });
 	if (f.metadata_json) {
-		files.push({ name: 'metadata.json', content: f.metadata_json, lang: 'json' });
+		files.push({ name: 'ro-crate-metadata.json', content: f.metadata_json, lang: 'json' });
 	}
 	if (f.readme) files.push({ name: 'README.md', content: f.readme, lang: 'markdown' });
 
@@ -67,7 +67,9 @@
 				<div>
 					<h2>{p.name}</h2>
 					<p class="detail-desc">{p.description}</p>
-					{#if data.basedOn}
+					{#if data.basedOnUrl}
+						<p class="based-on">Based on: <a href={data.basedOnUrl} target="_blank" rel="noopener">{data.basedOnUrl.includes('workflowhub.eu') ? 'WorkflowHub' : 'External'} workflow</a></p>
+					{:else if data.basedOn}
 						<p class="based-on">Based on: <a href="/pipelines/{data.basedOn.pipeline_id}">{data.basedOn.name} v{data.basedOn.version}</a> by {data.basedOn.author}</p>
 					{/if}
 				</div>

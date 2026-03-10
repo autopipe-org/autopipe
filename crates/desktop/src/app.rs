@@ -431,7 +431,7 @@ impl AutoPipeApp {
             // Step 2
             ui.heading("Step 2: Configure Settings");
             ui.add_space(5.0);
-            ui.label("Go to the Connection tab to set the registry server URL.");
+            ui.label("Go to the Connection tab to set the AutoPipeHub URL.");
             ui.label("Go to the SSH tab to configure the remote server connection.");
 
             ui.add_space(15.0);
@@ -458,7 +458,7 @@ impl AutoPipeApp {
             ui.label("  - Create new bioinformatics pipelines");
             ui.label("  - Search and download existing workflows");
             ui.label("  - Build, run, and monitor pipelines on your server");
-            ui.label("  - Upload and publish workflows to the registry");
+            ui.label("  - Upload and publish workflows to AutoPipeHub");
             ui.add_space(5.0);
             ui.label("Plugins & Result Viewer:");
             ui.label("  - View pipeline results");
@@ -467,10 +467,10 @@ impl AutoPipeApp {
     }
 
     fn draw_connection_tab(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Registry Connections");
+        ui.heading("AutoPipeHub URLs");
         ui.add_space(10.0);
 
-        ui.label("The first URL is used as the active registry for MCP tools.");
+        ui.label("The first URL is used as the active hub for MCP tools.");
         ui.label("Example: http://192.168.100.30:8090");
         ui.add_space(10.0);
 
@@ -494,7 +494,7 @@ impl AutoPipeApp {
         }
 
         ui.add_space(5.0);
-        if ui.button("+ Add Registry URL").clicked() {
+        if ui.button("+ Add Hub URL").clicked() {
             self.config.registry_urls.push(String::new());
         }
 
@@ -676,8 +676,8 @@ impl AutoPipeApp {
             ui.separator();
             ui.add_space(10.0);
 
-            // --- Registry ---
-            ui.heading("Install from Registry");
+            // --- AutoPipeHub ---
+            ui.heading("Install from AutoPipeHub");
             ui.add_space(5.0);
 
             // Status message
@@ -718,7 +718,7 @@ impl AutoPipeApp {
             }
 
             if self.plugin_registry.is_empty() && self.plugin_registry_loaded {
-                ui.label("No plugins found in registry.");
+                ui.label("No plugins found on AutoPipeHub.");
             }
 
             // Collect install actions to avoid borrow issues
@@ -887,8 +887,8 @@ impl AutoPipeApp {
 
         ui.add_space(5.0);
 
-        // Registry URLs
-        ui.label("Registry URLs:");
+        // AutoPipeHub URLs
+        ui.label("AutoPipeHub URLs:");
         for (i, url) in self.config.registry_urls.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(format!("  {}.", i + 1));
@@ -1076,7 +1076,7 @@ async fn run_device_flow(registry_url: &str, tx: mpsc::Sender<GitHubMsg>) {
     let client = reqwest::Client::new();
     let base = registry_url.trim_end_matches('/');
 
-    // Step 1: Request device code from our registry server
+    // Step 1: Request device code from AutoPipeHub
     let url = format!("{}/api/auth/device", base);
     let resp = match client.post(&url).send().await {
         Ok(r) => r,
@@ -1206,14 +1206,14 @@ async fn fetch_registry_plugins(
     {
         Ok(r) => r,
         Err(e) => {
-            let _ = tx.send(PluginMsg::Error(format!("Registry request failed: {}", e)));
+            let _ = tx.send(PluginMsg::Error(format!("AutoPipeHub request failed: {}", e)));
             return;
         }
     };
 
     if !resp.status().is_success() {
         let _ = tx.send(PluginMsg::Error(format!(
-            "Registry returned status {}",
+            "AutoPipeHub returned status {}",
             resp.status()
         )));
         return;

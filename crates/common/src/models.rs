@@ -42,9 +42,12 @@ pub struct PipelineSummary {
     pub forked_from: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
+    /// Source registry: "autopipehub" or "workflowhub". Absent means autopipehub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
-/// Metadata parsed from metadata.json inside a pipeline directory.
+/// Metadata parsed from ro-crate-metadata.json inside a pipeline directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineMetadata {
     pub name: String,
@@ -63,6 +66,131 @@ pub struct PipelineMetadata {
     pub tags: Vec<String>,
     #[serde(default)]
     pub verified: bool,
+    /// URL of the original workflow this pipeline is based on (e.g., WorkflowHub page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub based_on_url: Option<String>,
+}
+
+/// Parse pipeline metadata from RO-Crate format (ro-crate-metadata.json).
+/// Extracts fields from the @graph Dataset node and converts to PipelineMetadata.
+pub fn parse_ro_crate_metadata(json_str: &str) -> Result<PipelineMetadata, String> {
+    let v: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| format!("Invalid JSON: {}", e))?;
+
+    // Find the Dataset node in @graph
+    let graph = v.get("@graph")
+        .and_then(|g| g.as_array())
+        .ok_or("Missing @graph array")?;
+
+    let dataset = graph.iter()
+        .find(|node| {
+            node.get("@id").and_then(|id| id.as_str()) == Some("./")
+        })
+        .ok_or("Missing Dataset node (@id: \"./\") in @graph")?;
+
+    let name = dataset.get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let description = dataset.get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let version = dataset.get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("1.0.0")
+        .to_string();
+
+    // Extract creator name from referenced Person node
+    let author = dataset.get("creator")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|creator_ref| {
+            let creator_id = creator_ref.get("@id").and_then(|v| v.as_str())?;
+            // Look up the Person node in @graph
+            graph.iter()
+                .find(|node| node.get("@id").and_then(|id| id.as_str()) == Some(creator_id))
+                .and_then(|node| node.get("name").and_then(|v| v.as_str()))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default();
+
+    // Extract tool names from softwareRequirements references
+    let tools = dataset.get("softwareRequirements")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|tool_ref| {
+                let tool_id = tool_ref.get("@id").and_then(|v| v.as_str())?;
+                graph.iter()
+                    .find(|node| node.get("@id").and_then(|id| id.as_str()) == Some(tool_id))
+                    .and_then(|node| node.get("name").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    // Extract input format names from FormalParameter references
+    let input_formats = dataset.get("input")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|param_ref| {
+                let param_id = param_ref.get("@id").and_then(|v| v.as_str())?;
+                graph.iter()
+                    .find(|node| node.get("@id").and_then(|id| id.as_str()) == Some(param_id))
+                    .and_then(|node| node.get("name").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    // Extract output format names from FormalParameter references
+    let output_formats = dataset.get("output")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter().filter_map(|param_ref| {
+                let param_id = param_ref.get("@id").and_then(|v| v.as_str())?;
+                graph.iter()
+                    .find(|node| node.get("@id").and_then(|id| id.as_str()) == Some(param_id))
+                    .and_then(|node| node.get("name").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    let tags = dataset.get("keywords")
+        .and_then(|k| k.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let verified = false; // RO-Crate doesn't have this; default to false
+
+    // Extract isBasedOn URL (e.g., WorkflowHub source)
+    let based_on_url = dataset.get("isBasedOn")
+        .and_then(|b| {
+            // Can be {"@id": "url"} or just a string
+            b.get("@id").and_then(|id| id.as_str())
+                .or_else(|| b.as_str())
+        })
+        .map(|s| s.to_string());
+
+    Ok(PipelineMetadata {
+        name,
+        description,
+        version,
+        author,
+        tools,
+        input_formats,
+        output_formats,
+        tags,
+        verified,
+        based_on_url,
+    })
 }
 
 /// A plugin stored in the registry.

@@ -51,8 +51,8 @@
 					class="line"
 				></span><span class="dot"></span>
 			</div>
-			<div class="splash-title">AutoPipe</div>
-			<div class="splash-sub">Bioinformatics Pipeline Registry</div>
+			<div class="splash-title">Autopipe Hub</div>
+			<div class="splash-sub"></div>
 			<div class="splash-bar"><div class="splash-bar-fill"></div></div>
 			<div class="splash-loading">Loading...</div>
 		</div>
@@ -62,13 +62,8 @@
 <div class:app-hidden={!appReady}>
 	<header>
 		<div class="header-top">
-			<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">AutoPipe</a>
-			<span class="header-sub">Bioinformatics Pipeline Registry</span>
+			<a href="/" class="logo"><img src="/logo.png" alt="" class="logo-icon">Autopipe Hub</a>
 		</div>
-		<nav class="header-tabs">
-			<a href="/" class="header-tab" class:active={$page.url.pathname === '/'}>Pipelines</a>
-			<a href="/plugins" class="header-tab" class:active={$page.url.pathname.startsWith('/plugins')}>Plugins</a>
-		</nav>
 	</header>
 	{@render children()}
 </div>

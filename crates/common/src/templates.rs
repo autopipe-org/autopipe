@@ -67,24 +67,90 @@ threads: 4
 # extra_params: ""
 "#;
 
-/// metadata.json template for new pipelines.
-pub const METADATA_JSON_TEMPLATE: &str = r#"{
-  "name": "pipeline-name",
-  "description": "One paragraph description of what this pipeline does.",
-  "version": "1.0.0",
-  "author": "",
-  "tools": ["tool1", "tool2"],
-  "input_formats": ["fastq", "fastq.gz"],
-  "output_formats": ["bam", "vcf"],
-  "tags": ["tag1", "tag2"],
-  "parameters": {
-    "threads": "Number of CPU threads",
-    "reference": "Path to reference genome"
-  },
-  "verified": false,
-  "created_at": ""
+/// RO-Crate metadata template for new pipelines (ro-crate-metadata.json).
+pub const RO_CRATE_METADATA_TEMPLATE: &str = r##"{
+  "@context": "https://w3id.org/ro/crate/1.1/context",
+  "@graph": [
+    {
+      "@id": "ro-crate-metadata.json",
+      "@type": "CreativeWork",
+      "about": {"@id": "./"},
+      "conformsTo": {"@id": "https://w3id.org/ro/crate/1.1"}
+    },
+    {
+      "@id": "./",
+      "@type": ["Dataset", "SoftwareSourceCode", "ComputationalWorkflow"],
+      "name": "pipeline-name",
+      "description": "One paragraph description of what this pipeline does.",
+      "version": "1.0.0",
+      "license": {"@id": "https://spdx.org/licenses/MIT"},
+      "programmingLanguage": {"@id": "#snakemake"},
+      "creator": [{"@id": "#author"}],
+      "dateCreated": "",
+      "sdPublisher": {"@id": "https://hub.autopipe.org"},
+      "isBasedOn": {"@id": ""},
+      "softwareRequirements": [
+        {"@id": "#tool1"},
+        {"@id": "#tool2"}
+      ],
+      "input": [
+        {"@id": "#input-fastq"},
+        {"@id": "#input-fastq-gz"}
+      ],
+      "output": [
+        {"@id": "#output-bam"},
+        {"@id": "#output-vcf"}
+      ],
+      "keywords": ["tag1", "tag2"]
+    },
+    {
+      "@id": "#author",
+      "@type": "Person",
+      "name": ""
+    },
+    {
+      "@id": "#snakemake",
+      "@type": "ComputerLanguage",
+      "name": "Snakemake",
+      "url": "https://snakemake.readthedocs.io"
+    },
+    {
+      "@id": "#tool1",
+      "@type": "SoftwareApplication",
+      "name": "tool1"
+    },
+    {
+      "@id": "#tool2",
+      "@type": "SoftwareApplication",
+      "name": "tool2"
+    },
+    {
+      "@id": "#input-fastq",
+      "@type": "FormalParameter",
+      "name": "fastq",
+      "encodingFormat": "application/x-fastq"
+    },
+    {
+      "@id": "#input-fastq-gz",
+      "@type": "FormalParameter",
+      "name": "fastq.gz",
+      "encodingFormat": "application/gzip"
+    },
+    {
+      "@id": "#output-bam",
+      "@type": "FormalParameter",
+      "name": "bam",
+      "encodingFormat": "application/x-bam"
+    },
+    {
+      "@id": "#output-vcf",
+      "@type": "FormalParameter",
+      "name": "vcf",
+      "encodingFormat": "text/x-vcf"
+    }
+  ]
 }
-"#;
+"##;
 
 /// Pipeline generation guidelines for Claude (MCP resource).
 pub const GENERATION_GUIDE: &str = r#"# AutoPipe Pipeline Generation Guide
@@ -94,7 +160,7 @@ Every pipeline is a directory with 5 required files:
 - Snakefile: Snakemake workflow
 - Dockerfile: Execution environment
 - config.yaml: Parameters
-- metadata.json: Name, description, tools, I/O, tags
+- ro-crate-metadata.json: Name, description, tools, I/O, tags
 - README.md: Usage instructions
 
 ## Snakefile Rules
@@ -124,15 +190,14 @@ Every pipeline is a directory with 5 required files:
   - Output directory is mounted at `/output` at runtime
   - Do NOT use absolute host paths like `/home/user/data/...`
 
-## metadata.json Required Fields
-- `name`: pipeline name (lowercase, hyphens)
-- `description`: one paragraph
-- `version`: semver
-- `tools`: array of tool names
-- `input_formats`: array of input file types
-- `output_formats`: array of output file types
-- `tags`: array of keywords for search
-- `verified`: boolean (false until tested)
+## ro-crate-metadata.json (RO-Crate Format)
+- Must follow RO-Crate 1.1 specification (JSON-LD)
+- Dataset node requires: `name`, `description`, `version`, `license`
+- `creator`: Person objects with `name` field
+- `softwareRequirements`: SoftwareApplication objects with `name` field
+- `input` / `output`: FormalParameter objects with `name` and `encodingFormat`
+- `keywords`: array of search tags
+- `programmingLanguage`: always reference Snakemake
 
 ## README.md Content
 - What the pipeline does (1-2 sentences)

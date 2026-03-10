@@ -37,9 +37,9 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 		const [, owner, repo, subpath] = urlMatch;
 
-		// Try manifest.json first, fall back to metadata.json
+		// Try manifest.json first, fall back to ro-crate-metadata.json
 		let metadata: Record<string, unknown> | null = null;
-		for (const filename of ['manifest.json', 'metadata.json']) {
+		for (const filename of ['manifest.json', 'ro-crate-metadata.json']) {
 			const metaPath = subpath ? `${subpath}/${filename}` : filename;
 			const metaResp = await fetch(
 				`https://api.github.com/repos/${owner}/${repo}/contents/${metaPath}`,
@@ -62,7 +62,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 		if (!metadata) {
 			return json(
-				{ error: 'Cannot fetch manifest.json (or metadata.json) from GitHub repository' },
+				{ error: 'Cannot fetch manifest.json (or ro-crate-metadata.json) from GitHub repository' },
 				{ status: 400 }
 			);
 		}

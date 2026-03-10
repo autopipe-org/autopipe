@@ -47,16 +47,64 @@ export const POST: RequestHandler = async ({ request }) => {
 			);
 		}
 
-		// 4. Parse metadata.json
-		let metadata;
+		// 4. Parse ro-crate-metadata.json (supports RO-Crate format)
+		let metadata: Record<string, unknown>;
 		try {
-			metadata = files.metadata_json ? JSON.parse(files.metadata_json) : {};
+			const raw = files.metadata_json ? JSON.parse(files.metadata_json) : {};
+			// Check if RO-Crate format
+			if (raw['@context'] && raw['@graph']) {
+				const graph = raw['@graph'] as Array<Record<string, unknown>>;
+				const dataset = graph.find((n: Record<string, unknown>) => n['@id'] === './');
+				if (!dataset) {
+					return json({ error: 'ro-crate-metadata.json missing Dataset node (@id: "./")' }, { status: 400 });
+				}
+				// Extract fields from RO-Crate Dataset node
+				const tools = ((dataset['softwareRequirements'] as Array<{['@id']: string}>) || [])
+					.map(ref => {
+						const node = graph.find((n: Record<string, unknown>) => n['@id'] === ref['@id']);
+						return node ? (node['name'] as string) : '';
+					}).filter(Boolean);
+				const input_formats = ((dataset['input'] as Array<{['@id']: string}>) || [])
+					.map(ref => {
+						const node = graph.find((n: Record<string, unknown>) => n['@id'] === ref['@id']);
+						return node ? (node['name'] as string) : '';
+					}).filter(Boolean);
+				const output_formats = ((dataset['output'] as Array<{['@id']: string}>) || [])
+					.map(ref => {
+						const node = graph.find((n: Record<string, unknown>) => n['@id'] === ref['@id']);
+						return node ? (node['name'] as string) : '';
+					}).filter(Boolean);
+				const creator_refs = (dataset['creator'] as Array<{['@id']: string}>) || [];
+				const author_name = creator_refs.length > 0
+					? (graph.find((n: Record<string, unknown>) => n['@id'] === creator_refs[0]['@id'])?.['name'] as string || '')
+					: '';
+				// Extract isBasedOn URL (e.g., WorkflowHub source)
+				const isBasedOn = dataset['isBasedOn'] as { '@id'?: string } | string | undefined;
+				const based_on_url = typeof isBasedOn === 'string'
+					? isBasedOn
+					: (isBasedOn?.['@id'] || null);
+
+				metadata = {
+					name: dataset['name'] as string,
+					description: (dataset['description'] as string) || '',
+					version: (dataset['version'] as string) || '1.0.0',
+					author: author_name,
+					tools,
+					input_formats,
+					output_formats,
+					tags: (dataset['keywords'] as string[]) || [],
+					verified: false,
+					based_on_url: based_on_url && based_on_url.length > 0 ? based_on_url : null
+				};
+			} else {
+				metadata = raw;
+			}
 		} catch {
-			return json({ error: 'metadata.json is not valid JSON' }, { status: 400 });
+			return json({ error: 'ro-crate-metadata.json is not valid JSON' }, { status: 400 });
 		}
 
 		if (!metadata.name) {
-			return json({ error: 'metadata.json must contain a "name" field' }, { status: 400 });
+			return json({ error: 'ro-crate-metadata.json must contain a "name" field' }, { status: 400 });
 		}
 
 		// 5. Security validation
@@ -127,7 +175,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				author,
 				version,
 				verified: false,
-				forkedFrom: resolvedForkedFrom
+				forkedFrom: resolvedForkedFrom,
+				basedOnUrl: (metadata.based_on_url as string) || null
 			})
 			.returning({ pipelineId: userPipelines.pipelineId });
 

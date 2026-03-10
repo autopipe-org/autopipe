@@ -54,7 +54,10 @@ fn default_registry_url() -> String {
 }
 
 fn default_registry_urls() -> Vec<String> {
-    vec!["http://localhost:8090".into()]
+    vec![
+        "http://localhost:8090".into(),
+        "https://workflowhub.eu".into(),
+    ]
 }
 
 fn default_github_repo() -> String {

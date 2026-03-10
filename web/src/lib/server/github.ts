@@ -106,7 +106,7 @@ export async function fetchGithubFiles(githubUrl: string): Promise<GithubFiles> 
 		fetchFile(owner, repo, path, 'Snakefile'),
 		fetchFile(owner, repo, path, 'Dockerfile'),
 		fetchFile(owner, repo, path, 'config.yaml'),
-		fetchFile(owner, repo, path, 'metadata.json'),
+		fetchFile(owner, repo, path, 'ro-crate-metadata.json'),
 		fetchFile(owner, repo, path, 'README.md')
 	]);
 
@@ -135,7 +135,7 @@ export async function fetchGithubFilesAtRef(
 		fetchFile(owner, repo, path, 'Snakefile', ref),
 		fetchFile(owner, repo, path, 'Dockerfile', ref),
 		fetchFile(owner, repo, path, 'config.yaml', ref),
-		fetchFile(owner, repo, path, 'metadata.json', ref),
+		fetchFile(owner, repo, path, 'ro-crate-metadata.json', ref),
 		fetchFile(owner, repo, path, 'README.md', ref)
 	]);
 

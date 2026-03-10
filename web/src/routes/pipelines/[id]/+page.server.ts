@@ -52,5 +52,8 @@ export const load: PageServerLoad = async ({ params }) => {
 		}
 	}
 
-	return { pipeline, files, versionChain, basedOn };
+	// External based_on_url (e.g., WorkflowHub source)
+	const basedOnUrl: string | null = pipeline.based_on_url ?? null;
+
+	return { pipeline, files, versionChain, basedOn, basedOnUrl };
 };
