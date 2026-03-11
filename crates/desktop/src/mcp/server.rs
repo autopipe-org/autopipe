@@ -1097,7 +1097,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. After starting, tell the user it is running and they can ask to check status later. Do NOT call check_status automatically — wait for the user to ask. If the pipeline fails (check via check_status), analyze the log, call cleanup_failed to remove the failed output directory and Docker image, fix the pipeline code, rebuild, and retry.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. If the pipeline fails (check via check_status or list_running_pipelines), analyze the log, call cleanup_failed to remove the failed output directory and Docker image, fix the pipeline code, rebuild, and retry. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1117,6 +1117,15 @@ impl AutoPipeServer {
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", container_name)).await;
         let _ = self.ssh_run(&format!("mkdir -p '{}'", output_dir)).await;
 
+        // Write run metadata for list_running_pipelines
+        let run_meta = format!(
+            r#"{{"run_name":"{}","image_name":"{}","container_name":"{}","input_dir":"{}","started_at":"{}"}}"#,
+            params.run_name, params.image_name, container_name, params.input_dir,
+            chrono::Utc::now().to_rfc3339()
+        );
+        let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
+        let _ = self.ssh_run(&format!("cat > '{}' << 'METAEOF'\n{}\nMETAEOF", meta_path, run_meta)).await;
+
         let cmd = format!(
             "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
             container_name, pipeline_mount, params.input_dir, symlink_mounts, output_dir, params.image_name, cores, log_path
@@ -1125,13 +1134,58 @@ impl AutoPipeServer {
         match self.ssh_run(&cmd).await {
             Ok((output, 0)) => {
                 let pid = output.trim().lines().last().unwrap_or("unknown");
+
+                // Monitor first ~90 seconds for early failures (check at 10s, 30s, 60s, 90s)
+                let check_intervals = [10u64, 20, 30, 30];
+                for wait_secs in check_intervals {
+                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+
+                    let still_running = match self.ssh_run(&format!(
+                        "docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", container_name
+                    )).await {
+                        Ok((out, 0)) => out.trim() == "true",
+                        _ => false,
+                    };
+
+                    if !still_running {
+                        // Container exited — check if it succeeded or failed
+                        let log_tail = match self.ssh_run(&format!("tail -30 '{}' 2>/dev/null", log_path)).await {
+                            Ok((out, 0)) => out,
+                            _ => "(no log available)".to_string(),
+                        };
+
+                        let has_error = log_tail.contains("Error") || log_tail.contains("error")
+                            || log_tail.contains("FAILED") || log_tail.contains("failed")
+                            || log_tail.contains("Exiting because a job execution failed");
+                        let completed_ok = log_tail.contains("steps (100%) done")
+                            || log_tail.contains("Nothing to be done");
+
+                        if completed_ok {
+                            return Ok(CallToolResult::success(vec![Content::text(format!(
+                                "Pipeline completed successfully!\n\
+                                 Output directory: {}\n\
+                                 Log: {}\n\n{}",
+                                output_dir, log_path, log_tail
+                            ))]));
+                        } else if has_error {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Pipeline FAILED early (within 90s). Analyze the log and fix the issue.\n\
+                                 Container: {}\n\
+                                 Output directory: {}\n\
+                                 Log: {}\n\n{}",
+                                container_name, output_dir, log_path, log_tail
+                            ))]));
+                        }
+                    }
+                }
+
+                // Still running after 90s — no early errors detected
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Pipeline started in background (PID: {}, container: '{}').\n\
+                    "Pipeline is running (no errors in first 90s). PID: {}, container: '{}'.\n\
                      Output directory: {}\n\
                      Log file: {}\n\
-                     Use check_status with run_name='{}' to monitor progress.\n\
-                     Use list_files on the output directory to browse results.",
-                    pid, container_name, output_dir, log_path, params.run_name
+                     The user can check progress anytime (even in a new session) with list_running_pipelines.",
+                    pid, container_name, output_dir, log_path
                 ))]))
             }
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1140,6 +1194,87 @@ impl AutoPipeServer {
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
+    }
+
+    #[tool(description = "List all pipeline runs (running, completed, or failed). Scans the output directory for .autopipe-run.json metadata files and checks container status. No parameters needed — call this when the user asks about pipeline status, progress, or running jobs.")]
+    async fn list_running_pipelines(&self) -> Result<CallToolResult, ErrorData> {
+        let output_base = self.config.full_output_dir();
+
+        // Find all run metadata files
+        let find_cmd = format!(
+            "find '{}' -maxdepth 2 -name '.autopipe-run.json' -exec cat '{{}}' \\; 2>/dev/null",
+            output_base
+        );
+        let meta_output = match self.ssh_run(&find_cmd).await {
+            Ok((output, _)) => output,
+            Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Cannot scan output directory: {}", e))])),
+        };
+
+        if meta_output.trim().is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No pipeline runs found in the output directory."
+            )]));
+        }
+
+        // Get running containers
+        let docker_cmd = "docker ps --filter 'name=-run' --format '{{.Names}} {{.Status}}' 2>/dev/null";
+        let running_containers = match self.ssh_run(docker_cmd).await {
+            Ok((output, _)) => output,
+            _ => String::new(),
+        };
+
+        let mut results = Vec::new();
+        for line in meta_output.lines() {
+            let line = line.trim();
+            if !line.starts_with('{') { continue; }
+
+            let meta: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let run_name = meta["run_name"].as_str().unwrap_or("unknown");
+            let image = meta["image_name"].as_str().unwrap_or("unknown");
+            let container = meta["container_name"].as_str().unwrap_or("unknown");
+            let started = meta["started_at"].as_str().unwrap_or("unknown");
+
+            // Check if container is running
+            let is_running = running_containers.lines().any(|l| l.starts_with(container));
+            let docker_status = running_containers.lines()
+                .find(|l| l.starts_with(container))
+                .unwrap_or("");
+
+            // Read last line of pipeline.log for progress
+            let log_path = format!("{}/{}/pipeline.log", output_base.trim_end_matches('/'), run_name);
+            let last_line = match self.ssh_run(&format!("tail -3 '{}' 2>/dev/null", log_path)).await {
+                Ok((out, 0)) => {
+                    let trimmed = out.trim();
+                    if trimmed.len() > 200 { trimmed[..200].to_string() } else { trimmed.to_string() }
+                }
+                _ => "(no log)".to_string(),
+            };
+
+            let status = if is_running {
+                format!("RUNNING ({})", docker_status.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+            } else if last_line.contains("100%) done") || last_line.contains("Nothing to be done") {
+                "COMPLETED".to_string()
+            } else if last_line.contains("Error") || last_line.contains("failed") || last_line.contains("FAILED") {
+                "FAILED".to_string()
+            } else {
+                "STOPPED".to_string()
+            };
+
+            results.push(format!(
+                "- {} [{}]\n  Image: {}\n  Started: {}\n  Log: {}",
+                run_name, status, image, started, last_line
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Pipeline runs ({}):\n\n{}",
+            results.len(),
+            results.join("\n\n")
+        ))]))
     }
 
     #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running. If output_dir is omitted, uses {configured_output_dir}/{run_name}/.")]
