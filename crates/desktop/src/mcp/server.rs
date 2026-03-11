@@ -43,6 +43,12 @@ struct BuildParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct CheckBuildParams {
+    /// Docker image name (same as used in build_image)
+    image_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct DryRunParams {
     /// Docker image name
     image_name: String,
@@ -975,26 +981,89 @@ impl AutoPipeServer {
 
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. If the build fails, analyze the error output, then call cleanup_failed to remove the broken image and any failed output directory, fix the pipeline code based on the error, and retry the build.")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let log_path = format!("{}/build_{}.log", params.pipeline_dir, params.image_name);
+
         let cmd = format!(
-            "cd '{}' && docker build -t '{}' .",
-            params.pipeline_dir, params.image_name
+            "cd '{}' && nohup docker build -t '{}' . > '{}' 2>&1 &\necho $!",
+            params.pipeline_dir, params.image_name, log_path
         );
 
         match self.ssh_run(&cmd).await {
-            Ok((output, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
-                "Docker image '{}' built successfully.\n{}",
-                params.image_name, output
-            ))])),
-            Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Docker build failed:\n{}\n\nNext steps: Analyze the error above, call cleanup_failed to remove the broken image, fix the pipeline code, then retry build_image.",
-                output
-            ))])),
+            Ok((output, 0)) => {
+                let pid = output.trim();
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Docker build started in background (PID: {}).\nLog: {}\nNow call check_build_status with image_name='{}' every 10 seconds to monitor progress.",
+                    pid, log_path, params.image_name
+                ))]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            _ => Ok(CallToolResult::error(vec![Content::text("Failed to start build")])),
+        }
+    }
+
+    #[tool(description = "Check the status of a background Docker build started by build_image. Returns building/success/failed status with recent log output. Call this automatically every 10 seconds after build_image — do NOT wait for the user to ask.")]
+    async fn check_build_status(
+        &self,
+        Parameters(params): Parameters<CheckBuildParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        // Check if docker build process is still running
+        let check_cmd = format!(
+            "ps aux | grep 'docker build.*{}' | grep -v grep | head -1",
+            params.image_name
+        );
+        let is_running = match self.ssh_run(&check_cmd).await {
+            Ok((output, _)) => !output.trim().is_empty(),
+            Err(_) => false,
+        };
+
+        // Check if image exists (build succeeded)
+        let image_check = format!("docker images -q '{}' 2>/dev/null", params.image_name);
+        let image_exists = match self.ssh_run(&image_check).await {
+            Ok((output, 0)) => !output.trim().is_empty(),
+            _ => false,
+        };
+
+        // Get recent log output
+        let pipelines_dir = self.config.full_pipelines_dir();
+        let log_path = format!("{}/build_{}.log", pipelines_dir, params.image_name);
+        // Also check in pipeline subdirectories
+        let find_log = format!(
+            "find '{}' -name 'build_{}.log' 2>/dev/null | head -1",
+            pipelines_dir, params.image_name
+        );
+        let actual_log_path = match self.ssh_run(&find_log).await {
+            Ok((output, 0)) if !output.trim().is_empty() => output.trim().to_string(),
+            _ => log_path,
+        };
+
+        let tail_cmd = format!("tail -30 '{}' 2>/dev/null", actual_log_path);
+        let recent_log = match self.ssh_run(&tail_cmd).await {
+            Ok((output, _)) => output,
+            Err(_) => "Log not found".to_string(),
+        };
+
+        if is_running {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Build in progress...\n\nRecent log:\n{}",
+                recent_log
+            ))]))
+        } else if image_exists {
+            // Clean up build log
+            let _ = self.ssh_run(&format!("rm -f '{}'", actual_log_path)).await;
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "Build completed successfully! Image '{}' is ready.\n\nFinal log:\n{}",
+                params.image_name, recent_log
+            ))]))
+        } else {
+            Ok(CallToolResult::error(vec![Content::text(format!(
+                "Build failed.\n\nBuild log:\n{}\n\nNext steps: Analyze the error above, call cleanup_failed to remove broken artifacts, fix the pipeline code, then retry build_image.",
+                recent_log
+            ))]))
         }
     }
 

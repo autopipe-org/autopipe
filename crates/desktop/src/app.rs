@@ -174,13 +174,14 @@ impl AutoPipeApp {
                 self.status_message = String::new();
                 self.save_ok = true;
                 self.tab_errors = [false; 3];
+                let mut errors: Vec<&str> = Vec::new();
 
                 // Validate registry connection
                 if let Some(url) = self.config.registry_urls.first() {
                     if !url.is_empty() {
                         if reqwest_test(url).is_err() {
                             self.tab_errors[0] = true;
-                            self.save_ok = false;
+                            errors.push("Registry unreachable");
                         }
                     }
                 }
@@ -189,14 +190,19 @@ impl AutoPipeApp {
                 if !self.config.ssh_host.is_empty() {
                     if crate::ssh::test_connection(&self.config).is_err() {
                         self.tab_errors[1] = true;
-                        self.save_ok = false;
+                        errors.push("SSH connection failed");
                     }
                 }
 
                 // Check GitHub login
                 if self.config.github_token.is_none() {
                     self.tab_errors[2] = true;
+                    errors.push("GitHub not linked");
+                }
+
+                if !errors.is_empty() {
                     self.save_ok = false;
+                    self.status_message = errors.join(" · ");
                 }
             }
             Err(e) => {
@@ -380,7 +386,12 @@ impl eframe::App for AutoPipeApp {
                     );
                 }
                 if !self.status_message.is_empty() {
-                    ui.label(&self.status_message);
+                    let color = if self.save_ok {
+                        ui.visuals().text_color()
+                    } else {
+                        egui::Color32::from_rgb(220, 50, 50)
+                    };
+                    ui.label(egui::RichText::new(&self.status_message).color(color).small());
                 }
             });
         });
