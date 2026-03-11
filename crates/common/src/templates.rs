@@ -34,15 +34,15 @@ rule step_2:
 "#;
 
 /// Dockerfile template for new pipelines.
-pub const DOCKERFILE_TEMPLATE: &str = r#"FROM condaforge/mambaforge:latest
+pub const DOCKERFILE_TEMPLATE: &str = r#"FROM condaforge/miniforge3:latest
 
 # Install bioinformatics tools
-RUN mamba install -y -c bioconda -c conda-forge \
+RUN conda install -y -c bioconda -c conda-forge \
     snakemake-minimal \
     bash \
     # tool1=version \
     # tool2=version \
-    && mamba clean -afy
+    && conda clean -afy
 
 # Replace system bash with conda bash (prevents GLIBC mismatch)
 RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && \
@@ -183,8 +183,8 @@ Every pipeline is a directory with 5 required files:
 - Use `expand()` for sample-level parallelism
 
 ## Dockerfile Rules
-- Base image: `condaforge/mambaforge:latest`
-- Install bioconda/conda-forge tools via `mamba install -c bioconda -c conda-forge`
+- Base image: `condaforge/miniforge3:latest`
+- Install bioconda/conda-forge tools via `conda install -c bioconda -c conda-forge`
 - Always install `snakemake-minimal` and `bash` via conda
 - After installing, replace system bash with conda bash to prevent GLIBC mismatch:
   `RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && ln -sf /opt/conda/bin/bash /bin/sh`
@@ -194,7 +194,7 @@ Every pipeline is a directory with 5 required files:
   - The `--system` flag is required to install into the conda environment
   - uv resolves dependencies much faster than pip
 - Copy Snakefile and config.yaml into `/pipeline`
-- Clean up: `mamba clean -afy`
+- Clean up: `conda clean -afy`
 - Set `WORKDIR /pipeline`
 
 ## config.yaml Rules

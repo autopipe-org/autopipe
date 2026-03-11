@@ -81,11 +81,13 @@ async function fetchFile(
 	return await resp.text();
 }
 
-export async function fetchGithubFiles(githubUrl: string): Promise<GithubFiles> {
-	// Check cache
-	const cached = cache.get(githubUrl);
-	if (cached && Date.now() - cached.ts < CACHE_TTL) {
-		return cached.files;
+export async function fetchGithubFiles(githubUrl: string, skipCache = false): Promise<GithubFiles> {
+	// Check cache (skip for publish to always validate latest code)
+	if (!skipCache) {
+		const cached = cache.get(githubUrl);
+		if (cached && Date.now() - cached.ts < CACHE_TTL) {
+			return cached.files;
+		}
 	}
 
 	const { owner, repo, path } = parseGithubUrl(githubUrl);

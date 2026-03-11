@@ -38,7 +38,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		// 2. Fetch files from GitHub for validation
 		let files;
 		try {
-			files = await fetchGithubFiles(github_url);
+			files = await fetchGithubFiles(github_url, true);
 		} catch {
 			return json({ error: 'Failed to fetch files from GitHub repository' }, { status: 400 });
 		}
@@ -118,8 +118,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 
 		// 6. Always INSERT a new record (version tracking)
-		let name: string = metadata.name;
-		let version: string = metadata.version || '1.0.0';
+		let name = metadata.name as string;
+		let version = (metadata.version as string) || '1.0.0';
 
 		// forked_from: trust the value Claude sends (no auto-detection)
 		const resolvedForkedFrom: number | null =
@@ -173,11 +173,11 @@ export const POST: RequestHandler = async ({ request }) => {
 			.insert(userPipelines)
 			.values({
 				name,
-				description: metadata.description || '',
-				tools: metadata.tools || [],
-				inputFormats: metadata.input_formats || [],
-				outputFormats: metadata.output_formats || [],
-				tags: metadata.tags || [],
+				description: (metadata.description as string) || '',
+				tools: (metadata.tools as string[]) || [],
+				inputFormats: (metadata.input_formats as string[]) || [],
+				outputFormats: (metadata.output_formats as string[]) || [],
+				tags: (metadata.tags as string[]) || [],
 				githubUrl: github_url,
 				metadataJson: metadata,
 				author,

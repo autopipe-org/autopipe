@@ -5,7 +5,7 @@ COPY package.json package-lock.json* ./
 RUN npm install
 
 COPY . .
-RUN npm run build
+RUN POSTGRES_PASSWORD=build-placeholder npm run build
 
 FROM node:20-slim
 RUN groupadd -r autopipe && useradd -r -g autopipe -s /bin/false autopipe
