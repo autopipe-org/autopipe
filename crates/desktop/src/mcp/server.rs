@@ -84,6 +84,8 @@ struct CleanupFailedParams {
     image_name: String,
     /// Run name of the failed run (matches the output subdirectory name)
     run_name: String,
+    /// Whether to remove the output directory (default: false). Only set to true when you want a completely fresh start. Completed intermediate results are preserved by default so Snakemake can resume from where it left off.
+    remove_output: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1066,7 +1068,7 @@ impl AutoPipeServer {
             ))]))
         } else {
             Ok(CallToolResult::error(vec![Content::text(format!(
-                "Build failed.\n\nBuild log:\n{}\n\nNext steps: Analyze the error above, call cleanup_failed to remove broken artifacts, fix the pipeline code, then retry build_image.",
+                "Build failed.\n\nBuild log:\n{}\n\nNext steps: Analyze the error above, fix the pipeline code (Dockerfile or Snakefile), then retry build_image. Only call cleanup_failed if you need to remove the Docker image before rebuilding.",
                 recent_log
             ))]))
         }
@@ -1091,7 +1093,7 @@ impl AutoPipeServer {
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
         let cmd = format!(
-            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
             pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
@@ -1102,7 +1104,7 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. If the pipeline fails (check via check_status or list_running_pipelines), analyze the log, call cleanup_failed to remove the failed output directory and Docker image, fix the pipeline code, rebuild, and retry. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1134,7 +1136,7 @@ impl AutoPipeServer {
         let _ = self.ssh_write_file(&meta_path, &run_meta).await;
 
         let cmd = format!(
-            "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
             shell_escape(&container_name), pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
@@ -1176,7 +1178,8 @@ impl AutoPipeServer {
                             ))]));
                         } else if has_error {
                             return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "Pipeline FAILED early (within 90s). Analyze the log and fix the issue.\n\
+                                "Pipeline FAILED early (within 90s). Do NOT call cleanup_failed — intermediate results are preserved.\n\
+                                 Fix the Snakefile and re-run execute_pipeline with the SAME run_name. Snakemake will skip completed steps automatically.\n\
                                  Container: {}\n\
                                  Output directory: {}\n\
                                  Log: {}\n\n{}",
@@ -1314,7 +1317,7 @@ impl AutoPipeServer {
 
     // ── Cleanup tools ────────────────────────────────────────────
 
-    #[tool(description = "Clean up artifacts from a failed pipeline build or execution. Removes the failed output directory and the Docker image. Call this ONLY after a build_image failure or after check_status confirms a pipeline execution failed. Steps: (1) checks if the Docker image has running containers — refuses to remove if so, (2) removes the output directory, (3) removes the Docker image and dangling build layers. After cleanup, fix the pipeline code and retry.")]
+    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool.")]
     async fn cleanup_failed(
         &self,
         Parameters(params): Parameters<CleanupFailedParams>,
@@ -1336,17 +1339,21 @@ impl AutoPipeServer {
             }
         }
 
-        // 2. Remove failed output directory
-        let check_dir = format!("test -d '{}'", shell_escape(&output_dir));
-        if let Ok((_, 0)) = self.ssh_run(&check_dir).await {
-            let rm_cmd = format!("rm -rf '{}'", shell_escape(&output_dir));
-            match self.ssh_run(&rm_cmd).await {
-                Ok((_, 0)) => results.push(format!("Removed output directory: {}", output_dir)),
-                Ok((err, _)) => results.push(format!("Failed to remove output directory: {}", err.trim())),
-                Err(e) => results.push(format!("Error removing output directory: {}", e)),
+        // 2. Remove failed output directory (only if explicitly requested)
+        if params.remove_output.unwrap_or(false) {
+            let check_dir = format!("test -d '{}'", shell_escape(&output_dir));
+            if let Ok((_, 0)) = self.ssh_run(&check_dir).await {
+                let rm_cmd = format!("rm -rf '{}'", shell_escape(&output_dir));
+                match self.ssh_run(&rm_cmd).await {
+                    Ok((_, 0)) => results.push(format!("Removed output directory: {}", output_dir)),
+                    Ok((err, _)) => results.push(format!("Failed to remove output directory: {}", err.trim())),
+                    Err(e) => results.push(format!("Error removing output directory: {}", e)),
+                }
+            } else {
+                results.push(format!("Output directory not found (already clean): {}", output_dir));
             }
         } else {
-            results.push(format!("Output directory not found (already clean): {}", output_dir));
+            results.push(format!("Output directory preserved (Snakemake will resume from completed steps): {}", output_dir));
         }
 
         // 3. Remove Docker image
