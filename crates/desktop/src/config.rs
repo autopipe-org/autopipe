@@ -50,12 +50,12 @@ pub struct AppConfig {
 }
 
 fn default_registry_url() -> String {
-    "http://localhost:8090".into()
+    "https://hub.autopipe.org".into()
 }
 
 fn default_registry_urls() -> Vec<String> {
     vec![
-        "http://localhost:8090".into(),
+        "https://hub.autopipe.org".into(),
     ]
 }
 
