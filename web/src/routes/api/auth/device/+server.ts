@@ -33,8 +33,7 @@ export const POST: RequestHandler = async () => {
 			verification_uri: data.verification_uri,
 			interval: data.interval || 5
 		});
-	} catch (e: unknown) {
-		const message = e instanceof Error ? e.message : String(e);
-		return json({ error: message }, { status: 500 });
+	} catch {
+		return json({ error: 'Failed to initiate GitHub device flow' }, { status: 500 });
 	}
 };

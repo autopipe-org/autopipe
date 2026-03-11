@@ -66,10 +66,13 @@ jobs:
           SectionEnd
           "@ | Out-File -Encoding UTF8 installer.nsi
 
+      - name: Install NSIS
+        run: choco install nsis -y
+
       - name: Build NSIS installer
         shell: pwsh
         run: |
-          makensis installer.nsi
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" installer.nsi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -102,7 +105,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release --features gui --target ${{ matrix.target }}
+        run: cargo build --release --features gui,portable --target ${{ matrix.target }}
 
       - name: Rename binary
         run: cp target/${{ matrix.target }}/release/autopipe ${{ matrix.name }}
@@ -121,7 +124,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libssl-dev
+          sudo apt-get install -y libgtk-3-dev libssl-dev libxdo-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -130,7 +133,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: cargo build --release --features gui
+        run: cargo build --release --features gui,portable
 
       - name: Rename binary
         run: cp target/release/autopipe autopipe-linux-x64

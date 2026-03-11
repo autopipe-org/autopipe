@@ -7,11 +7,11 @@ services:
       - "8090:8090"
     environment:
       PORT: "8090"
-      POSTGRES_HOST: "10.125.208.41"
-      POSTGRES_PORT: "5433"
-      POSTGRES_DB: autopipe_wf
-      POSTGRES_USER: autopipe
-      POSTGRES_PASSWORD: autopipe123
+      POSTGRES_HOST: "${POSTGRES_HOST:-localhost}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5433}"
+      POSTGRES_DB: "${POSTGRES_DB:-autopipe_wf}"
+      POSTGRES_USER: "${POSTGRES_USER:-autopipe}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
       GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID}"
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
 
@@ -23,9 +23,9 @@ services:
       - "8091:8091"
     environment:
       PORT: "8091"
-      PUBLIC_HUB_URL: "${PUBLIC_HUB_URL:-http://10.125.208.41:8090}"
-      POSTGRES_HOST: "10.125.208.41"
-      POSTGRES_PORT: "5433"
-      POSTGRES_DB: autopipe_wf
-      POSTGRES_USER: autopipe
-      POSTGRES_PASSWORD: autopipe123
+      PUBLIC_HUB_URL: "${PUBLIC_HUB_URL:-http://localhost:8090}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-localhost}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5433}"
+      POSTGRES_DB: "${POSTGRES_DB:-autopipe_wf}"
+      POSTGRES_USER: "${POSTGRES_USER:-autopipe}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"

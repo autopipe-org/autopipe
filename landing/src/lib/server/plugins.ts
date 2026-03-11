@@ -100,7 +100,9 @@ export async function listPlugins(): Promise<PluginSummary[]> {
 
 /** Search plugins — only the latest version per name */
 export async function searchPlugins(query: string): Promise<PluginSummary[]> {
-	const pattern = `%${query}%`;
+	// Escape LIKE wildcards to prevent wildcard injection
+	const escaped = query.replace(/[%_\\]/g, '\\$&');
+	const pattern = `%${escaped}%`;
 	const allRows = await db
 		.select()
 		.from(userPlugins)

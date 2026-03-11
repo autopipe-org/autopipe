@@ -1,6 +1,6 @@
 import type { RequestHandler } from './$types';
 import { error } from '@sveltejs/kit';
-import { getPipeline, deletePipeline } from '$lib/server/pipelines.js';
+import { getPipeline } from '$lib/server/pipelines.js';
 import { fetchGithubFiles, fetchGithubFilesAtRef, GithubNotFoundError } from '$lib/server/github.js';
 import JSZip from 'jszip';
 
@@ -13,6 +13,11 @@ export const GET: RequestHandler = async ({ params, url }) => {
 
 	const tag = url.searchParams.get('tag'); // e.g., "pipeline-name/v1.0.0"
 
+	// Validate tag format to prevent unexpected git ref access
+	if (tag && !/^[a-zA-Z0-9._\/ -]+$/.test(tag)) {
+		throw error(400, 'Invalid tag format');
+	}
+
 	// Fetch files from GitHub (at specific tag if provided)
 	let files;
 	try {
@@ -21,10 +26,9 @@ export const GET: RequestHandler = async ({ params, url }) => {
 			: await fetchGithubFiles(pipeline.github_url);
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
-			await deletePipeline(id);
-			throw error(404, 'Pipeline no longer exists on GitHub and has been removed');
+			throw error(404, 'The original GitHub repository has been deleted or is no longer accessible. Please contact the pipeline author.');
 		}
-		throw error(502, `Failed to fetch from GitHub: ${e instanceof Error ? e.message : String(e)}`);
+		throw error(502, 'Failed to fetch from GitHub');
 	}
 
 	const zip = new JSZip();
@@ -46,9 +50,12 @@ export const GET: RequestHandler = async ({ params, url }) => {
 
 	const buf = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
 
+	// Sanitize name for use in Content-Disposition header
+	const safeName = (pipeline.name || 'pipeline').replace(/[^a-zA-Z0-9._-]/g, '_');
+	const safeVersion = (tag?.split('/').pop() || pipeline.version || 'latest').replace(/[^a-zA-Z0-9._-]/g, '_');
 	const zipName = tag
-		? `${pipeline.name}-${tag.split('/').pop() || pipeline.version}.zip`
-		: `${pipeline.name}.zip`;
+		? `${safeName}-${safeVersion}.zip`
+		: `${safeName}.zip`;
 
 	return new Response(buf, {
 		headers: {

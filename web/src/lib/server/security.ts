@@ -161,3 +161,50 @@ export function validateSecurity(
 export function hasErrors(issues: SecurityIssue[]): boolean {
 	return issues.some((i) => i.severity === 'error');
 }
+
+/**
+ * Validate a GitHub token by fetching the authenticated user.
+ * Returns the GitHub username on success, or null on failure.
+ */
+export async function validateGithubToken(token: string): Promise<string | null> {
+	if (!token) return null;
+	try {
+		const resp = await fetch('https://api.github.com/user', {
+			headers: {
+				Authorization: `Bearer ${token}`,
+				'User-Agent': 'autopipe-registry'
+			}
+		});
+		if (!resp.ok) return null;
+		const user = await resp.json();
+		return (user.login as string) || null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Extract Bearer token from Authorization header.
+ */
+export function extractBearerToken(request: Request): string | null {
+	const auth = request.headers.get('Authorization');
+	if (!auth) return null;
+	const match = auth.match(/^Bearer\s+(.+)$/i);
+	return match ? match[1] : null;
+}
+
+/**
+ * Sanitize an error message to prevent leaking internal details.
+ */
+export function sanitizeErrorMessage(message: string): string {
+	// Remove SQL/DB details, stack traces, internal paths
+	if (
+		message.includes('relation') ||
+		message.includes('syntax error') ||
+		message.includes('ECONNREFUSED') ||
+		message.includes('password authentication')
+	) {
+		return 'Internal server error';
+	}
+	return message;
+}

@@ -14,7 +14,20 @@
 		data.versionChain.filter((v: { plugin_id: number }) => v.plugin_id !== p.plugin_id)
 	);
 
-	const readmeHtml = p.readme ? marked(p.readme) : '';
+	// Sanitize: escape raw HTML in markdown to prevent XSS
+	function sanitizeHtml(html: string): string {
+		return html
+			.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+			.replace(/<iframe\b[^>]*>.*?<\/iframe>/gi, '')
+			.replace(/<object\b[^>]*>.*?<\/object>/gi, '')
+			.replace(/<embed\b[^>]*\/?>/gi, '')
+			.replace(/<link\b[^>]*\/?>/gi, '')
+			.replace(/\bon\w+\s*=\s*["'][^"']*["']/gi, '')
+			.replace(/\bon\w+\s*=\s*\S+/gi, '')
+			.replace(/javascript\s*:/gi, '');
+	}
+
+	const readmeHtml = p.readme ? sanitizeHtml(marked(p.readme) as string) : '';
 </script>
 
 <svelte:head>

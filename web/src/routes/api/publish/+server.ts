@@ -1,6 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { validateSecurity, hasErrors } from '$lib/server/security.js';
+import { validateSecurity, hasErrors, sanitizeErrorMessage } from '$lib/server/security.js';
 import { fetchGithubFiles } from '$lib/server/github.js';
 import { db, schema } from '$lib/server/db.js';
 import { eq, sql } from 'drizzle-orm';
@@ -15,6 +15,11 @@ export const POST: RequestHandler = async ({ request }) => {
 
 		if (!github_url || !github_token) {
 			return json({ error: 'github_url and github_token are required' }, { status: 400 });
+		}
+
+		// Validate that github_url actually points to GitHub (SSRF prevention)
+		if (!/^https:\/\/github\.com\/[^/]+\/[^/]+/.test(github_url)) {
+			return json({ error: 'github_url must be a valid GitHub repository URL' }, { status: 400 });
 		}
 
 		// 1. Validate GitHub token and get username for author
@@ -34,9 +39,8 @@ export const POST: RequestHandler = async ({ request }) => {
 		let files;
 		try {
 			files = await fetchGithubFiles(github_url);
-		} catch (e) {
-			const message = e instanceof Error ? e.message : String(e);
-			return json({ error: `Failed to fetch from GitHub: ${message}` }, { status: 400 });
+		} catch {
+			return json({ error: 'Failed to fetch files from GitHub repository' }, { status: 400 });
 		}
 
 		// 3. Check required files
@@ -145,7 +149,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				.limit(1);
 			if (existing.length > 0) {
 				let suffix = 2;
-				while (true) {
+				const MAX_DEDUP_ATTEMPTS = 100;
+				while (suffix <= MAX_DEDUP_ATTEMPTS) {
 					const candidate = `${metadata.name} ${suffix}`;
 					const dup = await db
 						.select({ pipelineId: userPipelines.pipelineId })
@@ -157,6 +162,9 @@ export const POST: RequestHandler = async ({ request }) => {
 						break;
 					}
 					suffix++;
+				}
+				if (suffix > MAX_DEDUP_ATTEMPTS) {
+					return json({ error: 'Too many pipelines with this name' }, { status: 409 });
 				}
 			}
 		}
@@ -198,6 +206,6 @@ export const POST: RequestHandler = async ({ request }) => {
 		return json(response, { status: 200 });
 	} catch (e: unknown) {
 		const message = e instanceof Error ? e.message : String(e);
-		return json({ error: message }, { status: 500 });
+		return json({ error: sanitizeErrorMessage(message) }, { status: 500 });
 	}
 };

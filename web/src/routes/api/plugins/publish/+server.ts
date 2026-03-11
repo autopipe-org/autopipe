@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db, schema } from '$lib/server/db.js';
+import { sanitizeErrorMessage } from '$lib/server/security.js';
 import { and, eq, sql } from 'drizzle-orm';
 
 const { userPlugins } = schema;
@@ -13,6 +14,11 @@ export const POST: RequestHandler = async ({ request }) => {
 
 		if (!github_url || !github_token) {
 			return json({ error: 'github_url and github_token are required' }, { status: 400 });
+		}
+
+		// Validate that github_url actually points to GitHub (SSRF prevention)
+		if (!/^https:\/\/github\.com\/[^/]+\/[^/]+/.test(github_url)) {
+			return json({ error: 'github_url must be a valid GitHub repository URL' }, { status: 400 });
 		}
 
 		// 1. Validate GitHub token and get username for author
@@ -45,6 +51,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				`https://api.github.com/repos/${owner}/${repo}/contents/${metaPath}`,
 				{
 					headers: {
+						Authorization: `Bearer ${github_token}`,
 						Accept: 'application/vnd.github.raw',
 						'User-Agent': 'autopipe-registry'
 					}
@@ -75,6 +82,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				`https://api.github.com/repos/${owner}/${repo}/contents/${readmePath}`,
 				{
 					headers: {
+						Authorization: `Bearer ${github_token}`,
 						Accept: 'application/vnd.github.raw',
 						'User-Agent': 'autopipe-registry'
 					}
@@ -90,12 +98,21 @@ export const POST: RequestHandler = async ({ request }) => {
 			}
 		}
 
-		// 4. Validate required fields
+		// 4. Validate required fields and input lengths
 		if (!metadata.name) {
 			return json({ error: 'manifest.json must contain a "name" field' }, { status: 400 });
 		}
+		if (typeof metadata.name === 'string' && metadata.name.length > 200) {
+			return json({ error: 'name must be 200 characters or fewer' }, { status: 400 });
+		}
+		if (typeof metadata.description === 'string' && metadata.description.length > 5000) {
+			return json({ error: 'description must be 5000 characters or fewer' }, { status: 400 });
+		}
+		if (typeof metadata.category === 'string' && metadata.category.length > 100) {
+			return json({ error: 'category must be 100 characters or fewer' }, { status: 400 });
+		}
 
-		// 4. Determine INSERT vs UPDATE
+		// 5. Determine INSERT vs UPDATE
 		let name = metadata.name as string;
 		const extensions = Array.isArray(metadata.extensions)
 			? (metadata.extensions as string[])
@@ -211,7 +228,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				.limit(1);
 			if (existingName.length > 0) {
 				let suffix = 2;
-				while (true) {
+				const MAX_DEDUP_ATTEMPTS = 100;
+				while (suffix <= MAX_DEDUP_ATTEMPTS) {
 					const candidate = `${metadata.name} ${suffix}`;
 					const dup = await db
 						.select({ pluginId: userPlugins.pluginId })
@@ -223,6 +241,9 @@ export const POST: RequestHandler = async ({ request }) => {
 						break;
 					}
 					suffix++;
+				}
+				if (suffix > MAX_DEDUP_ATTEMPTS) {
+					return json({ error: 'Too many plugins with this name' }, { status: 409 });
 				}
 			}
 		}
@@ -264,6 +285,6 @@ export const POST: RequestHandler = async ({ request }) => {
 		}, { status: 200 });
 	} catch (e: unknown) {
 		const message = e instanceof Error ? e.message : String(e);
-		return json({ error: message }, { status: 500 });
+		return json({ error: sanitizeErrorMessage(message) }, { status: 500 });
 	}
 };

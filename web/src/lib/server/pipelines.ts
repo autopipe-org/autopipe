@@ -98,7 +98,9 @@ export async function listPipelines(): Promise<PipelineSummary[]> {
 
 /** Search pipelines — only the latest version per name */
 export async function searchPipelines(query: string): Promise<PipelineSummary[]> {
-	const pattern = `%${query}%`;
+	// Escape LIKE wildcards to prevent wildcard injection
+	const escaped = query.replace(/[%_\\]/g, '\\$&');
+	const pattern = `%${escaped}%`;
 	// First get all matches, then deduplicate by name (keep latest)
 	const allRows = await db
 		.select()

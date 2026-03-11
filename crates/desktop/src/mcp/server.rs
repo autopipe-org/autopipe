@@ -68,8 +68,6 @@ struct ExecuteParams {
     run_name: String,
     /// Remote input data directory (mounted as read-only in Docker)
     input_dir: String,
-    /// Remote output directory (optional, defaults to configured output directory under run_name)
-    output_dir: Option<String>,
     /// Number of CPU cores (default: 8)
     cores: Option<u32>,
 }
@@ -78,8 +76,6 @@ struct ExecuteParams {
 struct StatusParams {
     /// Run name (matches the run_name used in execute_pipeline)
     run_name: String,
-    /// Remote output directory (optional, defaults to configured output directory under run_name)
-    output_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -88,8 +84,6 @@ struct CleanupFailedParams {
     image_name: String,
     /// Run name of the failed run (matches the output subdirectory name)
     run_name: String,
-    /// Remote output directory (optional, defaults to configured output directory under run_name)
-    output_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -190,6 +184,17 @@ pub struct AutoPipeServer {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// Escape a string for safe use inside single-quoted shell arguments.
+/// Rejects null bytes and newlines (which can break out of commands),
+/// then replaces each `'` with `'\''` (end quote, escaped quote, start quote).
+fn shell_escape(s: &str) -> String {
+    // Strip characters that can break shell command boundaries
+    let sanitized: String = s.chars()
+        .filter(|c| *c != '\0' && *c != '\n' && *c != '\r')
+        .collect();
+    sanitized.replace('\'', "'\\''")
+}
 
 /// Normalize paths in config.yaml and Snakefile: replace absolute host paths
 /// with Docker mount points (/input, /output).
@@ -305,7 +310,7 @@ impl AutoPipeServer {
     }
 
     async fn ssh_read_file(&self, path: &str) -> Result<String, String> {
-        let cmd = format!("cat '{}'", path);
+        let cmd = format!("cat '{}'", shell_escape(path));
         match self.ssh_run(&cmd).await {
             Ok((output, 0)) => Ok(output),
             Ok((output, _)) => Err(format!("Failed to read: {}", output.trim())),
@@ -317,7 +322,7 @@ impl AutoPipeServer {
     /// Returns the file size in bytes on success.
     async fn ssh_download_base64(&self, remote_path: &str, local_path: &str) -> Result<usize, String> {
         use base64::Engine;
-        let cmd = format!("base64 '{}'", remote_path);
+        let cmd = format!("base64 '{}'", shell_escape(remote_path));
         let (b64_output, code) = self.ssh_run(&cmd).await?;
         if code != 0 {
             return Err(format!("Remote base64 failed: {}", b64_output.trim()));
@@ -334,9 +339,12 @@ impl AutoPipeServer {
     }
 
     async fn ssh_write_file(&self, path: &str, content: &str) -> Result<(), String> {
+        // Use base64 encoding to safely transfer arbitrary content without heredoc injection
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
         let cmd = format!(
-            "cat << 'AUTOPIPE_EOF' > '{}'\n{}\nAUTOPIPE_EOF",
-            path, content
+            "echo '{}' | base64 -d > '{}'",
+            shell_escape(&encoded), shell_escape(path)
         );
         match self.ssh_run(&cmd).await {
             Ok((_, 0)) => Ok(()),
@@ -345,23 +353,20 @@ impl AutoPipeServer {
         }
     }
 
-    /// Resolve the output directory for a run.
-    fn resolve_output_dir(&self, explicit: &Option<String>, run_name: &str) -> String {
-        match explicit {
-            Some(dir) if !dir.is_empty() => dir.clone(),
-            _ => format!(
-                "{}/{}",
-                self.config.full_output_dir().trim_end_matches('/'),
-                run_name
-            ),
-        }
+    /// Resolve the output directory for a run. Always uses {configured_output_dir}/{run_name}.
+    fn resolve_output_dir(&self, run_name: &str) -> String {
+        format!(
+            "{}/{}",
+            self.config.full_output_dir().trim_end_matches('/'),
+            run_name
+        )
     }
 
     /// Find symlink targets inside a directory and return extra Docker -v mounts.
     async fn resolve_symlink_mounts(&self, dir: &str) -> String {
         let cmd = format!(
             "find '{}' -maxdepth 3 -type l -exec readlink -f '{{}}' \\; 2>/dev/null | xargs -I{{}} dirname '{{}}' | sort -u",
-            dir
+            shell_escape(dir)
         );
         let dirs = match self.ssh_run(&cmd).await {
             Ok((output, 0)) => clean_content(&output),
@@ -374,7 +379,7 @@ impl AutoPipeServer {
             if target_dir.is_empty() || target_dir == dir || !target_dir.starts_with('/') {
                 continue;
             }
-            mounts.push_str(&format!(" -v '{}:{}:ro'", target_dir, target_dir));
+            mounts.push_str(&format!(" -v '{}:{}:ro'", shell_escape(target_dir), shell_escape(target_dir)));
         }
         mounts
     }
@@ -392,7 +397,7 @@ impl AutoPipeServer {
             pipeline_name
         );
         if let Ok((output, 0)) = self
-            .ssh_run(&format!("test -d '{}' && echo 'exists'", candidate))
+            .ssh_run(&format!("test -d '{}' && echo 'exists'", shell_escape(&candidate)))
             .await
         {
             if output.trim().contains("exists") {
@@ -408,7 +413,7 @@ impl AutoPipeServer {
             pipeline_name
         );
         if let Ok((output, 0)) = self
-            .ssh_run(&format!("test -d '{}' && echo 'exists'", candidate))
+            .ssh_run(&format!("test -d '{}' && echo 'exists'", shell_escape(&candidate)))
             .await
         {
             if output.trim().contains("exists") {
@@ -529,7 +534,7 @@ impl AutoPipeServer {
             pipeline.name
         );
 
-        match self.ssh_run(&format!("mkdir -p '{}'", dir)).await {
+        match self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&dir))).await {
             Ok((_, 0)) => {}
             Ok((output, _)) => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -990,7 +995,7 @@ impl AutoPipeServer {
 
         let cmd = format!(
             "cd '{}' && nohup docker build -t '{}' . > '{}' 2>&1 &\necho $!",
-            params.pipeline_dir, params.image_name, log_path
+            shell_escape(&params.pipeline_dir), shell_escape(&params.image_name), shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -1014,7 +1019,7 @@ impl AutoPipeServer {
         // Check if docker build process is still running
         let check_cmd = format!(
             "ps aux | grep 'docker build.*{}' | grep -v grep | head -1",
-            params.image_name
+            shell_escape(&params.image_name)
         );
         let is_running = match self.ssh_run(&check_cmd).await {
             Ok((output, _)) => !output.trim().is_empty(),
@@ -1022,7 +1027,7 @@ impl AutoPipeServer {
         };
 
         // Check if image exists (build succeeded)
-        let image_check = format!("docker images -q '{}' 2>/dev/null", params.image_name);
+        let image_check = format!("docker images -q '{}' 2>/dev/null", shell_escape(&params.image_name));
         let image_exists = match self.ssh_run(&image_check).await {
             Ok((output, 0)) => !output.trim().is_empty(),
             _ => false,
@@ -1034,14 +1039,14 @@ impl AutoPipeServer {
         // Also check in pipeline subdirectories
         let find_log = format!(
             "find '{}' -name 'build_{}.log' 2>/dev/null | head -1",
-            pipelines_dir, params.image_name
+            shell_escape(&pipelines_dir), shell_escape(&params.image_name)
         );
         let actual_log_path = match self.ssh_run(&find_log).await {
             Ok((output, 0)) if !output.trim().is_empty() => output.trim().to_string(),
             _ => log_path,
         };
 
-        let tail_cmd = format!("tail -30 '{}' 2>/dev/null", actual_log_path);
+        let tail_cmd = format!("tail -30 '{}' 2>/dev/null", shell_escape(&actual_log_path));
         let recent_log = match self.ssh_run(&tail_cmd).await {
             Ok((output, _)) => output,
             Err(_) => "Log not found".to_string(),
@@ -1054,7 +1059,7 @@ impl AutoPipeServer {
             ))]))
         } else if image_exists {
             // Clean up build log
-            let _ = self.ssh_run(&format!("rm -f '{}'", actual_log_path)).await;
+            let _ = self.ssh_run(&format!("rm -f '{}'", shell_escape(&actual_log_path))).await;
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Build completed successfully! Image '{}' is ready.\n\nFinal log:\n{}",
                 params.image_name, recent_log
@@ -1079,7 +1084,7 @@ impl AutoPipeServer {
             .unwrap_or_else(|| self.config.full_output_dir());
 
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
-            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", dir),
+            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", shell_escape(&dir)),
             None => String::new(),
         };
 
@@ -1087,7 +1092,7 @@ impl AutoPipeServer {
 
         let cmd = format!(
             "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, params.input_dir, symlink_mounts, output_dir, params.image_name, cores
+            pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
         match self.ssh_run(&cmd).await {
@@ -1097,38 +1102,40 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. If output_dir is omitted, outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. If the pipeline fails (check via check_status or list_running_pipelines), analyze the log, call cleanup_failed to remove the failed output directory and Docker image, fix the pipeline code, rebuild, and retry. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. If the pipeline fails (check via check_status or list_running_pipelines), analyze the log, call cleanup_failed to remove the failed output directory and Docker image, fix the pipeline code, rebuild, and retry. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
-        let output_dir = self.resolve_output_dir(&params.output_dir, &params.run_name);
+        let output_dir = self.resolve_output_dir(&params.run_name);
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
-            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", dir),
+            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", shell_escape(&dir)),
             None => String::new(),
         };
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
-        let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", container_name)).await;
-        let _ = self.ssh_run(&format!("mkdir -p '{}'", output_dir)).await;
+        let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", shell_escape(&container_name))).await;
+        let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
 
-        // Write run metadata for list_running_pipelines
-        let run_meta = format!(
-            r#"{{"run_name":"{}","image_name":"{}","container_name":"{}","input_dir":"{}","started_at":"{}"}}"#,
-            params.run_name, params.image_name, container_name, params.input_dir,
-            chrono::Utc::now().to_rfc3339()
-        );
+        // Write run metadata for list_running_pipelines (use base64 to avoid heredoc injection)
+        let run_meta = serde_json::json!({
+            "run_name": params.run_name,
+            "image_name": params.image_name,
+            "container_name": container_name,
+            "input_dir": params.input_dir,
+            "started_at": chrono::Utc::now().to_rfc3339()
+        }).to_string();
         let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
-        let _ = self.ssh_run(&format!("cat > '{}' << 'METAEOF'\n{}\nMETAEOF", meta_path, run_meta)).await;
+        let _ = self.ssh_write_file(&meta_path, &run_meta).await;
 
         let cmd = format!(
             "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            container_name, pipeline_mount, params.input_dir, symlink_mounts, output_dir, params.image_name, cores, log_path
+            shell_escape(&container_name), pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -1141,7 +1148,7 @@ impl AutoPipeServer {
                     tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
 
                     let still_running = match self.ssh_run(&format!(
-                        "docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", container_name
+                        "docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", shell_escape(&container_name)
                     )).await {
                         Ok((out, 0)) => out.trim() == "true",
                         _ => false,
@@ -1149,7 +1156,7 @@ impl AutoPipeServer {
 
                     if !still_running {
                         // Container exited — check if it succeeded or failed
-                        let log_tail = match self.ssh_run(&format!("tail -30 '{}' 2>/dev/null", log_path)).await {
+                        let log_tail = match self.ssh_run(&format!("tail -30 '{}' 2>/dev/null", shell_escape(&log_path))).await {
                             Ok((out, 0)) => out,
                             _ => "(no log available)".to_string(),
                         };
@@ -1203,7 +1210,7 @@ impl AutoPipeServer {
         // Find all run metadata files (use glob instead of find -exec to avoid {} escaping issues over SSH)
         let find_cmd = format!(
             "for f in '{}'/*/.autopipe-run.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null",
-            output_base
+            shell_escape(&output_base)
         );
         let meta_output = match self.ssh_run(&find_cmd).await {
             Ok((output, _)) => output,
@@ -1246,7 +1253,7 @@ impl AutoPipeServer {
 
             // Read last line of pipeline.log for progress
             let log_path = format!("{}/{}/pipeline.log", output_base.trim_end_matches('/'), run_name);
-            let last_line = match self.ssh_run(&format!("tail -3 '{}' 2>/dev/null", log_path)).await {
+            let last_line = match self.ssh_run(&format!("tail -3 '{}' 2>/dev/null", shell_escape(&log_path))).await {
                 Ok((out, 0)) => {
                     let trimmed = out.trim();
                     if trimmed.len() > 200 { trimmed[..200].to_string() } else { trimmed.to_string() }
@@ -1277,21 +1284,21 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running. If output_dir is omitted, uses {configured_output_dir}/{run_name}/.")]
+    #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running. Uses {configured_output_dir}/{run_name}/.")]
     async fn check_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let output_dir = self.resolve_output_dir(&params.output_dir, &params.run_name);
+        let output_dir = self.resolve_output_dir(&params.run_name);
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
-        let running = match self.ssh_run(&format!("docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", container_name)).await {
+        let running = match self.ssh_run(&format!("docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", shell_escape(&container_name))).await {
             Ok((output, 0)) => output.trim() == "true",
             _ => false,
         };
 
-        let log_output = match self.ssh_run(&format!("tail -50 '{}' 2>/dev/null", log_path)).await {
+        let log_output = match self.ssh_run(&format!("tail -50 '{}' 2>/dev/null", shell_escape(&log_path))).await {
             Ok((output, 0)) => output,
             Ok((output, _)) => format!("(log not available: {})", output.trim()),
             Err(e) => format!("(cannot read log: {})", e),
@@ -1312,27 +1319,27 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<CleanupFailedParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let output_dir = self.resolve_output_dir(&params.output_dir, &params.run_name);
+        let output_dir = self.resolve_output_dir(&params.run_name);
         let mut results = Vec::new();
 
         // 1. Check if image has running containers
         let running_check = format!(
             "docker ps -q --filter ancestor='{}' 2>/dev/null",
-            params.image_name
+            shell_escape(&params.image_name)
         );
         if let Ok((output, 0)) = self.ssh_run(&running_check).await {
             if !output.trim().is_empty() {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot clean up: image '{}' has running containers. Stop them first with:\n  docker stop $(docker ps -q --filter ancestor='{}')",
-                    params.image_name, params.image_name
+                    "Cannot clean up: image '{}' has running containers. Stop them first.",
+                    params.image_name
                 ))]));
             }
         }
 
         // 2. Remove failed output directory
-        let check_dir = format!("test -d '{}'", output_dir);
+        let check_dir = format!("test -d '{}'", shell_escape(&output_dir));
         if let Ok((_, 0)) = self.ssh_run(&check_dir).await {
-            let rm_cmd = format!("rm -rf '{}'", output_dir);
+            let rm_cmd = format!("rm -rf '{}'", shell_escape(&output_dir));
             match self.ssh_run(&rm_cmd).await {
                 Ok((_, 0)) => results.push(format!("Removed output directory: {}", output_dir)),
                 Ok((err, _)) => results.push(format!("Failed to remove output directory: {}", err.trim())),
@@ -1345,11 +1352,11 @@ impl AutoPipeServer {
         // 3. Remove Docker image
         let check_img = format!(
             "docker images -q '{}' 2>/dev/null",
-            params.image_name
+            shell_escape(&params.image_name)
         );
         if let Ok((output, 0)) = self.ssh_run(&check_img).await {
             if !output.trim().is_empty() {
-                let rmi_cmd = format!("docker rmi '{}' 2>/dev/null", params.image_name);
+                let rmi_cmd = format!("docker rmi '{}' 2>/dev/null", shell_escape(&params.image_name));
                 match self.ssh_run(&rmi_cmd).await {
                     Ok((_, 0)) => results.push(format!("Removed Docker image: {}", params.image_name)),
                     Ok((err, _)) => results.push(format!("Failed to remove image: {}", err.trim())),
@@ -1376,7 +1383,7 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<CreateSymlinkParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        match self.ssh_run(&format!("test -e '{}' && echo 'exists'", params.source)).await {
+        match self.ssh_run(&format!("test -e '{}' && echo 'exists'", shell_escape(&params.source))).await {
             Ok((output, 0)) if output.trim().contains("exists") => {}
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1388,11 +1395,11 @@ impl AutoPipeServer {
 
         if let Some(parent) = std::path::Path::new(&params.target).parent() {
             let _ = self
-                .ssh_run(&format!("mkdir -p '{}'", parent.to_string_lossy()))
+                .ssh_run(&format!("mkdir -p '{}'", shell_escape(&parent.to_string_lossy())))
                 .await;
         }
 
-        match self.ssh_run(&format!("ln -sf '{}' '{}'", params.source, params.target)).await {
+        match self.ssh_run(&format!("ln -sf '{}' '{}'", shell_escape(&params.source), shell_escape(&params.target))).await {
             Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Symlink created: {} -> {}",
                 params.target, params.source
@@ -1412,7 +1419,7 @@ impl AutoPipeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let cmd = format!(
             "test -L '{}' && rm '{}' && echo 'removed' || echo 'not_a_symlink'",
-            params.symlink_path, params.symlink_path
+            shell_escape(&params.symlink_path), shell_escape(&params.symlink_path)
         );
         match self.ssh_run(&cmd).await {
             Ok((output, 0)) if output.trim().contains("removed") => {
@@ -1438,7 +1445,7 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<ListFilesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        match self.ssh_run(&format!("ls -la '{}'", params.path)).await {
+        match self.ssh_run(&format!("ls -la '{}'", shell_escape(&params.path))).await {
             Ok((output, 0)) => Ok(CallToolResult::success(vec![Content::text(output)])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Cannot list '{}': {}",
@@ -1498,14 +1505,14 @@ impl AutoPipeServer {
         }
 
         // Check if remote path is a directory or file
-        let is_dir = match self.ssh_run(&format!("test -d '{}' && echo DIR || echo FILE", remote_path)).await {
+        let is_dir = match self.ssh_run(&format!("test -d '{}' && echo DIR || echo FILE", shell_escape(&remote_path))).await {
             Ok((output, 0)) => output.trim() == "DIR",
             _ => false,
         };
 
         if is_dir {
             // List files in the remote directory
-            let files = match self.ssh_run(&format!("find '{}' -maxdepth 1 -type f -printf '%f\\n'", remote_path)).await {
+            let files = match self.ssh_run(&format!("find '{}' -maxdepth 1 -type f -printf '%f\\n'", shell_escape(&remote_path))).await {
                 Ok((output, 0)) => output.trim().to_string(),
                 Ok((output, _)) => return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Cannot list directory '{}': {}", remote_path, output.trim()
@@ -1568,7 +1575,7 @@ impl AutoPipeServer {
     ) -> Result<CallToolResult, ErrorData> {
         if let Some(parent) = std::path::Path::new(&params.path).parent() {
             let _ = self
-                .ssh_run(&format!("mkdir -p '{}'", parent.to_string_lossy()))
+                .ssh_run(&format!("mkdir -p '{}'", shell_escape(&parent.to_string_lossy())))
                 .await;
         }
 
@@ -1595,7 +1602,7 @@ impl AutoPipeServer {
         let is_dir = match self
             .ssh_run(&format!(
                 "test -d '{}' && echo DIR || echo FILE",
-                params.path
+                shell_escape(&params.path)
             ))
             .await
         {
@@ -1608,7 +1615,7 @@ impl AutoPipeServer {
             match self
                 .ssh_run(&format!(
                     "find '{}' -maxdepth 1 -type f ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
-                    params.path
+                    shell_escape(&params.path)
                 ))
                 .await
             {
@@ -1632,7 +1639,7 @@ impl AutoPipeServer {
             match self
                 .ssh_run(&format!(
                     "test -f '{}' && echo OK || echo NOT_FOUND",
-                    params.path
+                    shell_escape(&params.path)
                 ))
                 .await
             {
@@ -1721,7 +1728,7 @@ impl AutoPipeServer {
 
             // Genomics files: register as remote (server-side pagination + Range proxy)
             if genomics_remote_exts.contains(&ext.as_str()) {
-                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", path, path);
+                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", shell_escape(path), shell_escape(path));
                 let size: u64 = if let Ok((size_str, 0)) = self.ssh_run(&size_cmd).await {
                     clean_content(&size_str).trim().parse().unwrap_or(0)
                 } else {
@@ -1733,7 +1740,7 @@ impl AutoPipeServer {
 
             // h5ad/h5/hdf5: check file size, skip if > 1GB (download only)
             if matches!(ext.as_str(), "h5ad" | "h5" | "hdf5") {
-                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", path, path);
+                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", shell_escape(path), shell_escape(path));
                 if let Ok((size_str, 0)) = self.ssh_run(&size_cmd).await {
                     let size: u64 = clean_content(&size_str).trim().parse().unwrap_or(0);
                     if size > 1_073_741_824 {
@@ -1744,7 +1751,7 @@ impl AutoPipeServer {
             }
 
             match self
-                .ssh_run(&format!("base64 -w 0 '{}'", path))
+                .ssh_run(&format!("base64 -w 0 '{}'", shell_escape(path)))
                 .await
             {
                 Ok((b64, 0)) => {

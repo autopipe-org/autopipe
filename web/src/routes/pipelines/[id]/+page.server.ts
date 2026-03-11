@@ -29,7 +29,7 @@ export const load: PageServerLoad = async ({ params }) => {
 			await deletePipeline(id);
 			throw redirect(302, '/?deleted=' + encodeURIComponent(pipeline.name));
 		}
-		throw error(502, `Failed to fetch from GitHub: ${e instanceof Error ? e.message : String(e)}`);
+		throw error(502, 'Failed to fetch pipeline files from GitHub');
 	}
 
 	// basedOn info: when forked_from exists and the original author differs

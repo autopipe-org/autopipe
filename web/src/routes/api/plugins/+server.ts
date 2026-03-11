@@ -1,6 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { listPlugins, searchPlugins, getPluginByName } from '$lib/server/plugins.js';
+import { sanitizeErrorMessage } from '$lib/server/security.js';
 
 // GET /api/plugins — list all, search with ?q=, or exact match with ?name=
 export const GET: RequestHandler = async ({ url }) => {
@@ -16,6 +17,6 @@ export const GET: RequestHandler = async ({ url }) => {
 		return json(plugins);
 	} catch (e: unknown) {
 		const message = e instanceof Error ? e.message : String(e);
-		return json({ error: message }, { status: 500 });
+		return json({ error: sanitizeErrorMessage(message) }, { status: 500 });
 	}
 };
