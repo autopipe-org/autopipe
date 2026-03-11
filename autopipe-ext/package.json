@@ -1,6 +1,6 @@
 {
   "name": "@pnucolab/autopipe-ext",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CLI tool for creating, validating, and publishing AutoPipe viewer plugins",
   "bin": {
     "autopipe-ext": "./bin/cli.js"

@@ -39,9 +39,14 @@ pub const DOCKERFILE_TEMPLATE: &str = r#"FROM condaforge/mambaforge:latest
 # Install bioinformatics tools
 RUN mamba install -y -c bioconda -c conda-forge \
     snakemake-minimal \
+    bash \
     # tool1=version \
     # tool2=version \
     && mamba clean -afy
+
+# Replace system bash with conda bash (prevents GLIBC mismatch)
+RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && \
+    ln -sf /opt/conda/bin/bash /bin/sh
 
 # Install uv for fast Python package installation
 RUN pip install uv
@@ -180,7 +185,9 @@ Every pipeline is a directory with 5 required files:
 ## Dockerfile Rules
 - Base image: `condaforge/mambaforge:latest`
 - Install bioconda/conda-forge tools via `mamba install -c bioconda -c conda-forge`
-- Always install `snakemake-minimal`
+- Always install `snakemake-minimal` and `bash` via conda
+- After installing, replace system bash with conda bash to prevent GLIBC mismatch:
+  `RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && ln -sf /opt/conda/bin/bash /bin/sh`
 - Pin tool versions for reproducibility (e.g., `bwa=0.7.18`)
 - For Python (PyPI) packages, use `uv pip install --system` instead of `pip install`
   - Install uv first: `RUN pip install uv`

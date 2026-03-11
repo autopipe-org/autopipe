@@ -5,7 +5,7 @@ import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { validate } from './validate.js';
 
-const DEFAULT_REGISTRY = 'http://localhost:8090';
+const DEFAULT_REGISTRY = 'https://hub.autopipe.org';
 
 function compareSemver(a, b) {
   const pa = a.split('.').map(Number);
