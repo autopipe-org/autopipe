@@ -1200,9 +1200,9 @@ impl AutoPipeServer {
     async fn list_running_pipelines(&self) -> Result<CallToolResult, ErrorData> {
         let output_base = self.config.full_output_dir();
 
-        // Find all run metadata files
+        // Find all run metadata files (use glob instead of find -exec to avoid {} escaping issues over SSH)
         let find_cmd = format!(
-            "find '{}' -maxdepth 2 -name '.autopipe-run.json' -exec cat '{{}}' \\; 2>/dev/null",
+            "for f in '{}'/*/.autopipe-run.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null",
             output_base
         );
         let meta_output = match self.ssh_run(&find_cmd).await {
