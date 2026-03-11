@@ -43,6 +43,12 @@ RUN mamba install -y -c bioconda -c conda-forge \
     # tool2=version \
     && mamba clean -afy
 
+# Install uv for fast Python package installation
+RUN pip install uv
+
+# Python packages (use uv instead of pip for faster dependency resolution)
+# RUN uv pip install --system package1 package2
+
 # Setup pipeline
 WORKDIR /pipeline
 COPY Snakefile .
@@ -173,9 +179,13 @@ Every pipeline is a directory with 5 required files:
 
 ## Dockerfile Rules
 - Base image: `condaforge/mambaforge:latest`
-- Install tools via `mamba install -c bioconda -c conda-forge`
+- Install bioconda/conda-forge tools via `mamba install -c bioconda -c conda-forge`
 - Always install `snakemake-minimal`
 - Pin tool versions for reproducibility (e.g., `bwa=0.7.18`)
+- For Python (PyPI) packages, use `uv pip install --system` instead of `pip install`
+  - Install uv first: `RUN pip install uv`
+  - The `--system` flag is required to install into the conda environment
+  - uv resolves dependencies much faster than pip
 - Copy Snakefile and config.yaml into `/pipeline`
 - Clean up: `mamba clean -afy`
 - Set `WORKDIR /pipeline`
