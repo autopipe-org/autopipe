@@ -32,6 +32,9 @@ jobs:
           @"
           !include "MUI2.nsh"
 
+          !define MUI_ICON "crates\desktop\assets\app.ico"
+          !define MUI_UNICON "crates\desktop\assets\app.ico"
+
           Name "AutoPipe"
           OutFile "AutoPipe-Setup-${{ github.ref_name }}.exe"
           InstallDir "`$PROGRAMFILES\AutoPipe"
@@ -44,10 +47,11 @@ jobs:
           Section "Install"
             SetOutPath "`$INSTDIR"
             File "target\release\autopipe.exe"
+            File "crates\desktop\assets\app.ico"
 
             CreateDirectory "`$SMPROGRAMS\AutoPipe"
-            CreateShortcut "`$SMPROGRAMS\AutoPipe\AutoPipe.lnk" "`$INSTDIR\autopipe.exe"
-            CreateShortcut "`$DESKTOP\AutoPipe.lnk" "`$INSTDIR\autopipe.exe"
+            CreateShortcut "`$SMPROGRAMS\AutoPipe\AutoPipe.lnk" "`$INSTDIR\autopipe.exe" "" "`$INSTDIR\app.ico"
+            CreateShortcut "`$DESKTOP\AutoPipe.lnk" "`$INSTDIR\autopipe.exe" "" "`$INSTDIR\app.ico"
 
             WriteUninstaller "`$INSTDIR\uninstall.exe"
             WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\AutoPipe" "DisplayName" "AutoPipe"
@@ -57,6 +61,7 @@ jobs:
 
           Section "Uninstall"
             Delete "`$INSTDIR\autopipe.exe"
+            Delete "`$INSTDIR\app.ico"
             Delete "`$INSTDIR\uninstall.exe"
             RMDir "`$INSTDIR"
             Delete "`$SMPROGRAMS\AutoPipe\AutoPipe.lnk"

@@ -33,3 +33,6 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
