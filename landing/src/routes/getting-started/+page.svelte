@@ -35,18 +35,21 @@
 				<div class="options">
 					<div class="option">
 						<h4>macOS</h4>
-						<p>Download the <code>.dmg</code> file from the latest GitHub release:</p>
-						<a href="https://github.com/khyeonmin/autopipe-app/releases" target="_blank" rel="noopener" class="btn-sm">Download for macOS</a>
+						<p>Download the <code>.dmg</code> installer:</p>
+						<div class="btn-group">
+							<a href="https://download.autopipe.org/macOS/AutoPipe-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-macos-x64.dmg" class="btn-sm">Download for Intel</a>
+						</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
-						<p>Download the <code>.msi</code> installer from the latest GitHub release:</p>
-						<a href="https://github.com/khyeonmin/autopipe-app/releases" target="_blank" rel="noopener" class="btn-sm">Download for Windows</a>
+						<p>Download the <code>.exe</code> installer:</p>
+						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.4.exe" class="btn-sm">Download for Windows</a>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
-						<p>Download the <code>.deb</code> or <code>.AppImage</code> from the latest GitHub release:</p>
-						<a href="https://github.com/khyeonmin/autopipe-app/releases" target="_blank" rel="noopener" class="btn-sm">Download for Linux</a>
+						<p>Download the <code>.deb</code> package:</p>
+						<a href="https://download.autopipe.org/linux/autopipe_0.0.4_amd64.deb" class="btn-sm">Download for Linux</a>
 					</div>
 				</div>
 			</div>
@@ -55,19 +58,6 @@
 		<!-- Step 2 -->
 		<section class="step">
 			<div class="step-number">2</div>
-			<div class="step-content">
-				<h2>Connect to Claude Desktop</h2>
-				<p>Autopipe works as an MCP (Model Context Protocol) server inside Claude Desktop. Register it with one command:</p>
-				<div class="code-block">
-					<code>autopipe --register</code>
-				</div>
-				<p class="hint">This automatically adds Autopipe to Claude Desktop's MCP configuration. Restart Claude Desktop after registering.</p>
-			</div>
-		</section>
-
-		<!-- Step 3 -->
-		<section class="step">
-			<div class="step-number">3</div>
 			<div class="step-content">
 				<h2>Configure Your Server</h2>
 				<p>Open the Autopipe desktop app and set up your remote SSH server. This is where pipelines will be executed.</p>
@@ -81,15 +71,21 @@
 						<span class="config-desc">Username for SSH connection</span>
 					</div>
 					<div class="config-item">
-						<span class="config-label">Pipelines Directory</span>
-						<span class="config-desc">Where pipeline files are stored on the server</span>
-					</div>
-					<div class="config-item">
-						<span class="config-label">Output Directory</span>
-						<span class="config-desc">Where analysis results are saved</span>
+						<span class="config-label">Remote Repo Path</span>
+						<span class="config-desc">Base path on the server — <code>pipelines/</code> and <code>pipelines_output/</code> will be created inside</span>
 					</div>
 				</div>
 				<p class="hint">Make sure Docker is installed on your remote server. Pipelines run inside Docker containers for reproducibility.</p>
+			</div>
+		</section>
+
+		<!-- Step 3 -->
+		<section class="step">
+			<div class="step-number">3</div>
+			<div class="step-content">
+				<h2>Connect GitHub</h2>
+				<p>Go to the GitHub tab in the desktop app and link your GitHub account. This allows you to upload pipelines and publish them to AutoPipeHub.</p>
+				<p class="hint">A GitHub Personal Access Token with <code>repo</code> scope is required.</p>
 			</div>
 		</section>
 
@@ -97,9 +93,9 @@
 		<section class="step">
 			<div class="step-number">4</div>
 			<div class="step-content">
-				<h2>Connect GitHub</h2>
-				<p>Link your GitHub account in the desktop app's GitHub tab. This allows you to upload pipelines and publish them to AutoPipeHub.</p>
-				<p class="hint">A GitHub Personal Access Token with <code>repo</code> scope is required.</p>
+				<h2>Save & Register to Claude Desktop</h2>
+				<p>Click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings. Autopipe works as an MCP (Model Context Protocol) server inside Claude Desktop.</p>
+				<p class="hint">Restart Claude Desktop after launching the Autopipe app. Autopipe will continue running in the system tray.</p>
 			</div>
 		</section>
 
@@ -107,12 +103,16 @@
 		<section class="step">
 			<div class="step-number">5</div>
 			<div class="step-content">
-				<h2>Create Your First Pipeline</h2>
-				<p>Open Claude Desktop and describe what you want to analyze. For example:</p>
+				<h2>Create or Find a Pipeline</h2>
+				<p>Open Claude Desktop and describe what you want to analyze. You can create a new pipeline from scratch:</p>
 				<div class="example-chat">
 					<div class="user-msg">Create a variant calling pipeline for paired-end WGS data using BWA-MEM2 and GATK HaplotypeCaller</div>
 				</div>
-				<p>Claude will use Autopipe to:</p>
+				<p>Or find an existing pipeline — browse <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> directly, or ask Claude to search for you:</p>
+				<div class="example-chat">
+					<div class="user-msg">Find a RNA-seq differential expression pipeline</div>
+				</div>
+				<p>When creating a new pipeline, Claude will use Autopipe to:</p>
 				<ol>
 					<li>Generate a <strong>Snakefile</strong> with the analysis workflow</li>
 					<li>Create a <strong>Dockerfile</strong> with all required tools</li>
@@ -127,18 +127,31 @@
 		<section class="step">
 			<div class="step-number">6</div>
 			<div class="step-content">
-				<h2>Run & View Results</h2>
-				<p>Once your pipeline is generated, ask Claude to execute it:</p>
+				<h2>Run Your Pipeline</h2>
+				<p>Once your pipeline is ready, ask Claude to execute it:</p>
 				<div class="example-chat">
 					<div class="user-msg">Build the Docker image and run a dry-run first, then execute on my samples in /data/wgs_samples</div>
 				</div>
-				<p>After execution, view results directly in the browser viewer or download them locally.</p>
+				<p class="hint">Claude will build the Docker image, run a dry-run to validate, and then execute the full pipeline on your server.</p>
 			</div>
 		</section>
 
 		<!-- Step 7 -->
 		<section class="step">
 			<div class="step-number">7</div>
+			<div class="step-content">
+				<h2>View Results</h2>
+				<p>After execution, view results directly in the browser viewer or download them locally.</p>
+				<div class="example-chat">
+					<div class="user-msg">Show me the results of my pipeline run</div>
+				</div>
+				<p class="hint">The viewer supports custom plugins for specialized visualizations. Browse available plugins on the <a href="/plugins">Plugins</a> page.</p>
+			</div>
+		</section>
+
+		<!-- Step 8 -->
+		<section class="step">
+			<div class="step-number">8</div>
 			<div class="step-content">
 				<h2>Share on AutoPipeHub</h2>
 				<p>Publish your pipeline to make it available for others:</p>
@@ -229,6 +242,7 @@
 		text-decoration: none; border-radius: 6px; font-size: 0.85rem; font-weight: 500;
 	}
 	.btn-sm:hover { background: #0d3d4a; }
+	.btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
 
 	.config-list { margin: 12px 0; }
 	.config-item {
