@@ -184,7 +184,7 @@ jobs:
           path: AutoPipe-macos-${{ matrix.arch }}.dmg
 
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
 
@@ -227,7 +227,7 @@ jobs:
           Description: Bioinformatics pipeline management tool
            MCP server for bioinformatics pipeline management.
            Compatible with Claude Desktop and any MCP-compatible app.
-          Depends: libgtk-3-0, libssl3
+          Depends: libgtk-3-0, libssl3, libxdo3
           EOF
 
           cat > pkg/usr/share/applications/autopipe.desktop << EOF
