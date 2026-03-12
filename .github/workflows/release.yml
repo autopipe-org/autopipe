@@ -93,9 +93,9 @@ jobs:
       matrix:
         include:
           - target: aarch64-apple-darwin
-            name: autopipe-macos-arm64
+            arch: arm64
           - target: x86_64-apple-darwin
-            name: autopipe-macos-x64
+            arch: x64
     steps:
       - uses: actions/checkout@v4
 
@@ -112,14 +112,76 @@ jobs:
       - name: Build
         run: cargo build --release --features gui,portable --target ${{ matrix.target }}
 
-      - name: Rename binary
-        run: cp target/${{ matrix.target }}/release/autopipe ${{ matrix.name }}
+      - name: Create macOS .app bundle
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          APP="AutoPipe.app"
+
+          # Create .app bundle structure
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+          cp target/${{ matrix.target }}/release/autopipe "$APP/Contents/MacOS/autopipe"
+          chmod +x "$APP/Contents/MacOS/autopipe"
+
+          # Generate .icns icon from logo.png
+          mkdir -p AppIcon.iconset
+          sips -z 16 16     web/static/logo.png --out AppIcon.iconset/icon_16x16.png
+          sips -z 32 32     web/static/logo.png --out AppIcon.iconset/icon_16x16@2x.png
+          sips -z 32 32     web/static/logo.png --out AppIcon.iconset/icon_32x32.png
+          sips -z 64 64     web/static/logo.png --out AppIcon.iconset/icon_32x32@2x.png
+          sips -z 128 128   web/static/logo.png --out AppIcon.iconset/icon_128x128.png
+          sips -z 256 256   web/static/logo.png --out AppIcon.iconset/icon_128x128@2x.png
+          sips -z 256 256   web/static/logo.png --out AppIcon.iconset/icon_256x256.png
+          sips -z 512 512   web/static/logo.png --out AppIcon.iconset/icon_256x256@2x.png
+          sips -z 512 512   web/static/logo.png --out AppIcon.iconset/icon_512x512.png
+          sips -z 1024 1024 web/static/logo.png --out AppIcon.iconset/icon_512x512@2x.png
+          iconutil -c icns AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
+
+          # Create Info.plist
+          cat > "$APP/Contents/Info.plist" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key>
+            <string>AutoPipe</string>
+            <key>CFBundleDisplayName</key>
+            <string>AutoPipe</string>
+            <key>CFBundleIdentifier</key>
+            <string>org.autopipe.desktop</string>
+            <key>CFBundleVersion</key>
+            <string>${VERSION}</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${VERSION}</string>
+            <key>CFBundleExecutable</key>
+            <string>autopipe</string>
+            <key>CFBundleIconFile</key>
+            <string>AppIcon</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSMinimumSystemVersion</key>
+            <string>11.0</string>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Create DMG
+        run: |
+          DMG_NAME="AutoPipe-macos-${{ matrix.arch }}.dmg"
+          mkdir -p dmg-content
+          cp -r AutoPipe.app dmg-content/
+          ln -s /Applications dmg-content/Applications
+          hdiutil create -volname "AutoPipe" -srcfolder dmg-content \
+            -ov -format UDZO "$DMG_NAME"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: ${{ matrix.name }}
+          name: macos-${{ matrix.arch }}
+          path: AutoPipe-macos-${{ matrix.arch }}.dmg
 
   build-linux:
     runs-on: ubuntu-latest
@@ -143,11 +205,50 @@ jobs:
       - name: Rename binary
         run: cp target/release/autopipe autopipe-linux-x64
 
+      - name: Create .deb package
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+
+          mkdir -p pkg/DEBIAN
+          mkdir -p pkg/usr/bin
+          mkdir -p pkg/usr/share/applications
+          mkdir -p pkg/usr/share/icons/hicolor/256x256/apps
+
+          cp target/release/autopipe pkg/usr/bin/
+          chmod +x pkg/usr/bin/autopipe
+          cp web/static/logo.png pkg/usr/share/icons/hicolor/256x256/apps/autopipe.png
+
+          cat > pkg/DEBIAN/control << EOF
+          Package: autopipe
+          Version: ${VERSION}
+          Architecture: amd64
+          Maintainer: AutoPipe Team <contact@autopipe.org>
+          Description: Bioinformatics pipeline management tool
+           MCP server for bioinformatics pipeline management.
+           Compatible with Claude Desktop and any MCP-compatible app.
+          Depends: libgtk-3-0, libssl3
+          EOF
+
+          cat > pkg/usr/share/applications/autopipe.desktop << EOF
+          [Desktop Entry]
+          Name=AutoPipe
+          Exec=/usr/bin/autopipe
+          Icon=autopipe
+          Type=Application
+          Categories=Science;Education;
+          Comment=Bioinformatics pipeline management tool
+          EOF
+
+          dpkg-deb --build pkg autopipe_${VERSION}_amd64.deb
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: autopipe-linux-x64
+          path: |
+            autopipe-linux-x64
+            autopipe_*_amd64.deb
 
   release:
     needs: [build-windows, build-macos, build-linux]
@@ -165,6 +266,7 @@ jobs:
           files: |
             autopipe.exe
             AutoPipe-Setup-*.exe
-            autopipe-macos-arm64
-            autopipe-macos-x64
+            AutoPipe-macos-arm64.dmg
+            AutoPipe-macos-x64.dmg
             autopipe-linux-x64
+            autopipe_*_amd64.deb
