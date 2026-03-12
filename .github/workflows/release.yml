@@ -198,6 +198,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-22.04
 
       - name: Build
         run: cargo build --release --features gui,portable
