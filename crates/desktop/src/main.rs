@@ -1,3 +1,7 @@
+// Hide the console window on Windows when built with GUI support.
+// MCP server mode still works because Claude Desktop connects via pipes, not console.
+#![cfg_attr(all(target_os = "windows", feature = "gui"), windows_subsystem = "windows")]
+
 #[cfg(feature = "gui")]
 mod app;
 mod claude_config;
@@ -8,15 +12,92 @@ mod ssh;
 mod tray;
 
 use std::env;
+use std::path::PathBuf;
+
+/// Returns the log file path: same directory as config.json.
+fn log_path() -> PathBuf {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("autopipe-app");
+    dir.join("autopipe.log")
+}
+
+/// Truncate log file if it exceeds 5 MB, keeping the last 1 MB.
+fn trim_log_file(path: &PathBuf) {
+    const MAX_SIZE: u64 = 5 * 1024 * 1024;
+    const KEEP_SIZE: usize = 1024 * 1024;
+
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    if meta.len() <= MAX_SIZE {
+        return;
+    }
+    if let Ok(content) = std::fs::read(path) {
+        let start = content.len().saturating_sub(KEEP_SIZE);
+        let _ = std::fs::write(path, &content[start..]);
+    }
+}
+
+/// Initialize tracing to append to the log file with timestamps.
+fn init_file_logging() {
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    trim_log_file(&path);
+
+    // Append a session separator
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "\n{}", "=".repeat(60))?;
+            writeln!(f, "=== AutoPipe session started at {} ===", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"))?;
+            writeln!(f, "{}", "=".repeat(60))
+        });
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .expect("Failed to open log file");
+
+    tracing_subscriber::fmt()
+        .with_writer(std::sync::Mutex::new(file))
+        .with_ansi(false)
+        .init();
+}
+
+/// On Windows, allocate a console for CLI modes that print output.
+#[cfg(target_os = "windows")]
+fn ensure_console() {
+    unsafe {
+        extern "system" {
+            fn AttachConsole(dwProcessId: u32) -> i32;
+            fn AllocConsole() -> i32;
+        }
+        if AttachConsole(0xFFFFFFFF) == 0 {
+            AllocConsole();
+        }
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // CLI modes need a console for output on Windows
+    #[cfg(target_os = "windows")]
+    if args.iter().any(|a| a == "--register" || a == "--unregister" || a == "--status") {
+        ensure_console();
+    }
+
     if args.iter().any(|a| a == "--mcp-server") {
-        // MCP server mode: any MCP-compatible app invokes this via stdio
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .init();
+        // MCP server mode: log to file (stderr is used by MCP transport)
+        init_file_logging();
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
         if let Err(e) = rt.block_on(mcp::server::run_mcp_server()) {
             eprintln!("MCP server error: {}", e);
@@ -66,6 +147,7 @@ fn main() {
     } else {
         #[cfg(feature = "gui")]
         {
+            init_file_logging();
             run_gui();
         }
         #[cfg(not(feature = "gui"))]
