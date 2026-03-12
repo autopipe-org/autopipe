@@ -1136,7 +1136,7 @@ impl AutoPipeServer {
         let _ = self.ssh_write_file(&meta_path, &run_meta).await;
 
         let cmd = format!(
-            "nohup docker run --rm --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            "nohup docker run --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
             shell_escape(&container_name), pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
@@ -1287,7 +1287,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Check pipeline execution status by reading the log file and checking if the process is still running. Uses {configured_output_dir}/{run_name}/.")]
+    #[tool(description = "Check pipeline execution status. Inspects the Docker container for exit code, OOM kill, and other abnormal terminations. If the container has stopped, saves termination info to .autopipe-run.json and removes the container. Falls back to saved JSON when the container is already gone.")]
     async fn check_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
@@ -1295,23 +1295,104 @@ impl AutoPipeServer {
         let output_dir = self.resolve_output_dir(&params.run_name);
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
+        let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
 
-        let running = match self.ssh_run(&format!("docker inspect -f '{{{{.State.Running}}}}' '{}' 2>/dev/null", shell_escape(&container_name))).await {
-            Ok((output, 0)) => output.trim() == "true",
-            _ => false,
-        };
+        // Step 1: Try docker inspect for full container state
+        let inspect_fmt = "{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.FinishedAt}}";
+        let inspect_result = self.ssh_run(&format!(
+            "docker inspect -f '{}' '{}' 2>/dev/null",
+            inspect_fmt, shell_escape(&container_name)
+        )).await;
 
+        // Step 2: Read log tail
         let log_output = match self.ssh_run(&format!("tail -50 '{}' 2>/dev/null", shell_escape(&log_path))).await {
             Ok((output, 0)) => output,
             Ok((output, _)) => format!("(log not available: {})", output.trim()),
             Err(e) => format!("(cannot read log: {})", e),
         };
 
-        let status_str = if running { "RUNNING" } else { "FINISHED" };
+        match inspect_result {
+            Ok((output, 0)) => {
+                let parts: Vec<&str> = output.trim().splitn(4, '|').collect();
+                if parts.len() == 4 {
+                    let is_running = parts[0] == "true";
+                    let exit_code = parts[1];
+                    let oom_killed = parts[2] == "true";
+                    let finished_at = parts[3];
+
+                    if is_running {
+                        // Container is still running
+                        return Ok(CallToolResult::success(vec![Content::text(format!(
+                            "Status: RUNNING\nContainer: {}\nOutput: {}\nLog ({}):\n{}",
+                            container_name, output_dir, log_path, log_output
+                        ))]));
+                    }
+
+                    // Container stopped — determine cause
+                    let termination_reason = if oom_killed {
+                        format!("OOM_KILLED (Out of Memory) — exit code: {}", exit_code)
+                    } else if exit_code == "137" {
+                        format!("KILLED (signal 9, likely OOM or manual kill) — exit code: {}", exit_code)
+                    } else if exit_code == "139" {
+                        format!("SEGFAULT (signal 11) — exit code: {}", exit_code)
+                    } else if exit_code == "143" {
+                        format!("TERMINATED (signal 15) — exit code: {}", exit_code)
+                    } else if exit_code == "0" {
+                        "COMPLETED (exit code: 0)".to_string()
+                    } else {
+                        format!("FAILED — exit code: {}", exit_code)
+                    };
+
+                    // Save termination info to .autopipe-run.json
+                    let meta_read = self.ssh_run(&format!("cat '{}' 2>/dev/null", shell_escape(&meta_path))).await;
+                    let mut meta: serde_json::Value = match &meta_read {
+                        Ok((content, 0)) => serde_json::from_str(content.trim()).unwrap_or(serde_json::json!({})),
+                        _ => serde_json::json!({}),
+                    };
+                    meta["exit_code"] = serde_json::json!(exit_code);
+                    meta["oom_killed"] = serde_json::json!(oom_killed);
+                    meta["finished_at"] = serde_json::json!(finished_at);
+                    meta["termination_reason"] = serde_json::json!(termination_reason);
+                    let _ = self.ssh_write_file(&meta_path, &meta.to_string()).await;
+
+                    // Remove stopped container to avoid accumulation
+                    let _ = self.ssh_run(&format!("docker rm '{}' 2>/dev/null", shell_escape(&container_name))).await;
+
+                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Status: {}\nContainer: {} (removed after inspection)\nOutput: {}\nFinished at: {}\nLog ({}):\n{}",
+                        termination_reason, container_name, output_dir, finished_at, log_path, log_output
+                    ))]));
+                }
+            }
+            _ => {}
+        }
+
+        // Step 3: Container doesn't exist — fall back to saved JSON metadata
+        let meta_info = match self.ssh_run(&format!("cat '{}' 2>/dev/null", shell_escape(&meta_path))).await {
+            Ok((content, 0)) => {
+                match serde_json::from_str::<serde_json::Value>(content.trim()) {
+                    Ok(meta) => {
+                        let reason = meta["termination_reason"].as_str().unwrap_or("UNKNOWN");
+                        let finished = meta["finished_at"].as_str().unwrap_or("unknown");
+                        let exit_code = meta["exit_code"].as_str().unwrap_or("unknown");
+                        let oom = meta["oom_killed"].as_bool().unwrap_or(false);
+
+                        if meta.get("termination_reason").is_some() {
+                            format!("Status: {} (from saved metadata)\nExit code: {}\nOOM killed: {}\nFinished at: {}",
+                                reason, exit_code, oom, finished)
+                        } else {
+                            "Status: UNKNOWN (container gone, no termination info saved)".to_string()
+                        }
+                    }
+                    Err(_) => "Status: UNKNOWN (container gone, metadata unreadable)".to_string(),
+                }
+            }
+            _ => "Status: UNKNOWN (no container, no metadata found)".to_string(),
+        };
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Status: {}\nContainer: {}\nOutput: {}\nLog ({}):\n{}",
-            status_str, container_name, output_dir, log_path, log_output
+            "{}\nContainer: {}\nOutput: {}\nLog ({}):\n{}",
+            meta_info, container_name, output_dir, log_path, log_output
         ))]))
     }
 
@@ -1339,7 +1420,15 @@ impl AutoPipeServer {
             }
         }
 
-        // 2. Remove failed output directory (only if explicitly requested)
+        // 2. Remove stopped container if it exists
+        let container_name = format!("{}-run", params.run_name);
+        let rm_container = format!("docker rm '{}' 2>/dev/null", shell_escape(&container_name));
+        match self.ssh_run(&rm_container).await {
+            Ok((_, 0)) => results.push(format!("Removed stopped container: {}", container_name)),
+            _ => {} // container already gone, no action needed
+        }
+
+        // 3. Remove failed output directory (only if explicitly requested)
         if params.remove_output.unwrap_or(false) {
             let check_dir = format!("test -d '{}'", shell_escape(&output_dir));
             if let Ok((_, 0)) = self.ssh_run(&check_dir).await {
@@ -1356,7 +1445,7 @@ impl AutoPipeServer {
             results.push(format!("Output directory preserved (Snakemake will resume from completed steps): {}", output_dir));
         }
 
-        // 3. Remove Docker image
+        // 4. Remove Docker image
         let check_img = format!(
             "docker images -q '{}' 2>/dev/null",
             shell_escape(&params.image_name)
@@ -1374,7 +1463,7 @@ impl AutoPipeServer {
             }
         }
 
-        // 4. Prune dangling images from failed builds
+        // 5. Prune dangling images from failed builds
         let _ = self.ssh_run("docker image prune -f --filter dangling=true 2>/dev/null").await;
         results.push("Pruned dangling images from incomplete builds.".to_string());
 
