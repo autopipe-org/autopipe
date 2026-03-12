@@ -180,7 +180,9 @@ struct InstallPluginParams {
 
 #[derive(Clone)]
 pub struct AutoPipeServer {
+    #[allow(dead_code)]
     registry: RegistryClient,
+    #[allow(dead_code)]
     config: AppConfig,
     tool_router: ToolRouter<Self>,
 }
@@ -302,8 +304,15 @@ async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, pa
 // ── SSH helper methods ──────────────────────────────────────────────
 
 impl AutoPipeServer {
+    /// Reload config from disk on every call so that changes made in the
+    /// desktop app are picked up immediately without restarting the MCP server.
+    fn config(&self) -> AppConfig {
+        AppConfig::load()
+    }
+
+
     async fn ssh_run(&self, cmd: &str) -> Result<(String, i32), String> {
-        let config = self.config.clone();
+        let config = self.config();
         let cmd = cmd.to_string();
         let (output, code) = tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
             .await
@@ -359,7 +368,7 @@ impl AutoPipeServer {
     fn resolve_output_dir(&self, run_name: &str) -> String {
         format!(
             "{}/{}",
-            self.config.full_output_dir().trim_end_matches('/'),
+            self.config().full_output_dir().trim_end_matches('/'),
             run_name
         )
     }
@@ -392,7 +401,7 @@ impl AutoPipeServer {
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
 
-        let pipelines_base = self.config.full_pipelines_dir();
+        let pipelines_base = self.config().full_pipelines_dir();
         let candidate = format!(
             "{}/{}",
             pipelines_base.trim_end_matches('/'),
@@ -407,7 +416,7 @@ impl AutoPipeServer {
             }
         }
 
-        let output_base = self.config.full_output_dir();
+        let output_base = self.config().full_output_dir();
         let candidate = format!(
             "{}/{}/{}",
             output_base.trim_end_matches('/'),
@@ -442,6 +451,7 @@ impl AutoPipeServer {
 
     #[tool(description = "Get the configured workspace paths on the remote SSH server. Call this first to understand where pipelines and outputs are stored.")]
     async fn get_workspace_info(&self) -> Result<CallToolResult, ErrorData> {
+        let config = self.config();
         let info = format!(
             "Workspace Configuration:\n\
              - Base path (repo_path): {}\n\
@@ -452,16 +462,16 @@ impl AutoPipeServer {
              When executing pipelines, outputs are automatically stored under the output directory.\n\
              To view result files, use list_files and read_file directly on the output path.\n\
              To link data, use create_symlink instead of copying files.",
-            if self.config.repo_path.is_empty() {
+            if config.repo_path.is_empty() {
                 "(not set)"
             } else {
-                &self.config.repo_path
+                &config.repo_path
             },
-            self.config.full_pipelines_dir(),
-            self.config.full_output_dir(),
-            self.config.ssh_user,
-            self.config.ssh_host,
-            self.config.ssh_port,
+            config.full_pipelines_dir(),
+            config.full_output_dir(),
+            config.ssh_user,
+            config.ssh_host,
+            config.ssh_port,
         );
         Ok(CallToolResult::success(vec![Content::text(info)]))
     }
@@ -529,7 +539,7 @@ impl AutoPipeServer {
         // 3. Create directory on remote server
         let base_dir = params
             .output_dir
-            .unwrap_or_else(|| self.config.full_pipelines_dir());
+            .unwrap_or_else(|| self.config().full_pipelines_dir());
         let dir = format!(
             "{}/{}",
             base_dir.trim_end_matches('/'),
@@ -588,7 +598,8 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let token = match &self.config.github_token {
+        let config = self.config();
+        let token = match &config.github_token {
             Some(t) if !t.is_empty() => t.clone(),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
@@ -639,7 +650,7 @@ impl AutoPipeServer {
         let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
 
         let pipeline_name = &metadata.name;
-        let repo_name = &self.config.github_repo;
+        let repo_name = &config.github_repo;
 
         let client = reqwest::Client::new();
 
@@ -862,7 +873,8 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let token = match &self.config.github_token {
+        let config = self.config();
+        let token = match &config.github_token {
             Some(t) if !t.is_empty() => t.clone(),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
@@ -872,7 +884,7 @@ impl AutoPipeServer {
         };
 
         // Call registry publish endpoint with just github_url + token
-        let base = self.config.registry_url.trim_end_matches('/');
+        let base = config.registry_url.trim_end_matches('/');
         let client = reqwest::Client::new();
         let resp = client
             .post(format!("{}/api/publish", base))
@@ -1036,7 +1048,7 @@ impl AutoPipeServer {
         };
 
         // Get recent log output
-        let pipelines_dir = self.config.full_pipelines_dir();
+        let pipelines_dir = self.config().full_pipelines_dir();
         let log_path = format!("{}/build_{}.log", pipelines_dir, params.image_name);
         // Also check in pipeline subdirectories
         let find_log = format!(
@@ -1083,7 +1095,7 @@ impl AutoPipeServer {
         let output_dir = params
             .output_dir
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.config.full_output_dir());
+            .unwrap_or_else(|| self.config().full_output_dir());
 
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
             Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", shell_escape(&dir)),
@@ -1208,7 +1220,7 @@ impl AutoPipeServer {
 
     #[tool(description = "List all pipeline runs (running, completed, or failed). Scans the output directory for .autopipe-run.json metadata files and checks container status. No parameters needed — call this when the user asks about pipeline status, progress, or running jobs.")]
     async fn list_running_pipelines(&self) -> Result<CallToolResult, ErrorData> {
-        let output_base = self.config.full_output_dir();
+        let output_base = self.config().full_output_dir();
 
         // Find all run metadata files (use glob instead of find -exec to avoid {} escaping issues over SSH)
         let find_cmd = format!(
@@ -1888,7 +1900,7 @@ impl AutoPipeServer {
         };
 
         // Check if any file requires a plugin that is not installed
-        let plugins_dir_path = self.config.full_plugins_dir();
+        let plugins_dir_path = self.config().full_plugins_dir();
         let installed_plugin_exts: Vec<String> = {
             let mut exts = Vec::new();
             if let Ok(entries) = std::fs::read_dir(&plugins_dir_path) {
@@ -2002,9 +2014,9 @@ impl AutoPipeServer {
         match viewer::show_files(
             files.clone(),
             remote_files.clone(),
-            self.config.full_plugins_dir(),
+            self.config().full_plugins_dir(),
             reference,
-            Some(self.config.clone()),
+            Some(self.config()),
         ).await {
             Ok(url) => {
                 let mut msg = format!(
@@ -2062,7 +2074,7 @@ impl AutoPipeServer {
 
     #[tool(description = "List all locally installed viewer plugins. Shows each plugin's name, version, description, and supported file extensions.")]
     async fn list_installed_plugins(&self) -> Result<CallToolResult, ErrorData> {
-        let plugins_dir = self.config.full_plugins_dir();
+        let plugins_dir = self.config().full_plugins_dir();
         let dir = std::path::Path::new(&plugins_dir);
 
         if !dir.is_dir() {
@@ -2115,7 +2127,8 @@ impl AutoPipeServer {
 
     #[tool(description = "Open the local plugins directory in the OS file explorer. Also shows a link to the plugin creation guide.")]
     async fn open_plugin_dir(&self) -> Result<CallToolResult, ErrorData> {
-        let plugins_dir = self.config.full_plugins_dir();
+        let config = self.config();
+        let plugins_dir = config.full_plugins_dir();
 
         // Create directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&plugins_dir) {
@@ -2127,7 +2140,7 @@ impl AutoPipeServer {
 
         match open::that(&plugins_dir) {
             Ok(_) => {
-                let base = self.config.registry_url.trim_end_matches('/');
+                let base = config.registry_url.trim_end_matches('/');
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Opened plugins directory: {}\n\n\
                      To create a new plugin, see the guide:\n\
@@ -2147,7 +2160,8 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<InstallPluginParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let base = self.config.registry_url.trim_end_matches('/');
+        let config = self.config();
+        let base = config.registry_url.trim_end_matches('/');
         let client = reqwest::Client::new();
 
         // 1. Search registry for the plugin
@@ -2257,7 +2271,7 @@ impl AutoPipeServer {
         let style = manifest["style"].as_str();
 
         // 4. Create local plugin directory
-        let plugins_dir = self.config.full_plugins_dir();
+        let plugins_dir = config.full_plugins_dir();
         let plugin_dir = std::path::Path::new(&plugins_dir).join(&plugin_name);
         if let Err(e) = std::fs::create_dir_all(&plugin_dir) {
             return Ok(CallToolResult::error(vec![Content::text(format!(

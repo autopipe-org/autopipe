@@ -6,3 +6,4 @@
 /docker-libs
 /desktop-linux
 node_modules/
+*.sql

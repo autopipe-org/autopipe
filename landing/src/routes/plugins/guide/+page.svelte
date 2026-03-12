@@ -1,12 +1,12 @@
 <svelte:head>
-	<title>Plugin Creation Guide - AutoPipe</title>
+	<title>Plugin Development Guide - AutoPipe</title>
 </svelte:head>
 
 <main>
 	<div class="guide">
 		<a href="/plugins" class="back-link">&larr; Back to Plugins</a>
 
-		<h1 class="guide-title">Plugin Creation Guide</h1>
+		<h1 class="guide-title">Plugin Development Guide</h1>
 		<p class="guide-intro">
 			AutoPipe plugins extend the Results Viewer with custom file previews.
 			Plugins are HTML/JavaScript-based and run directly in the browser.

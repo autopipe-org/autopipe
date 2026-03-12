@@ -69,6 +69,9 @@
 				<img src="/logo.png" alt="Autopipe Hub" />
 				<span>Autopipe Hub</span>
 			</a>
+			<div class="nav-links">
+				<a href="https://autopipe.org" target="_blank" rel="noopener">Autopipe</a>
+			</div>
 		</nav>
 	</header>
 	{@render children()}

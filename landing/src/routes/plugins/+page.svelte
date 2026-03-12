@@ -42,7 +42,7 @@
 <main>
 	<div class="plugin-guide">
 		<p>Plugins extend the AutoPipe Results Viewer with custom file viewers. Install plugins in the app to preview additional file formats.</p>
-		<a href="/plugins/guide" class="guide-link">Plugin Creation Guide &rarr;</a>
+		<a href="/plugins/guide" class="guide-link">Plugin Development Guide &rarr;</a>
 	</div>
 	<div class="section">
 		<h3 class="section-title">Search Plugins</h3>

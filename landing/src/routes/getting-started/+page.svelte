@@ -15,8 +15,9 @@
 			<span>Autopipe</span>
 		</a>
 		<div class="nav-links">
-			<a href="/#about">About</a>
+			<a href={hubUrl} target="_blank" rel="noopener">Hub</a>
 			<a href="/plugins">Plugins</a>
+			<a href="/getting-started">Getting Started</a>
 		</div>
 	</nav>
 </header>
@@ -93,9 +94,9 @@
 		<section class="step">
 			<div class="step-number">4</div>
 			<div class="step-content">
-				<h2>Save & Register to Claude Desktop</h2>
-				<p>Click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings. Autopipe works as an MCP (Model Context Protocol) server inside Claude Desktop.</p>
-				<p class="hint">Restart Claude Desktop after launching the Autopipe app. Autopipe will continue running in the system tray.</p>
+				<h2>Save & Connect to Your MCP-Compatible AI App</h2>
+				<p>Click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings. Autopipe runs as an MCP (Model Context Protocol) server and works with any MCP-compatible AI app. We recommend <strong>Claude Desktop</strong> for the best experience.</p>
+				<p class="hint">Restart your MCP-compatible AI app after launching Autopipe. Autopipe will continue running in the system tray.</p>
 			</div>
 		</section>
 
@@ -174,7 +175,7 @@
 					<span>Extend the result viewer with custom plugins</span>
 				</a>
 				<a href="/plugins/guide" class="next-card">
-					<strong>Plugin Guide</strong>
+					<strong>Plugin Development Guide</strong>
 					<span>Learn how to create and publish your own plugins</span>
 				</a>
 			</div>

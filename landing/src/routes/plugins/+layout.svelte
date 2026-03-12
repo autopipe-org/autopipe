@@ -1,5 +1,7 @@
 <script lang="ts">
+	import { env } from '$env/dynamic/public';
 	let { children } = $props();
+	const hubUrl = env.PUBLIC_HUB_URL;
 </script>
 
 <svelte:head>
@@ -16,8 +18,9 @@
 				<span>Autopipe</span>
 			</a>
 			<div class="nav-links">
-				<a href="/#about">About</a>
+				<a href={hubUrl} target="_blank" rel="noopener">Hub</a>
 				<a href="/plugins" class="active">Plugins</a>
+				<a href="/getting-started">Getting Started</a>
 			</div>
 		</nav>
 	</header>

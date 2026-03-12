@@ -1,4 +1,20 @@
 services:
+  db:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: autopipe_wf
+      POSTGRES_USER: autopipe
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-autopipe123}"
+    volumes:
+      - pgdata:/var/lib/postgresql/18/docker
+      - ./autopipe_wf_dump.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autopipe -d autopipe_wf"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   registry:
     build:
       context: ./web
@@ -7,13 +23,16 @@ services:
       - "8090:8090"
     environment:
       PORT: "8090"
-      POSTGRES_HOST: "${POSTGRES_HOST:-localhost}"
-      POSTGRES_PORT: "${POSTGRES_PORT:-5433}"
+      POSTGRES_HOST: "db"
+      POSTGRES_PORT: "5432"
       POSTGRES_DB: "${POSTGRES_DB:-autopipe_wf}"
       POSTGRES_USER: "${POSTGRES_USER:-autopipe}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
       GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID}"
       GITHUB_TOKEN: "${GITHUB_TOKEN}"
+    depends_on:
+      db:
+        condition: service_healthy
 
   landing:
     build:
@@ -24,8 +43,14 @@ services:
     environment:
       PORT: "8091"
       PUBLIC_HUB_URL: "${PUBLIC_HUB_URL:-https://hub.autopipe.org}"
-      POSTGRES_HOST: "${POSTGRES_HOST:-localhost}"
-      POSTGRES_PORT: "${POSTGRES_PORT:-5433}"
+      POSTGRES_HOST: "db"
+      POSTGRES_PORT: "5432"
       POSTGRES_DB: "${POSTGRES_DB:-autopipe_wf}"
       POSTGRES_USER: "${POSTGRES_USER:-autopipe}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

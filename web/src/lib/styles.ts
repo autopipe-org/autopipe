@@ -7,6 +7,9 @@ header { position: sticky; top: 0; background: #fff; border-bottom: 1px solid #e
 nav { max-width: 1200px; margin: 0 auto; padding: 16px 24px; display: flex; align-items: center; justify-content: space-between; }
 .logo { display: flex; align-items: center; gap: 10px; text-decoration: none; color: #1a2332; font-weight: 700; font-size: 1.25rem; }
 .logo img { height: 32px; width: auto; }
+.nav-links { display: flex; gap: 32px; }
+.nav-links a { text-decoration: none; color: #4b5563; font-weight: 500; font-size: 0.95rem; transition: color 0.2s; }
+.nav-links a:hover { color: #1a2332; }
 
 /* Footer */
 footer { border-top: 1px solid #e5e7eb; padding: 24px; }
