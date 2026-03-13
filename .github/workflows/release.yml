@@ -172,8 +172,10 @@ jobs:
         run: |
           DMG_NAME="AutoPipe-${{ github.ref_name }}-macos-${{ matrix.arch }}.dmg"
           mkdir -p dmg-content
-          cp -r AutoPipe.app dmg-content/
+          ditto AutoPipe.app dmg-content/AutoPipe.app
           ln -s /Applications dmg-content/Applications
+          sync
+          sleep 2
           hdiutil create -volname "AutoPipe" -srcfolder dmg-content \
             -ov -format UDZO "$DMG_NAME"
 
