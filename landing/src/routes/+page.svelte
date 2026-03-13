@@ -11,8 +11,8 @@
 		},
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M9 3v18"/><path d="M14 9l3 3-3 3"/></svg>`,
-			title: 'Docker Execution',
-			desc: 'Run pipelines in Docker containers on remote SSH servers. Fully reproducible environments with automated build and execution.'
+			title: 'Container Execution',
+			desc: 'Run pipelines in isolated containers on remote SSH servers. Fully reproducible environments with automated build and execution.'
 		},
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 010 20 15 15 0 010-20z"/></svg>`,
@@ -30,7 +30,7 @@
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg>`,
 			title: 'IGV Genomics',
-			desc: 'Visualize BAM, VCF, BED, and GFF files with IGV.js. Supports reference genome selection for interactive genome browsing.'
+			desc: 'Visualize BAM, BED, and GFF files with IGV.js. Supports reference genome selection for interactive genome browsing.'
 		},
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`,
@@ -63,7 +63,7 @@
 			<span>Autopipe</span>
 		</a>
 		<div class="nav-links">
-			<a href={hubUrl} target="_blank" rel="noopener">Hub</a>
+			<a href={hubUrl} target="_blank" rel="noopener">Hub <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
 			<a href="/plugins">Plugins</a>
 			<a href="/getting-started">Getting Started</a>
 		</div>
@@ -75,7 +75,7 @@
 	<div class="hero-content">
 		<div class="hero-text">
 			<h1>End-to-End Pipeline Automation</h1>
-			<p>Generate, execute, visualize, and share reproducible Snakemake pipelines with AI.</p>
+			<p>Generate, execute, visualize, and share reproducible containerized pipelines with AI.</p>
 			<a href="/getting-started" class="btn-primary">Get Started</a>
 		</div>
 		<div class="hero-visual">

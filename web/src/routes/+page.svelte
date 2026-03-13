@@ -108,7 +108,7 @@
 </script>
 
 <svelte:head>
-	<title>AutoPipe</title>
+	<title>Autopipe Hub</title>
 </svelte:head>
 
 <main>

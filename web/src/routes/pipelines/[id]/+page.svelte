@@ -56,7 +56,7 @@
 </script>
 
 <svelte:head>
-	<title>{p.name} - AutoPipe</title>
+	<title>{p.name} - Autopipe Hub</title>
 </svelte:head>
 
 <main>

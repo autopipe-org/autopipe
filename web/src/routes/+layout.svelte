@@ -70,7 +70,7 @@
 				<span>Autopipe Hub</span>
 			</a>
 			<div class="nav-links">
-				<a href="https://autopipe.org" target="_blank" rel="noopener">Autopipe</a>
+				<a href="https://autopipe.org" target="_blank" rel="noopener">Back to Autopipe Website</a>
 			</div>
 		</nav>
 	</header>
