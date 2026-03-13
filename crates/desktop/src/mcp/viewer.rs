@@ -29,6 +29,38 @@ struct FileEntry {
     mime: String,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct DataSource {
+    /// "docker" or "text"
+    #[serde(rename = "type")]
+    source_type: String,
+    /// Docker image name (only for type=docker)
+    #[serde(default)]
+    image: String,
+    /// Command template to count rows. Placeholders: {file}
+    #[serde(default)]
+    row_count: String,
+    /// Command template to extract metadata/header. Placeholders: {file}
+    #[serde(default)]
+    metadata: String,
+    /// Command template to extract data rows. Placeholders: {file}, {start}, {end}
+    #[serde(default)]
+    rows: String,
+    /// Column headers (static list). If empty, parsed from metadata.
+    #[serde(default)]
+    col_headers: Vec<String>,
+    /// How to parse metadata output: "vcf_style" (#CHROM + ## lines), "bam_style" (@SQ headers), or "none"
+    #[serde(default = "default_meta_parse")]
+    meta_parse: String,
+    /// Accept non-zero exit codes (e.g. BAM SIGPIPE from head)
+    #[serde(default)]
+    allow_nonzero_exit: bool,
+}
+
+fn default_meta_parse() -> String {
+    "none".to_string()
+}
+
 #[derive(Clone, Serialize)]
 struct PluginManifest {
     name: String,
@@ -38,6 +70,8 @@ struct PluginManifest {
     entry: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     style: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_source: Option<DataSource>,
 }
 
 /// A running viewer server handle.
@@ -163,6 +197,8 @@ fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
                     if name.is_empty() {
                         continue;
                     }
+                    let data_source: Option<DataSource> = v.get("data_source")
+                        .and_then(|ds| serde_json::from_value(ds.clone()).ok());
                     plugins.push(PluginManifest {
                         name,
                         version: v["version"].as_str().unwrap_or("0.0.0").to_string(),
@@ -177,6 +213,7 @@ fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
                             .unwrap_or_default(),
                         entry: v["entry"].as_str().unwrap_or("index.js").to_string(),
                         style: v["style"].as_str().map(|s| s.to_string()),
+                        data_source,
                     });
                 }
             }
@@ -374,8 +411,58 @@ struct DataQuery {
     page_size: Option<usize>,
 }
 
-/// Docker image for samtools (used for BAM file parsing via Docker on remote server).
-const SAMTOOLS_DOCKER: &str = "biocontainers/samtools:v1.9-4-deb_cv1";
+/// Build an SSH command from a DataSource template.
+/// For "docker" type: wraps the command template in `docker run --rm -v "dir:/data:ro" image sh -c "cmd" 2>/dev/null`
+/// For "text" type: uses the command template directly with the remote file path.
+/// Placeholders: {file} → filename or remote_path, {start} → start line, {end} → end line
+fn build_data_cmd(
+    ds: &DataSource,
+    template: &str,
+    remote_path: &str,
+    start: usize,
+    end: usize,
+) -> String {
+    if ds.source_type == "docker" {
+        let dir = std::path::Path::new(remote_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("/"))
+            .to_string_lossy()
+            .to_string();
+        let file = std::path::Path::new(remote_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let cmd = template
+            .replace("{file}", &format!("/data/{}", file))
+            .replace("{start}", &start.to_string())
+            .replace("{end}", &end.to_string());
+        format!(
+            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"{}\" 2>/dev/null",
+            dir, ds.image, cmd
+        )
+    } else {
+        // text type: {file} = full remote path
+        template
+            .replace("{file}", remote_path)
+            .replace("{start}", &start.to_string())
+            .replace("{end}", &end.to_string())
+    }
+}
+
+/// Find plugin data_source for a given file extension.
+async fn find_data_source(ext: &str) -> Option<DataSource> {
+    let plugins_lock = get_plugins_lock().await.lock().await;
+    let plugins = plugins_lock.clone();
+    for p in plugins.iter() {
+        if p.extensions.iter().any(|e| e == ext) {
+            if let Some(ref ds) = p.data_source {
+                return Some(ds.clone());
+            }
+        }
+    }
+    None
+}
 
 /// Helper: run SSH command via spawn_blocking.
 async fn ssh_run(config: &AppConfig, cmd: &str) -> Result<(String, i32), String> {
@@ -389,7 +476,9 @@ async fn ssh_run(config: &AppConfig, cmd: &str) -> Result<(String, i32), String>
     Ok((clean_content(&output), code))
 }
 
-/// Data handler: server-side pagination for genomics files (BAM/VCF/BED/GFF).
+/// Data handler: server-side pagination for genomics files.
+/// If the plugin defines a `data_source` in manifest.json, uses those commands.
+/// Otherwise falls back to built-in handlers for VCF/BED/GFF (text formats).
 /// GET /data/{filename}?page=0&page_size=100
 async fn data_handler(
     Path(filename): Path<String>,
@@ -426,22 +515,140 @@ async fn data_handler(
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    // For BAM files: extract parent dir and filename for Docker volume mount
-    let bam_dir = std::path::Path::new(&remote_path)
-        .parent()
-        .unwrap_or(std::path::Path::new("/"))
-        .to_string_lossy()
-        .to_string();
-    let bam_file = std::path::Path::new(&remote_path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
     let start = page * page_size + 1; // sed is 1-indexed
     let end = start + page_size - 1;
 
-    // Get total row count (cached)
+    // Try to find plugin data_source for this extension
+    let ds = find_data_source(&ext).await;
+
+    // ── Plugin-driven path: data_source found in manifest ──
+    if let Some(ref ds) = ds {
+        // 1. Row count (cached)
+        let total = {
+            let cache = get_row_count_cache().await.lock().await;
+            cache.get(&filename).copied()
+        };
+        let total = match total {
+            Some(t) => t,
+            None => {
+                if !ds.row_count.is_empty() {
+                    let cmd = build_data_cmd(ds, &ds.row_count, &remote_path, 0, 0);
+                    match ssh_run(&ssh_cfg, &cmd).await {
+                        Ok((output, 0)) => {
+                            let count: usize = output.trim().parse().unwrap_or(0);
+                            let mut cache = get_row_count_cache().await.lock().await;
+                            cache.insert(filename.clone(), count);
+                            count
+                        }
+                        _ => 0,
+                    }
+                } else {
+                    0
+                }
+            }
+        };
+
+        // 2. Metadata (first page only)
+        let mut meta = serde_json::Value::Null;
+        let mut header_val = serde_json::Value::Null;
+        let mut refs_val = serde_json::Value::Null;
+        let mut col_headers: Vec<String> = ds.col_headers.clone();
+
+        if page == 0 && !ds.metadata.is_empty() {
+            let meta_cmd = build_data_cmd(ds, &ds.metadata, &remote_path, 0, 0);
+            if let Ok((m, 0)) = ssh_run(&ssh_cfg, &meta_cmd).await {
+                match ds.meta_parse.as_str() {
+                    "bam_style" => {
+                        // Full header
+                        header_val = serde_json::Value::String(m.trim().to_string());
+                        // Parse @SQ lines for references
+                        let mut refs = Vec::new();
+                        for line in m.trim().lines() {
+                            if line.starts_with("@SQ") {
+                                let mut name = String::new();
+                                let mut length: u64 = 0;
+                                for field in line.split('\t') {
+                                    if let Some(val) = field.strip_prefix("SN:") {
+                                        name = val.to_string();
+                                    } else if let Some(val) = field.strip_prefix("LN:") {
+                                        length = val.parse().unwrap_or(0);
+                                    }
+                                }
+                                if !name.is_empty() {
+                                    refs.push(serde_json::json!({"name": name, "length": length}));
+                                }
+                            }
+                        }
+                        if !refs.is_empty() {
+                            refs_val = serde_json::Value::Array(refs);
+                        }
+                    }
+                    "vcf_style" => {
+                        // Parse #CHROM header line + ## meta lines
+                        let lines: Vec<&str> = m.trim().lines().collect();
+                        if col_headers.is_empty() {
+                            if let Some(hdr_line) = lines.iter().find(|l| l.starts_with("#CHROM")) {
+                                col_headers = hdr_line
+                                    .trim_start_matches('#')
+                                    .split('\t')
+                                    .map(|s| s.to_string())
+                                    .collect();
+                            }
+                        }
+                        let meta_lines: Vec<&str> =
+                            lines.iter().filter(|l| l.starts_with("##")).copied().collect();
+                        if !meta_lines.is_empty() {
+                            meta = serde_json::Value::String(meta_lines.join("\n"));
+                        }
+                    }
+                    _ => {
+                        // "none" or unknown: just pass raw metadata
+                        if !m.trim().is_empty() {
+                            meta = serde_json::Value::String(m.trim().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Data rows
+        let rows_cmd = build_data_cmd(ds, &ds.rows, &remote_path, start, end);
+        let rows: Vec<Vec<String>> = match ssh_run(&ssh_cfg, &rows_cmd).await {
+            Ok((output, code)) => {
+                if code != 0 && !ds.allow_nonzero_exit {
+                    return Json(serde_json::json!({"error": output.trim()})).into_response();
+                }
+                output
+                    .trim()
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|line| line.split('\t').map(|s| s.to_string()).collect())
+                    .collect()
+            }
+            Err(e) => {
+                return Json(serde_json::json!({"error": e})).into_response();
+            }
+        };
+
+        let mut result = serde_json::json!({
+            "rows": rows,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        });
+        if !meta.is_null() { result["meta"] = meta; }
+        if !header_val.is_null() { result["header"] = header_val; }
+        if !refs_val.is_null() { result["refs"] = refs_val; }
+        if !col_headers.is_empty() { result["col_headers"] = serde_json::json!(col_headers); }
+        return Json(result).into_response();
+    }
+
+    // ── Fallback: built-in handlers for formats without plugin data_source ──
+
+    let start = page * page_size + 1;
+    let end = start + page_size - 1;
+
+    // Row count (cached)
     let total = {
         let cache = get_row_count_cache().await.lock().await;
         cache.get(&filename).copied()
@@ -450,12 +657,6 @@ async fn data_handler(
         Some(t) => t,
         None => {
             let count_cmd = match ext.as_str() {
-                // BAM: only fetch first 100 reads to avoid timeout on large files
-                // 2>/dev/null MUST be at host level to suppress Docker stderr
-                "bam" => format!(
-                    "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} | head -100 | wc -l\" 2>/dev/null",
-                    bam_dir, SAMTOOLS_DOCKER, bam_file
-                ),
                 "vcf" => format!("grep -c -v '^#' '{}'", remote_path),
                 "bed" => format!(
                     "grep -c -v -E '^#|^track|^browser' '{}'",
@@ -476,61 +677,17 @@ async fn data_handler(
         }
     };
 
-    // Get metadata (header/meta lines) — only on first page
+    // Metadata (first page only)
     let mut meta = serde_json::Value::Null;
-    let mut header_val = serde_json::Value::Null;
-    let mut refs_val = serde_json::Value::Null;
     let mut col_headers: Vec<String> = Vec::new();
 
     if page == 0 {
         match ext.as_str() {
-            "bam" => {
-                // SAM header
-                if let Ok((hdr, 0)) =
-                    ssh_run(&ssh_cfg, &format!(
-                        "docker run --rm -v \"{}:/data:ro\" {} samtools view -H \"/data/{}\" 2>/dev/null",
-                        bam_dir, SAMTOOLS_DOCKER, bam_file
-                    )).await
-                {
-                    header_val = serde_json::Value::String(hdr.trim().to_string());
-                }
-                // Reference sequences from header
-                if let Ok((hdr_text, 0)) =
-                    ssh_run(&ssh_cfg, &format!(
-                        "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view -H /data/{} | grep ^@SQ\" 2>/dev/null",
-                        bam_dir, SAMTOOLS_DOCKER, bam_file
-                    )).await
-                {
-                    let mut refs = Vec::new();
-                    for line in hdr_text.trim().lines() {
-                        let mut name = String::new();
-                        let mut length: u64 = 0;
-                        for field in line.split('\t') {
-                            if let Some(val) = field.strip_prefix("SN:") {
-                                name = val.to_string();
-                            } else if let Some(val) = field.strip_prefix("LN:") {
-                                length = val.parse().unwrap_or(0);
-                            }
-                        }
-                        if !name.is_empty() {
-                            refs.push(serde_json::json!({"name": name, "length": length}));
-                        }
-                    }
-                    refs_val = serde_json::Value::Array(refs);
-                }
-                col_headers = vec![
-                    "Read Name", "Flag", "Chr", "Pos", "MAPQ", "CIGAR", "Sequence",
-                ]
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
-            }
             "vcf" => {
                 if let Ok((m, 0)) =
                     ssh_run(&ssh_cfg, &format!("grep '^#' '{}'", remote_path)).await
                 {
                     let lines: Vec<&str> = m.trim().lines().collect();
-                    // Last # line is the header row
                     if let Some(hdr_line) = lines.iter().find(|l| l.starts_with("#CHROM")) {
                         col_headers = hdr_line
                             .trim_start_matches('#')
@@ -547,41 +704,21 @@ async fn data_handler(
             }
             "bed" => {
                 let bed_cols = [
-                    "chrom",
-                    "chromStart",
-                    "chromEnd",
-                    "name",
-                    "score",
-                    "strand",
-                    "thickStart",
-                    "thickEnd",
-                    "itemRgb",
-                    "blockCount",
-                    "blockSizes",
-                    "blockStarts",
+                    "chrom", "chromStart", "chromEnd", "name", "score", "strand",
+                    "thickStart", "thickEnd", "itemRgb", "blockCount", "blockSizes", "blockStarts",
                 ];
-                // Detect column count from first data line
                 if let Ok((first_line, 0)) = ssh_run(
                     &ssh_cfg,
-                    &format!(
-                        "grep -v -E '^#|^track|^browser' '{}' | head -1",
-                        remote_path
-                    ),
-                )
-                .await
-                {
+                    &format!("grep -v -E '^#|^track|^browser' '{}' | head -1", remote_path),
+                ).await {
                     let ncols = first_line.trim().split('\t').count().min(12);
                     col_headers = bed_cols[..ncols].iter().map(|s| s.to_string()).collect();
                 }
             }
             "gff" | "gtf" | "gff3" => {
                 col_headers = vec![
-                    "seqid", "source", "type", "start", "end", "score", "strand", "phase",
-                    "attributes",
-                ]
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect();
+                    "seqid", "source", "type", "start", "end", "score", "strand", "phase", "attributes",
+                ].into_iter().map(|s| s.to_string()).collect();
                 if let Ok((m, 0)) =
                     ssh_run(&ssh_cfg, &format!("grep '^#' '{}'", remote_path)).await
                 {
@@ -594,33 +731,17 @@ async fn data_handler(
         }
     }
 
-    // Get rows for this page
+    // Data rows
     let rows_cmd = match ext.as_str() {
-        // BAM: only first 100 reads (no pagination) to avoid timeout
-        // 2>/dev/null MUST be at host level to suppress Docker stderr
-        "bam" => format!(
-            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"samtools view /data/{} | head -100\" 2>/dev/null",
-            bam_dir, SAMTOOLS_DOCKER, bam_file
-        ),
-        "vcf" => format!(
-            "grep -v '^#' '{}' | sed -n '{},{}p'",
-            remote_path, start, end
-        ),
-        "bed" => format!(
-            "grep -v -E '^#|^track|^browser' '{}' | sed -n '{},{}p'",
-            remote_path, start, end
-        ),
-        "gff" | "gtf" | "gff3" => format!(
-            "grep -v '^#' '{}' | sed -n '{},{}p'",
-            remote_path, start, end
-        ),
+        "vcf" => format!("grep -v '^#' '{}' | sed -n '{},{}p'", remote_path, start, end),
+        "bed" => format!("grep -v -E '^#|^track|^browser' '{}' | sed -n '{},{}p'", remote_path, start, end),
+        "gff" | "gtf" | "gff3" => format!("grep -v '^#' '{}' | sed -n '{},{}p'", remote_path, start, end),
         _ => format!("sed -n '{},{}p' '{}'", start, end, remote_path),
     };
 
     let rows: Vec<Vec<String>> = match ssh_run(&ssh_cfg, &rows_cmd).await {
         Ok((output, code)) => {
-            // BAM: accept any exit code (head causes SIGPIPE → exit 141)
-            if code != 0 && ext != "bam" {
+            if code != 0 {
                 return Json(serde_json::json!({"error": output.trim()})).into_response();
             }
             output
@@ -644,12 +765,6 @@ async fn data_handler(
 
     if !meta.is_null() {
         result["meta"] = meta;
-    }
-    if !header_val.is_null() {
-        result["header"] = header_val;
-    }
-    if !refs_val.is_null() {
-        result["refs"] = refs_val;
     }
     if !col_headers.is_empty() {
         result["col_headers"] = serde_json::json!(col_headers);

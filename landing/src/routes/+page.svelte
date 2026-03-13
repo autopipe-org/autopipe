@@ -51,7 +51,7 @@
 </script>
 
 <svelte:head>
-	<title>Autopipe - Automate your bioinformatics pipelines</title>
+	<title>Autopipe</title>
 	<meta name="description" content="AI-powered bioinformatics pipeline generation, execution, and sharing platform." />
 </svelte:head>
 
