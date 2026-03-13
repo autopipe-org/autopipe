@@ -88,16 +88,29 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
 .btn { display: inline-block; padding: 9px 22px; background: #0f4c5c; color: #fff; text-decoration: none; border-radius: 8px; font-size: 13px; font-weight: 500; transition: background 0.2s; white-space: nowrap; }
 .btn:hover { background: #0d3d4a; }
 
-/* File tabs */
-.files-section { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; }
-.tab-bar { display: flex; border-bottom: 1px solid #e5e7eb; background: #f9fafb; overflow-x: auto; }
-.tab-btn { padding: 10px 20px; border: none; background: none; font-size: 14px; font-weight: 500; color: #6b7280; cursor: pointer; border-bottom: 2px solid transparent; transition: color 0.15s, border-color 0.15s; white-space: nowrap; }
-.tab-btn:hover { color: #1a2332; }
-.tab-btn.active { color: #1a2332; border-bottom-color: #0f4c5c; }
-.tab-panel { display: none; }
-.tab-panel.active { display: block; }
-.tab-panel pre { padding: 24px; overflow-x: auto; font-size: 14px; line-height: 1.6; background: #fff; margin: 0; }
-.tab-panel pre code { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: transparent; }
+/* Files section: file tree + code viewer side by side */
+.files-section { display: flex; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; min-height: 500px; }
+
+/* File tree panel */
+.file-tree-panel { width: 220px; flex-shrink: 0; background: #f9fafb; border-right: 1px solid #e5e7eb; display: flex; flex-direction: column; }
+.file-tree-header { font-size: 11px; font-weight: 600; color: #9ca3af; letter-spacing: 0.04em; padding: 14px 16px 10px; }
+.file-tree { overflow-y: auto; flex: 1; padding-bottom: 12px; }
+.tree-item { display: flex; align-items: center; gap: 6px; width: 100%; border: none; background: none; padding: 5px 12px; font-size: 13px; color: #4b5563; cursor: pointer; text-align: left; transition: background 0.1s; white-space: nowrap; }
+.tree-item:hover { background: #e5e7eb; }
+.tree-item.active { background: #dbeafe; color: #1a2332; font-weight: 500; }
+.tree-item .tree-icon { font-size: 11px; flex-shrink: 0; width: 16px; text-align: center; }
+.tree-item .tree-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-item.folder .tree-name { font-weight: 500; color: #1a2332; }
+
+/* Code viewer panel */
+.code-viewer-panel { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; }
+.code-viewer-header { padding: 10px 16px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; }
+.code-viewer-filename { font-size: 13px; font-weight: 500; color: #1a2332; font-family: 'SF Mono', 'Consolas', monospace; }
+.code-viewer { flex: 1; overflow: auto; }
+.code-viewer pre { padding: 16px 20px; margin: 0; font-size: 13px; line-height: 1.6; background: #fff; }
+.code-viewer pre code { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: transparent; }
+.code-viewer-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: #9ca3af; font-size: 14px; }
+.code-loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #9ca3af; font-size: 14px; }
 
 /* Splash screen */
 .splash { position: fixed; inset: 0; background: #fff; z-index: 1000; display: flex; align-items: center; justify-content: center; transition: opacity 0.5s; }
@@ -162,5 +175,7 @@ a:hover { color: #4b5563; }
   .filter-sidebar { width: 100%; position: static; }
   .detail-layout { flex-direction: column; }
   .detail-sidebar { max-width: 100%; }
+  .files-section { flex-direction: column; min-height: auto; }
+  .file-tree-panel { width: 100%; max-height: 200px; border-right: none; border-bottom: 1px solid #e5e7eb; }
 }
 `;

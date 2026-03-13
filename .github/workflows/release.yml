@@ -170,7 +170,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          DMG_NAME="AutoPipe-macos-${{ matrix.arch }}.dmg"
+          DMG_NAME="AutoPipe-${{ github.ref_name }}-macos-${{ matrix.arch }}.dmg"
           mkdir -p dmg-content
           cp -r AutoPipe.app dmg-content/
           ln -s /Applications dmg-content/Applications
@@ -181,7 +181,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
-          path: AutoPipe-macos-${{ matrix.arch }}.dmg
+          path: AutoPipe-${{ github.ref_name }}-macos-${{ matrix.arch }}.dmg
 
   build-linux:
     runs-on: ubuntu-22.04
@@ -205,7 +205,7 @@ jobs:
         run: cargo build --release --features gui,portable
 
       - name: Rename binary
-        run: cp target/release/autopipe autopipe-linux-x64
+        run: cp target/release/autopipe autopipe-${{ github.ref_name }}-linux-x64
 
       - name: Create .deb package
         run: |
@@ -249,7 +249,7 @@ jobs:
         with:
           name: linux
           path: |
-            autopipe-linux-x64
+            autopipe-${{ github.ref_name }}-linux-x64
             autopipe_*_amd64.deb
 
   release:
@@ -268,7 +268,7 @@ jobs:
           files: |
             autopipe.exe
             AutoPipe-Setup-*.exe
-            AutoPipe-macos-arm64.dmg
-            AutoPipe-macos-x64.dmg
-            autopipe-linux-x64
+            AutoPipe-*-macos-arm64.dmg
+            AutoPipe-*-macos-x64.dmg
+            autopipe-*-linux-x64
             autopipe_*_amd64.deb

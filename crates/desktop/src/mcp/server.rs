@@ -156,6 +156,11 @@ struct DownloadResultsParams {
 struct UploadWorkflowParams {
     /// Remote path to the pipeline directory on the SSH server
     pipeline_dir: String,
+    /// List of file paths relative to pipeline_dir that are required to run the pipeline.
+    /// You MUST include every file you created for this pipeline (e.g., ["Snakefile", "Dockerfile", "config.yaml", "ro-crate-metadata.json", "README.md", "scripts/annotate.py"]).
+    /// Paths can include subdirectories (e.g., "scripts/run.py").
+    /// ro-crate-metadata.json is always required and will be added automatically if omitted.
+    files: Vec<String>,
     /// Git commit message (optional, auto-generated if omitted)
     commit_message: Option<String>,
     /// Semantic version string (e.g., "1.0.0"). Claude should determine this based on changes.
@@ -563,37 +568,88 @@ impl AutoPipeServer {
             }
         }
 
-        // 4. Fetch files from GitHub and write to SSH
+        // 4. Fetch ALL files from GitHub using Trees API (recursive)
         let client = reqwest::Client::new();
-        let file_names = ["Snakefile", "Dockerfile", "config.yaml", "ro-crate-metadata.json", "README.md"];
         let mut written = Vec::new();
 
-        for filename in &file_names {
-            let file_path = if path.is_empty() {
-                filename.to_string()
-            } else {
-                format!("{}/{}", path, filename)
-            };
+        // Get the tree for the pipeline directory
+        let tree_path = if path.is_empty() { String::new() } else { path.clone() };
+        let tree_url = format!(
+            "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
+            owner, repo
+        );
+        let tree_resp = client
+            .get(&tree_url)
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await;
 
-            if let Some(content) = fetch_github_file(&client, &owner, &repo, &file_path).await {
-                let remote_path = format!("{}/{}", dir, filename);
+        let file_entries: Vec<(String, String)> = match tree_resp {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                let prefix = if tree_path.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}/", tree_path)
+                };
+                body["tree"]
+                    .as_array()
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter_map(|entry| {
+                        let entry_path = entry["path"].as_str().unwrap_or_default();
+                        let entry_type = entry["type"].as_str().unwrap_or_default();
+                        if entry_type == "blob" && entry_path.starts_with(&prefix) {
+                            let relative = entry_path.strip_prefix(&prefix).unwrap_or(entry_path);
+                            Some((relative.to_string(), entry_path.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            }
+            _ => {
+                // Fallback: if Trees API fails, try known files
+                let fallback_names = ["Snakefile", "Dockerfile", "config.yaml", "ro-crate-metadata.json", "README.md"];
+                fallback_names
+                    .iter()
+                    .map(|f| {
+                        let full = if tree_path.is_empty() {
+                            f.to_string()
+                        } else {
+                            format!("{}/{}", tree_path, f)
+                        };
+                        (f.to_string(), full)
+                    })
+                    .collect()
+            }
+        };
+
+        for (relative_path, github_path) in &file_entries {
+            if let Some(content) = fetch_github_file(&client, &owner, &repo, github_path).await {
+                let remote_path = format!("{}/{}", dir, relative_path);
+                // Create subdirectories if needed
+                if let Some(parent) = relative_path.rfind('/') {
+                    let subdir = format!("{}/{}", dir, &relative_path[..parent]);
+                    let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&subdir))).await;
+                }
                 if let Err(e) = self.ssh_write_file(&remote_path, &content).await {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Failed to write {}: {}",
-                        filename, e
+                        relative_path, e
                     ))]));
                 }
-                written.push(*filename);
+                written.push(relative_path.as_str());
             }
         }
 
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Downloaded pipeline '{}' to {} (remote server)\nFiles: {}",
-            pipeline.name, dir, written.join(", ")
+            "Downloaded pipeline '{}' to {} (remote server)\nFiles ({}):\n{}",
+            pipeline.name, dir, written.len(), written.join("\n")
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Requires GitHub login (configured in the GitHub tab). Returns the GitHub commit URL.")]
+    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Requires GitHub login (configured in the GitHub tab). Returns the GitHub commit URL. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -610,7 +666,14 @@ impl AutoPipeServer {
 
         let dir = &params.pipeline_dir;
 
-        // Read pipeline files from SSH
+        // Ensure ro-crate-metadata.json is always included
+        let mut files = params.files;
+        let meta_filename = "ro-crate-metadata.json".to_string();
+        if !files.iter().any(|f| f == &meta_filename) {
+            files.push(meta_filename);
+        }
+
+        // Read ro-crate-metadata.json first (required for pipeline name)
         let meta_raw = match self.ssh_read_file(&format!("{}/ro-crate-metadata.json", dir)).await {
             Ok(c) => c,
             Err(e) => {
@@ -629,25 +692,34 @@ impl AutoPipeServer {
             }
         };
 
-        let snakefile = normalize_paths(&clean_content(
-            &self.ssh_read_file(&format!("{}/Snakefile", dir)).await.unwrap_or_default(),
-        ));
-        let dockerfile = clean_content(
-            &self.ssh_read_file(&format!("{}/Dockerfile", dir)).await.unwrap_or_default(),
-        );
-        let config_yaml = normalize_paths(&clean_content(
-            &self.ssh_read_file(&format!("{}/config.yaml", dir)).await.unwrap_or_default(),
-        ));
-        let readme = clean_content(
-            &self.ssh_read_file(&format!("{}/README.md", dir)).await.unwrap_or_default(),
-        );
-
         // Update version in metadata if provided
         let mut meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
         if let Some(ref ver) = params.version {
             meta_json["version"] = serde_json::Value::String(ver.clone());
         }
         let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
+
+        // Read all specified files from SSH
+        let mut file_contents: Vec<(String, String)> = Vec::new();
+        for file_path in &files {
+            let remote_path = format!("{}/{}", dir, file_path);
+            let content = match self.ssh_read_file(&remote_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot read '{}': {}", file_path, e
+                    ))]));
+                }
+            };
+            let cleaned = if file_path == "ro-crate-metadata.json" {
+                metadata_json_str.clone()
+            } else if file_path == "Snakefile" || file_path.ends_with(".yaml") || file_path.ends_with(".yml") {
+                normalize_paths(&clean_content(&content))
+            } else {
+                clean_content(&content)
+            };
+            file_contents.push((file_path.clone(), cleaned));
+        }
 
         let pipeline_name = &metadata.name;
         let repo_name = &config.github_repo;
@@ -736,15 +808,7 @@ impl AutoPipeServer {
         let base_tree = commit_body["tree"]["sha"].as_str().unwrap_or_default().to_string();
 
         // 5. Create tree with pipeline files
-        let files_to_commit: Vec<(&str, &str)> = vec![
-            ("Snakefile", &snakefile),
-            ("Dockerfile", &dockerfile),
-            ("config.yaml", &config_yaml),
-            ("ro-crate-metadata.json", &metadata_json_str),
-            ("README.md", &readme),
-        ];
-
-        let tree_items: Vec<serde_json::Value> = files_to_commit
+        let tree_items: Vec<serde_json::Value> = file_contents
             .iter()
             .filter(|(_, content)| !content.is_empty())
             .map(|(name, content)| {

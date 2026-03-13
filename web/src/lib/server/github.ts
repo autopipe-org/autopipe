@@ -1,9 +1,10 @@
-export interface GithubFiles {
-	snakefile: string;
-	dockerfile: string;
-	config_yaml: string;
-	metadata_json: string;
-	readme: string;
+export interface FileTreeEntry {
+	path: string;
+	type: 'blob' | 'tree';
+}
+
+export interface GithubTree {
+	files: FileTreeEntry[];
 }
 
 export class GithubNotFoundError extends Error {
@@ -19,8 +20,9 @@ interface ParsedUrl {
 	path: string;
 }
 
-// Cache: github_url -> { files, timestamp }
-const cache = new Map<string, { files: GithubFiles; ts: number }>();
+// Cache: key -> { data, timestamp }
+const treeCache = new Map<string, { tree: GithubTree; ts: number }>();
+const fileCache = new Map<string, { content: string; ts: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
@@ -36,32 +38,72 @@ function githubHeaders(): Record<string, string> {
 }
 
 export function parseGithubUrl(url: string): ParsedUrl {
-	// Formats:
-	// https://github.com/{owner}/{repo}/tree/{branch}/{path}
-	// https://github.com/{owner}/{repo}/tree/main/{path}
 	const match = url.match(/github\.com\/([^/]+)\/([^/]+)\/tree\/[^/]+\/(.+)/);
 	if (match) {
 		return { owner: match[1], repo: match[2], path: match[3] };
 	}
-
-	// https://github.com/{owner}/{repo} (root)
 	const repoMatch = url.match(/github\.com\/([^/]+)\/([^/]+)\/?$/);
 	if (repoMatch) {
 		return { owner: repoMatch[1], repo: repoMatch[2], path: '' };
 	}
-
 	throw new Error(`Invalid GitHub URL format: ${url}`);
 }
 
-async function fetchFile(
-	owner: string,
-	repo: string,
-	path: string,
-	filename: string,
+/** Fetch the file tree for a pipeline directory using GitHub Trees API. */
+export async function fetchGithubTree(githubUrl: string, ref = 'main'): Promise<GithubTree> {
+	const cacheKey = `${githubUrl}@${ref}`;
+	const cached = treeCache.get(cacheKey);
+	if (cached && Date.now() - cached.ts < CACHE_TTL) {
+		return cached.tree;
+	}
+
+	const { owner, repo, path } = parseGithubUrl(githubUrl);
+
+	const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/${ref}?recursive=1`;
+	const resp = await fetch(treeUrl, { headers: githubHeaders() });
+
+	if (resp.status === 404) {
+		throw new GithubNotFoundError(githubUrl);
+	}
+	if (!resp.ok) {
+		throw new Error(`GitHub API error ${resp.status}: ${await resp.text()}`);
+	}
+
+	const body = await resp.json();
+	const prefix = path ? `${path}/` : '';
+
+	const files: FileTreeEntry[] = (body.tree || [])
+		.filter((entry: any) => {
+			const p = entry.path as string;
+			if (!prefix) return true;
+			return p.startsWith(prefix);
+		})
+		.map((entry: any) => ({
+			path: prefix ? (entry.path as string).slice(prefix.length) : entry.path,
+			type: entry.type as 'blob' | 'tree'
+		}))
+		.filter((entry: FileTreeEntry) => entry.path.length > 0);
+
+	const tree: GithubTree = { files };
+	treeCache.set(cacheKey, { tree, ts: Date.now() });
+	return tree;
+}
+
+/** Fetch a single file's content from GitHub. */
+export async function fetchGithubFile(
+	githubUrl: string,
+	filePath: string,
 	ref?: string
 ): Promise<string> {
-	const filePath = path ? `${path}/${filename}` : filename;
-	let apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${filePath}`;
+	const cacheKey = `${githubUrl}/${filePath}@${ref || 'latest'}`;
+	const cached = fileCache.get(cacheKey);
+	if (cached && Date.now() - cached.ts < CACHE_TTL) {
+		return cached.content;
+	}
+
+	const { owner, repo, path } = parseGithubUrl(githubUrl);
+	const fullPath = path ? `${path}/${filePath}` : filePath;
+	let apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${fullPath}`;
 	if (ref) apiUrl += `?ref=${encodeURIComponent(ref)}`;
 
 	const resp = await fetch(apiUrl, {
@@ -71,77 +113,37 @@ async function fetchFile(
 		}
 	});
 
-	if (resp.status === 404) {
-		return '';
-	}
+	if (resp.status === 404) return '';
 	if (!resp.ok) {
 		throw new Error(`GitHub API error ${resp.status}: ${await resp.text()}`);
 	}
 
-	return await resp.text();
+	const content = await resp.text();
+	fileCache.set(cacheKey, { content, ts: Date.now() });
+	return content;
 }
 
-export async function fetchGithubFiles(githubUrl: string, skipCache = false): Promise<GithubFiles> {
-	// Check cache (skip for publish to always validate latest code)
-	if (!skipCache) {
-		const cached = cache.get(githubUrl);
-		if (cached && Date.now() - cached.ts < CACHE_TTL) {
-			return cached.files;
-		}
-	}
-
-	const { owner, repo, path } = parseGithubUrl(githubUrl);
-
-	// Verify repo/path exists
-	const checkPath = path
-		? `https://api.github.com/repos/${owner}/${repo}/contents/${path}`
-		: `https://api.github.com/repos/${owner}/${repo}`;
-	const checkResp = await fetch(checkPath, {
-		headers: githubHeaders()
-	});
-
-	if (checkResp.status === 404) {
-		throw new GithubNotFoundError(githubUrl);
-	}
-
-	const [snakefile, dockerfile, config_yaml, metadata_json, readme] = await Promise.all([
-		fetchFile(owner, repo, path, 'Snakefile'),
-		fetchFile(owner, repo, path, 'Dockerfile'),
-		fetchFile(owner, repo, path, 'config.yaml'),
-		fetchFile(owner, repo, path, 'ro-crate-metadata.json'),
-		fetchFile(owner, repo, path, 'README.md')
-	]);
-
-	const files: GithubFiles = { snakefile, dockerfile, config_yaml, metadata_json, readme };
-
-	// Update cache
-	cache.set(githubUrl, { files, ts: Date.now() });
-
-	return files;
-}
-
-/** Fetch pipeline files at a specific git ref (tag or commit). */
-export async function fetchGithubFilesAtRef(
+/** Fetch all files for ZIP download. */
+export async function fetchAllGithubFiles(
 	githubUrl: string,
-	ref: string
-): Promise<GithubFiles> {
-	const cacheKey = `${githubUrl}@${ref}`;
-	const cached = cache.get(cacheKey);
-	if (cached && Date.now() - cached.ts < CACHE_TTL) {
-		return cached.files;
+	ref = 'main'
+): Promise<{ path: string; content: string }[]> {
+	const tree = await fetchGithubTree(githubUrl, ref);
+	const blobs = tree.files.filter((f) => f.type === 'blob');
+
+	const results: { path: string; content: string }[] = [];
+	// Fetch in batches of 10 to avoid rate limiting
+	for (let i = 0; i < blobs.length; i += 10) {
+		const batch = blobs.slice(i, i + 10);
+		const contents = await Promise.all(
+			batch.map((f) => fetchGithubFile(githubUrl, f.path, ref))
+		);
+		batch.forEach((f, idx) => {
+			if (contents[idx]) {
+				results.push({ path: f.path, content: contents[idx] });
+			}
+		});
 	}
 
-	const { owner, repo, path } = parseGithubUrl(githubUrl);
-
-	const [snakefile, dockerfile, config_yaml, metadata_json, readme] = await Promise.all([
-		fetchFile(owner, repo, path, 'Snakefile', ref),
-		fetchFile(owner, repo, path, 'Dockerfile', ref),
-		fetchFile(owner, repo, path, 'config.yaml', ref),
-		fetchFile(owner, repo, path, 'ro-crate-metadata.json', ref),
-		fetchFile(owner, repo, path, 'README.md', ref)
-	]);
-
-	const files: GithubFiles = { snakefile, dockerfile, config_yaml, metadata_json, readme };
-	cache.set(cacheKey, { files, ts: Date.now() });
-	return files;
+	return results;
 }

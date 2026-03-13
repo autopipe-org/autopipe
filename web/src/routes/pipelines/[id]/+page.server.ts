@@ -1,7 +1,7 @@
 import { error, redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getPipeline, deletePipeline, getVersionChain } from '$lib/server/pipelines.js';
-import { fetchGithubFiles, GithubNotFoundError } from '$lib/server/github.js';
+import { fetchGithubTree, GithubNotFoundError } from '$lib/server/github.js';
 
 export const load: PageServerLoad = async ({ params }) => {
 	const id = parseInt(params.id);
@@ -20,10 +20,10 @@ export const load: PageServerLoad = async ({ params }) => {
 			: pipeline;
 	const githubUrl = (codeSource ?? pipeline).github_url;
 
-	// Fetch files from GitHub
-	let files;
+	// Fetch file tree from GitHub
+	let fileTree;
 	try {
-		files = await fetchGithubFiles(githubUrl);
+		fileTree = await fetchGithubTree(githubUrl);
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
 			await deletePipeline(id);
@@ -32,15 +32,13 @@ export const load: PageServerLoad = async ({ params }) => {
 		throw error(502, 'Failed to fetch pipeline files from GitHub');
 	}
 
-	// basedOn info: when forked_from exists and the original author differs
+	// basedOn info
 	let basedOn: { pipeline_id: number; name: string; version: string; author: string } | null =
 		null;
 	if (pipeline.forked_from) {
 		const parent = await getPipeline(pipeline.forked_from);
 		if (parent && parent.author !== pipeline.author) {
-			// Find the latest version of the original pipeline (for navigation)
 			const parentChain = await getVersionChain(pipeline.forked_from);
-			// Filter to same-name versions only (exclude forks with different names)
 			const parentVersions = parentChain.filter(v => v.name === parent.name);
 			const latestParent = parentVersions.length > 0 ? parentVersions[0] : null;
 			basedOn = {
@@ -52,8 +50,7 @@ export const load: PageServerLoad = async ({ params }) => {
 		}
 	}
 
-	// External based_on_url (e.g., WorkflowHub source)
 	const basedOnUrl: string | null = pipeline.based_on_url ?? null;
 
-	return { pipeline, files, versionChain, basedOn, basedOnUrl };
+	return { pipeline, fileTree, githubUrl, versionChain, basedOn, basedOnUrl };
 };

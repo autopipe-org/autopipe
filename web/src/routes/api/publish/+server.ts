@@ -1,7 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { validateSecurity, hasErrors, sanitizeErrorMessage } from '$lib/server/security.js';
-import { fetchGithubFiles } from '$lib/server/github.js';
+import { fetchGithubFile } from '$lib/server/github.js';
 import { db, schema } from '$lib/server/db.js';
 import { eq, sql } from 'drizzle-orm';
 
@@ -35,16 +35,20 @@ export const POST: RequestHandler = async ({ request }) => {
 		const githubUser = await userResp.json();
 		const author = githubUser.login as string;
 
-		// 2. Fetch files from GitHub for validation
-		let files;
+		// 2. Fetch required files from GitHub for validation
+		let snakefile: string, dockerfile: string, metadata_json: string;
 		try {
-			files = await fetchGithubFiles(github_url, true);
+			[snakefile, dockerfile, metadata_json] = await Promise.all([
+				fetchGithubFile(github_url, 'Snakefile'),
+				fetchGithubFile(github_url, 'Dockerfile'),
+				fetchGithubFile(github_url, 'ro-crate-metadata.json')
+			]);
 		} catch {
 			return json({ error: 'Failed to fetch files from GitHub repository' }, { status: 400 });
 		}
 
 		// 3. Check required files
-		if (!files.snakefile || !files.dockerfile) {
+		if (!snakefile || !dockerfile) {
 			return json(
 				{ error: 'GitHub repository must contain Snakefile and Dockerfile' },
 				{ status: 400 }
@@ -54,7 +58,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		// 4. Parse ro-crate-metadata.json (supports RO-Crate format)
 		let metadata: Record<string, unknown>;
 		try {
-			const raw = files.metadata_json ? JSON.parse(files.metadata_json) : {};
+			const raw = metadata_json ? JSON.parse(metadata_json) : {};
 			// Check if RO-Crate format
 			if (raw['@context'] && raw['@graph']) {
 				const graph = raw['@graph'] as Array<Record<string, unknown>>;
@@ -112,7 +116,7 @@ export const POST: RequestHandler = async ({ request }) => {
 		}
 
 		// 5. Security validation
-		const issues = validateSecurity(files.snakefile, files.dockerfile);
+		const issues = validateSecurity(snakefile, dockerfile);
 		if (hasErrors(issues)) {
 			return json({ error: 'Security validation failed', issues }, { status: 422 });
 		}

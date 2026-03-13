@@ -1,7 +1,7 @@
 import type { RequestHandler } from './$types';
 import { error } from '@sveltejs/kit';
 import { getPipeline } from '$lib/server/pipelines.js';
-import { fetchGithubFiles, fetchGithubFilesAtRef, GithubNotFoundError } from '$lib/server/github.js';
+import { fetchAllGithubFiles, GithubNotFoundError } from '$lib/server/github.js';
 import JSZip from 'jszip';
 
 export const GET: RequestHandler = async ({ params, url }) => {
@@ -18,12 +18,10 @@ export const GET: RequestHandler = async ({ params, url }) => {
 		throw error(400, 'Invalid tag format');
 	}
 
-	// Fetch files from GitHub (at specific tag if provided)
-	let files;
+	// Fetch all files from GitHub
+	let allFiles;
 	try {
-		files = tag
-			? await fetchGithubFilesAtRef(pipeline.github_url, tag)
-			: await fetchGithubFiles(pipeline.github_url);
+		allFiles = await fetchAllGithubFiles(pipeline.github_url, tag || 'main');
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
 			throw error(404, 'The original GitHub repository has been deleted or is no longer accessible. Please contact the pipeline author.');
@@ -34,18 +32,8 @@ export const GET: RequestHandler = async ({ params, url }) => {
 	const zip = new JSZip();
 	const folder = zip.folder(pipeline.name)!;
 
-	const entries: [string, string][] = [
-		['Snakefile', files.snakefile],
-		['Dockerfile', files.dockerfile],
-		['config.yaml', files.config_yaml],
-		['ro-crate-metadata.json', files.metadata_json],
-		['README.md', files.readme]
-	];
-
-	for (const [name, content] of entries) {
-		if (content) {
-			folder.file(name, content);
-		}
+	for (const file of allFiles) {
+		folder.file(file.path, file.content);
 	}
 
 	const buf = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });

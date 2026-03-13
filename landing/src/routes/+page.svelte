@@ -75,7 +75,7 @@
 	<div class="hero-content">
 		<div class="hero-text">
 			<h1>End-to-End Pipeline Automation</h1>
-			<p>Generate, execute, visualize, and share reproducible containerized pipelines with AI.</p>
+			<p>Generate, execute, visualize, and share<br/>reproducible containerized pipelines with AI.</p>
 			<a href="/getting-started" class="btn-primary">Get Started</a>
 		</div>
 		<div class="hero-visual">
