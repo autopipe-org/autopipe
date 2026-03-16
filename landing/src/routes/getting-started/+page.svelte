@@ -15,7 +15,7 @@
 			<span>Autopipe</span>
 		</a>
 		<div class="nav-links">
-			<a href={hubUrl} target="_blank" rel="noopener">Hub</a>
+			<a href={hubUrl} target="_blank" rel="noopener">Hub <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
 			<a href="/plugins">Plugins</a>
 			<a href="/getting-started">Getting Started</a>
 		</div>
@@ -38,19 +38,19 @@
 						<h4>macOS</h4>
 						<p>Download the <code>.dmg</code> installer:</p>
 						<div class="btn-group">
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.5-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.5-macos-x64.dmg" class="btn-sm">Download for Intel</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
-						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.5.exe" class="btn-sm">Download for Windows</a>
+						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.6.exe" class="btn-sm">Download for Windows</a>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
 						<p>Download the <code>.deb</code> package:</p>
-						<a href="https://download.autopipe.org/linux/autopipe_0.0.5_amd64.deb" class="btn-sm">Download for Linux</a>
+						<a href="https://download.autopipe.org/linux/autopipe_0.0.6_amd64.deb" class="btn-sm">Download for Linux</a>
 					</div>
 				</div>
 			</div>
