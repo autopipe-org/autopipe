@@ -109,14 +109,7 @@
 		script.onload = () => { hljsReady = true; };
 		document.head.appendChild(script);
 
-		// Auto-select README.md or first file
-		const blobs = data.fileTree.files.filter((f: any) => f.type === 'blob');
-		const readme = blobs.find((f: any) => f.path.toLowerCase() === 'readme.md');
-		if (readme) {
-			selectFile(readme.path);
-		} else if (blobs.length > 0) {
-			selectFile(blobs[0].path);
-		}
+		// No auto-select — user picks a file from the tree
 	});
 
 	async function selectFile(path: string) {
@@ -278,7 +271,7 @@
 						</div>
 					{:else}
 						<div class="code-viewer-empty">
-							<p>Select a file to view its contents</p>
+							<p>Select a file from the tree to view its contents.</p>
 						</div>
 					{/if}
 				</div>
