@@ -57,16 +57,18 @@ fn ssh_exec_once(config: &AppConfig, command: &str) -> Result<(String, i32), Str
         .exec(command)
         .map_err(|e| format!("Exec error: {}", e))?;
 
-    let mut stdout = String::new();
+    let mut stdout_bytes = Vec::new();
     channel
-        .read_to_string(&mut stdout)
+        .read_to_end(&mut stdout_bytes)
         .map_err(|e| format!("Read stdout error: {}", e))?;
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
 
-    let mut stderr = String::new();
+    let mut stderr_bytes = Vec::new();
     channel
         .stderr()
-        .read_to_string(&mut stderr)
+        .read_to_end(&mut stderr_bytes)
         .map_err(|e| format!("Read stderr error: {}", e))?;
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
     channel.wait_close().ok();
     let exit_status = channel.exit_status().unwrap_or(-1);
