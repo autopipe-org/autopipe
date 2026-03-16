@@ -1765,7 +1765,7 @@ impl AutoPipeServer {
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser. Use this when the user chooses to view results in the viewer (after being asked via list_files workflow). Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. The viewer handles ALL file types: images, PDF, text, genomics (BAM/VCF/BED/GFF), HDF5 (h5ad). When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files (BAM/VCF/BED/GFF/CRAM/BCF): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM/BCF files cannot be displayed without a reference.")]
+    #[tool(description = "Open the Results Viewer in a browser. Use this when the user chooses to view results in the viewer (after being asked via list_files workflow). Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. The viewer handles ALL file types: images, PDF, text, genomics (BAM/BED/GFF), HDF5 (h5ad), VCF, BCF. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -2015,7 +2015,7 @@ impl AutoPipeServer {
         }
 
         // Detect genomics files
-        let genomics_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf"];
+        let genomics_exts = ["bam", "bed", "gff", "gtf", "gff3", "cram"];
         let has_genomics = file_paths.iter().any(|p| {
             let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
             genomics_exts.contains(&ext.as_str())
@@ -2030,7 +2030,7 @@ impl AutoPipeServer {
 
             let igv_only_files: Vec<String> = file_paths.iter().filter(|p| {
                 let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-                matches!(ext.as_str(), "cram" | "bcf")
+                matches!(ext.as_str(), "cram")
             }).map(|p| {
                 std::path::Path::new(p.as_str())
                     .file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()

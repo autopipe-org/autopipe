@@ -55,6 +55,9 @@ struct DataSource {
     /// Accept non-zero exit codes (e.g. BAM SIGPIPE from head)
     #[serde(default)]
     allow_nonzero_exit: bool,
+    /// Fallback data sources to try if this one fails (e.g. Docker fallback when CLI tool missing)
+    #[serde(default)]
+    fallback: Vec<DataSource>,
 }
 
 fn default_meta_parse() -> String {
@@ -523,6 +526,61 @@ async fn data_handler(
 
     // ── Plugin-driven path: data_source found in manifest ──
     if let Some(ref ds) = ds {
+        // Build candidate list: primary + fallbacks
+        let mut candidates = vec![ds.clone()];
+        candidates.extend(ds.fallback.clone());
+
+        // Check if we already know which candidate works (cached index)
+        let method_key = format!("__ds_method__{}", filename);
+        let cached_idx = {
+            let cache = get_row_count_cache().await.lock().await;
+            cache.get(&method_key).copied()
+        };
+
+        // Find working data_source: try each candidate until one succeeds
+        let working_ds = if let Some(idx) = cached_idx {
+            // Use cached working candidate
+            candidates.get(idx).cloned()
+        } else {
+            // Probe each candidate with row_count command
+            let mut found: Option<(usize, DataSource)> = None;
+            for (i, candidate) in candidates.iter().enumerate() {
+                if candidate.row_count.is_empty() {
+                    // No probe command — assume it works (text files)
+                    found = Some((i, candidate.clone()));
+                    break;
+                }
+                let cmd = build_data_cmd(candidate, &candidate.row_count, &remote_path, 0, 0);
+                match ssh_run(&ssh_cfg, &cmd).await {
+                    Ok((output, code)) => {
+                        if code == 0 || candidate.allow_nonzero_exit {
+                            // Verify we got a parseable number
+                            if output.trim().parse::<usize>().is_ok() {
+                                found = Some((i, candidate.clone()));
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if let Some((idx, ref _ds)) = found {
+                let mut cache = get_row_count_cache().await.lock().await;
+                cache.insert(method_key.clone(), idx);
+            }
+            found.map(|(_, ds)| ds)
+        };
+
+        let active_ds = match working_ds {
+            Some(ds) => ds,
+            None => {
+                // All candidates failed — return error
+                return Json(serde_json::json!({
+                    "error": "No working data source found. Check that required tools are installed on the server."
+                })).into_response();
+            }
+        };
+
         // 1. Row count (cached)
         let total = {
             let cache = get_row_count_cache().await.lock().await;
@@ -531,8 +589,8 @@ async fn data_handler(
         let total = match total {
             Some(t) => t,
             None => {
-                if !ds.row_count.is_empty() {
-                    let cmd = build_data_cmd(ds, &ds.row_count, &remote_path, 0, 0);
+                if !active_ds.row_count.is_empty() {
+                    let cmd = build_data_cmd(&active_ds, &active_ds.row_count, &remote_path, 0, 0);
                     match ssh_run(&ssh_cfg, &cmd).await {
                         Ok((output, 0)) => {
                             let count: usize = output.trim().parse().unwrap_or(0);
@@ -552,12 +610,12 @@ async fn data_handler(
         let mut meta = serde_json::Value::Null;
         let mut header_val = serde_json::Value::Null;
         let mut refs_val = serde_json::Value::Null;
-        let mut col_headers: Vec<String> = ds.col_headers.clone();
+        let mut col_headers: Vec<String> = active_ds.col_headers.clone();
 
-        if page == 0 && !ds.metadata.is_empty() {
-            let meta_cmd = build_data_cmd(ds, &ds.metadata, &remote_path, 0, 0);
+        if page == 0 && !active_ds.metadata.is_empty() {
+            let meta_cmd = build_data_cmd(&active_ds, &active_ds.metadata, &remote_path, 0, 0);
             if let Ok((m, 0)) = ssh_run(&ssh_cfg, &meta_cmd).await {
-                match ds.meta_parse.as_str() {
+                match active_ds.meta_parse.as_str() {
                     "bam_style" => {
                         // Full header
                         header_val = serde_json::Value::String(m.trim().to_string());
@@ -612,10 +670,10 @@ async fn data_handler(
         }
 
         // 3. Data rows
-        let rows_cmd = build_data_cmd(ds, &ds.rows, &remote_path, start, end);
+        let rows_cmd = build_data_cmd(&active_ds, &active_ds.rows, &remote_path, start, end);
         let rows: Vec<Vec<String>> = match ssh_run(&ssh_cfg, &rows_cmd).await {
             Ok((output, code)) => {
-                if code != 0 && !ds.allow_nonzero_exit {
+                if code != 0 && !active_ds.allow_nonzero_exit {
                     return Json(serde_json::json!({"error": output.trim()})).into_response();
                 }
                 output
