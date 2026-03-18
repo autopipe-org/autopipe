@@ -33,7 +33,7 @@
 			<div class="step-number">1</div>
 			<div class="step-content">
 				<h2>Install Autopipe Desktop</h2>
-				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server. You also need an MCP-compatible AI application installed on the same computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener"><strong>Claude Desktop</strong></a>.</p>
+				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server. You also need an MCP-compatible AI application installed on the same computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener" class="subtle-link">Claude Desktop</a>.</p>
 				<div class="options">
 					<div class="option">
 						<h4>macOS</h4>
@@ -42,20 +42,27 @@
 							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
 							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
-						<p class="unblock-hint">macOS may block the app from opening for security reasons. Run the following command in Terminal to allow it:</p>
-						<div class="code-block">xattr -cr /Applications/AutoPipe.app</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
 						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.6.exe" class="btn-sm">Download for Windows</a>
-						<p class="unblock-hint">Windows may block the installer from running for security reasons. Run the following command in PowerShell to allow it:</p>
-						<div class="code-block">Unblock-File -Path "$HOME\Downloads\AutoPipe-Setup.exe"</div>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
 						<p>Download the <code>.deb</code> package:</p>
 						<a href="https://download.autopipe.org/linux/autopipe_0.0.6_amd64.deb" class="btn-sm">Download for Linux</a>
+					</div>
+				</div>
+				<div class="security-note">
+					<p>Your operating system may block the app from running for security reasons. Run the appropriate command to allow it:</p>
+					<div class="security-item">
+						<span class="security-label">macOS</span> <span class="security-desc">— Run in Terminal:</span>
+						<div class="code-block">xattr -cr /Applications/AutoPipe.app</div>
+					</div>
+					<div class="security-item">
+						<span class="security-label">Windows</span> <span class="security-desc">— Run in PowerShell:</span>
+						<div class="code-block">Unblock-File -Path "$HOME\Downloads\AutoPipe-Setup.exe"</div>
 					</div>
 				</div>
 			</div>
@@ -76,7 +83,6 @@
 					<li>In the <strong>Setup</strong> tab, click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings and register the MCP server.</li>
 					<li>Restart your MCP-compatible AI app (e.g., Claude Desktop) to connect with AutoPipe.</li>
 				</ol>
-				<p class="hint">Make sure Docker is installed on your remote server. Pipelines run inside Docker containers for reproducibility. A GitHub Personal Access Token with <code>repo</code> scope is required.</p>
 			</div>
 		</section>
 
@@ -244,7 +250,16 @@
 		justify-content: center; z-index: 1000; cursor: pointer;
 	}
 	.modal-img { max-width: 90%; max-height: 90%; border-radius: 8px; }
-	.unblock-hint { font-size: 0.85rem; color: #6b7280; margin-top: 10px; margin-bottom: 4px; }
+	.security-note {
+		background: #fefce8; border: 1px solid #fef08a; border-radius: 8px;
+		padding: 16px; margin-top: 16px;
+	}
+	.security-note > p { font-size: 0.875rem; color: #6b7280; margin-bottom: 12px; }
+	.security-item { margin-bottom: 8px; }
+	.security-label { font-weight: 600; font-size: 0.9rem; }
+	.security-desc { font-size: 0.85rem; color: #6b7280; }
+	.subtle-link { color: inherit; text-decoration: underline; }
+	.subtle-link:hover { opacity: 0.7; }
 
 	.example-chat { margin: 12px 0; }
 	.user-msg {
