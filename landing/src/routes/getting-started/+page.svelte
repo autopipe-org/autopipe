@@ -2,10 +2,11 @@
 	import { env } from '$env/dynamic/public';
 
 	const hubUrl = env.PUBLIC_HUB_URL;
+	let showModal = $state(false);
 </script>
 
 <svelte:head>
-	<title>Install Autopipe App</title>
+	<title>Getting Started - Autopipe</title>
 </svelte:head>
 
 <header>
@@ -24,7 +25,7 @@
 
 <main>
 	<div class="guide">
-		<h1>Install Autopipe App</h1>
+		<h1>Getting Started</h1>
 		<p class="intro">Set up Autopipe in a few minutes and start building bioinformatics pipelines with AI.</p>
 
 		<!-- Step 1 -->
@@ -32,7 +33,7 @@
 			<div class="step-number">1</div>
 			<div class="step-content">
 				<h2>Install Autopipe Desktop</h2>
-				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server for Claude Desktop.</p>
+				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server. You also need an MCP-compatible AI application installed on the same computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener"><strong>Claude Desktop</strong></a>.</p>
 				<div class="options">
 					<div class="option">
 						<h4>macOS</h4>
@@ -41,11 +42,15 @@
 							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
 							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
+						<p class="unblock-hint">macOS may block the app from opening for security reasons. Run the following command in Terminal to allow it:</p>
+						<div class="code-block">xattr -cr /Applications/AutoPipe.app</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
 						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.6.exe" class="btn-sm">Download for Windows</a>
+						<p class="unblock-hint">Windows may block the installer from running for security reasons. Run the following command in PowerShell to allow it:</p>
+						<div class="code-block">Unblock-File -Path "$HOME\Downloads\AutoPipe-Setup.exe"</div>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
@@ -60,49 +65,32 @@
 		<section class="step">
 			<div class="step-number">2</div>
 			<div class="step-content">
-				<h2>Configure Your Server</h2>
-				<p>Open the Autopipe desktop app and set up your remote SSH server. This is where pipelines will be executed.</p>
-				<div class="config-list">
-					<div class="config-item">
-						<span class="config-label">SSH Host</span>
-						<span class="config-desc">Your compute server address</span>
-					</div>
-					<div class="config-item">
-						<span class="config-label">SSH User</span>
-						<span class="config-desc">Username for SSH connection</span>
-					</div>
-					<div class="config-item">
-						<span class="config-label">Remote Repo Path</span>
-						<span class="config-desc">Base path on the server — <code>pipelines/</code> and <code>pipelines_output/</code> will be created inside</span>
-					</div>
-				</div>
-				<p class="hint">Make sure Docker is installed on your remote server. Pipelines run inside Docker containers for reproducibility.</p>
+				<h2>Get Autopipe Ready</h2>
+				<p>Open the Autopipe desktop app and fill in your settings across the tabs.</p>
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+				<img src="/Autopipe-guide.png" alt="Autopipe desktop app configuration" class="guide-img" onclick={() => showModal = true} />
+				<ol>
+					<li>In the <strong>SSH</strong> tab, enter your SSH host, username, and remote repository path for pipeline execution.</li>
+					<li>In the <strong>GitHub</strong> tab, connect your GitHub account and set a repository name for storing pipelines.</li>
+					<li>In the <strong>Setup</strong> tab, click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings and register the MCP server.</li>
+					<li>Restart your MCP-compatible AI app (e.g., Claude Desktop) to connect with AutoPipe.</li>
+				</ol>
+				<p class="hint">Make sure Docker is installed on your remote server. Pipelines run inside Docker containers for reproducibility. A GitHub Personal Access Token with <code>repo</code> scope is required.</p>
 			</div>
 		</section>
+
+		{#if showModal}
+			<!-- svelte-ignore a11y_click_events_have_key_events -->
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="modal-overlay" onclick={() => showModal = false}>
+				<img src="/Autopipe-guide.png" alt="Autopipe desktop app configuration" class="modal-img" />
+			</div>
+		{/if}
 
 		<!-- Step 3 -->
 		<section class="step">
 			<div class="step-number">3</div>
-			<div class="step-content">
-				<h2>Connect GitHub</h2>
-				<p>Go to the GitHub tab in the desktop app and link your GitHub account. This allows you to upload pipelines and publish them to AutoPipeHub.</p>
-				<p class="hint">A GitHub Personal Access Token with <code>repo</code> scope is required.</p>
-			</div>
-		</section>
-
-		<!-- Step 4 -->
-		<section class="step">
-			<div class="step-number">4</div>
-			<div class="step-content">
-				<h2>Save & Connect to Your MCP-Compatible AI App</h2>
-				<p>Click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings. Autopipe runs as an MCP (Model Context Protocol) server and works with any MCP-compatible AI app. We recommend <strong>Claude Desktop</strong> for the best experience.</p>
-				<p class="hint">Restart your MCP-compatible AI app after launching Autopipe. Autopipe will continue running in the system tray.</p>
-			</div>
-		</section>
-
-		<!-- Step 5 -->
-		<section class="step">
-			<div class="step-number">5</div>
 			<div class="step-content">
 				<h2>Create or Find a Pipeline</h2>
 				<p>Open Claude Desktop and describe what you want to analyze. You can create a new pipeline from scratch:</p>
@@ -124,9 +112,9 @@
 			</div>
 		</section>
 
-		<!-- Step 6 -->
+		<!-- Step 4 -->
 		<section class="step">
-			<div class="step-number">6</div>
+			<div class="step-number">4</div>
 			<div class="step-content">
 				<h2>Run Your Pipeline</h2>
 				<p>Once your pipeline is ready, ask Claude to execute it:</p>
@@ -137,22 +125,22 @@
 			</div>
 		</section>
 
-		<!-- Step 7 -->
+		<!-- Step 5 -->
 		<section class="step">
-			<div class="step-number">7</div>
+			<div class="step-number">5</div>
 			<div class="step-content">
 				<h2>View Results</h2>
 				<p>After execution, view results directly in the browser viewer or download them locally.</p>
 				<div class="example-chat">
-					<div class="user-msg">Show me the results of my pipeline run</div>
+					<div class="user-msg">Show me the results of my pipeline run with the viewer</div>
 				</div>
 				<p class="hint">The viewer supports custom plugins for specialized visualizations. Browse available plugins on the <a href="/plugins">Plugins</a> page.</p>
 			</div>
 		</section>
 
-		<!-- Step 8 -->
+		<!-- Step 6 -->
 		<section class="step">
-			<div class="step-number">8</div>
+			<div class="step-number">6</div>
 			<div class="step-content">
 				<h2>Share on AutoPipeHub</h2>
 				<p>Publish your pipeline to make it available for others:</p>
@@ -245,13 +233,18 @@
 	.btn-sm:hover { background: #0d3d4a; }
 	.btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
 
-	.config-list { margin: 12px 0; }
-	.config-item {
-		display: flex; justify-content: space-between; padding: 10px 0;
-		border-bottom: 1px solid #f3f4f6;
+	.guide-img {
+		width: 100%; border-radius: 8px; border: 1px solid #e5e7eb;
+		margin: 12px 0; cursor: pointer; transition: opacity 0.2s;
 	}
-	.config-label { font-weight: 600; font-size: 0.9rem; }
-	.config-desc { color: #9ca3af; font-size: 0.85rem; }
+	.guide-img:hover { opacity: 0.85; }
+	.modal-overlay {
+		position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+		background: rgba(0, 0, 0, 0.8); display: flex; align-items: center;
+		justify-content: center; z-index: 1000; cursor: pointer;
+	}
+	.modal-img { max-width: 90%; max-height: 90%; border-radius: 8px; }
+	.unblock-hint { font-size: 0.85rem; color: #6b7280; margin-top: 10px; margin-bottom: 4px; }
 
 	.example-chat { margin: 12px 0; }
 	.user-msg {
@@ -280,6 +273,5 @@
 	@media (max-width: 768px) {
 		.step { flex-direction: column; gap: 12px; }
 		.next-grid { grid-template-columns: 1fr; }
-		.config-item { flex-direction: column; gap: 2px; }
 	}
 </style>
