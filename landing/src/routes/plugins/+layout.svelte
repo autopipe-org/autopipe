@@ -116,6 +116,8 @@
 	:global(.version-dot.current) { background: #111; border-color: #111; }
 	:global(.version-card) { padding: 16px; border: 1px solid transparent; border-radius: 8px; }
 	:global(.version-card.current) { background: #f8f8f8; border-color: #eee; }
+	:global(.version-view-more) { background: none; border: none; color: #666; font-size: 12px; cursor: pointer; padding: 4px 0; margin-top: 4px; }
+	:global(.version-view-more:hover) { color: #111; }
 	:global(.version-ver) { font-family: 'SF Mono', 'Consolas', monospace; font-size: 15px; font-weight: 600; color: #111; }
 	:global(.version-badge) { display: inline-block; font-size: 10px; color: #999; border: 1px solid #ddd; border-radius: 100px; padding: 1px 8px; margin-left: 8px; }
 	:global(.version-meta) { font-size: 12px; color: #999; margin-top: 4px; }

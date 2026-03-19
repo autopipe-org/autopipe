@@ -28,6 +28,13 @@
 	}
 
 	const readmeHtml = p.readme ? sanitizeHtml(marked(p.readme) as string) : '';
+
+	let showAllVersions = $state(false);
+	const MAX_VISIBLE = 3;
+	const displayedVersions = $derived(
+		showAllVersions ? versionHistory : versionHistory.slice(0, MAX_VISIBLE)
+	);
+	const hiddenCount = $derived(versionHistory.length - MAX_VISIBLE);
 </script>
 
 <svelte:head>
@@ -89,7 +96,7 @@
 					</div>
 				</div>
 				<!-- Previous versions -->
-				{#each versionHistory as vh, i (i)}
+				{#each displayedVersions as vh, i (i)}
 					<div class="version-item">
 						<div class="version-dot"></div>
 						<div class="version-card">
@@ -98,6 +105,15 @@
 						</div>
 					</div>
 				{/each}
+				{#if !showAllVersions && hiddenCount > 0}
+					<button class="version-view-more" onclick={() => showAllVersions = true}>
+						show more ({hiddenCount} more)
+					</button>
+				{:else if showAllVersions && versionHistory.length > MAX_VISIBLE}
+					<button class="version-view-more" onclick={() => showAllVersions = false}>
+						show less
+					</button>
+				{/if}
 			</div>
 			{#if relatedPlugins.length > 0}
 				<div class="sidebar-title" style="margin-top:24px">RELATED PLUGINS</div>

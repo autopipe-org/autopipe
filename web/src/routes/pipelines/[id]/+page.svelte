@@ -280,7 +280,7 @@
 
 		<!-- Version Timeline (right sidebar, outside code block) -->
 		<div class="detail-sidebar">
-			<div class="sidebar-title">VERSIONS</div>
+			<div class="sidebar-title">VERSION HISTORY</div>
 			<div class="version-timeline">
 				<div class="version-line"></div>
 				{#each displayedVersions as v, i (v.pipeline_id)}
