@@ -2453,6 +2453,15 @@ impl ServerHandler for AutoPipeServer {
                  Use create_symlink instead of cp for data files.\n\
                  Pipeline outputs are stored under the configured output directory.\n\
                  Use list_files and read_file to view results from the output path.\n\n\
+                 PIPELINE CREATION (IMPORTANT):\n\
+                 When the user wants to create a pipeline, NEVER write code directly.\n\
+                 ALWAYS follow this workflow:\n\
+                 1. Call get_generation_guide to learn the pipeline format rules.\n\
+                 2. Call get_templates to get the Snakefile, Dockerfile, config.yaml, and ro-crate-metadata.json templates.\n\
+                 3. Generate pipeline files based on the templates and guide.\n\
+                 4. Use upload_workflow to write the files to the remote server.\n\
+                 5. Use validate_pipeline to verify the structure.\n\
+                 All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\n\
                  VERSION & FORK TRACKING (PUBLISH):\n\
                  Each publish creates a new version entry in the registry.\n\
                  Same name → automatically linked as a new version.\n\
