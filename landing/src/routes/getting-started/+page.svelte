@@ -39,19 +39,19 @@
 						<h4>macOS</h4>
 						<p>Download the <code>.dmg</code> installer:</p>
 						<div class="btn-group">
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.6-macos-x64.dmg" class="btn-sm">Download for Intel</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.7-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.7-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
-						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.6.exe" class="btn-sm">Download for Windows</a>
+						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.7.exe" class="btn-sm">Download for Windows</a>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
 						<p>Download the <code>.deb</code> package:</p>
-						<a href="https://download.autopipe.org/linux/autopipe_0.0.6_amd64.deb" class="btn-sm">Download for Linux</a>
+						<a href="https://download.autopipe.org/linux/autopipe_0.0.7_amd64.deb" class="btn-sm">Download for Linux</a>
 					</div>
 				</div>
 				<div class="security-note">
@@ -101,11 +101,11 @@
 				<h2>Create or Find a Pipeline</h2>
 				<p>Open Claude Desktop and describe what you want to analyze. You can create a new pipeline from scratch:</p>
 				<div class="example-chat">
-					<div class="user-msg">Create a variant calling pipeline for paired-end WGS data using BWA-MEM2 and GATK HaplotypeCaller</div>
+					<div class="user-msg">Use Autopipe to create a variant calling pipeline for paired-end WGS data using BWA-MEM2 and GATK HaplotypeCaller</div>
 				</div>
 				<p>Or find an existing pipeline — browse <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> directly, or ask Claude to search for you:</p>
 				<div class="example-chat">
-					<div class="user-msg">Find a RNA-seq differential expression pipeline</div>
+					<div class="user-msg">Use Autopipe to find a RNA-seq differential expression pipeline</div>
 				</div>
 				<p>When creating a new pipeline, Claude will use Autopipe to:</p>
 				<ol>
