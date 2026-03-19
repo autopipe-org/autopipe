@@ -287,7 +287,7 @@ fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String
 }
 
 /// Fetch a single file from GitHub Contents API.
-async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, path: &str) -> Option<String> {
+async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, path: &str, token: &str) -> Option<String> {
     let url = format!(
         "https://api.github.com/repos/{}/{}/contents/{}",
         owner, repo, path
@@ -296,6 +296,7 @@ async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, pa
         .get(&url)
         .header("Accept", "application/vnd.github.raw")
         .header("User-Agent", "autopipe-desktop")
+        .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
         .ok()?;
@@ -571,6 +572,15 @@ impl AutoPipeServer {
         // 4. Fetch ALL files from GitHub using Trees API (recursive)
         let client = reqwest::Client::new();
         let mut written = Vec::new();
+        let config = self.config();
+        let github_token = match &config.github_token {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                )]));
+            }
+        };
 
         // Get the tree for the pipeline directory
         let tree_path = if path.is_empty() { String::new() } else { path.clone() };
@@ -581,6 +591,7 @@ impl AutoPipeServer {
         let tree_resp = client
             .get(&tree_url)
             .header("User-Agent", "autopipe-desktop")
+            .header("Authorization", format!("Bearer {}", github_token))
             .send()
             .await;
 
@@ -626,7 +637,7 @@ impl AutoPipeServer {
         };
 
         for (relative_path, github_path) in &file_entries {
-            if let Some(content) = fetch_github_file(&client, &owner, &repo, github_path).await {
+            if let Some(content) = fetch_github_file(&client, &owner, &repo, github_path, &github_token).await {
                 let remote_path = format!("{}/{}", dir, relative_path);
                 // Create subdirectories if needed
                 if let Some(parent) = relative_path.rfind('/') {
