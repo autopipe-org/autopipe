@@ -1122,19 +1122,20 @@ async function renderPluginViewer(name, plugin, actions, content) {{
     var container = document.getElementById('pluginContainer');
     if (container && inst && inst.render) {{
       container.innerHTML = '';
-      // Remove loading overlay when plugin renders content
+      // Remove loading overlay when plugin renders meaningful content
       var overlay = document.getElementById('pluginLoadingOverlay');
       if (overlay) {{
-        var observer = new MutationObserver(function() {{
-          if (container.children.length > 0 || container.textContent.trim().length > 0) {{
+        var _checkInterval = setInterval(function() {{
+          // Check for real content: elements like table, div with class, svg, canvas, or error messages
+          var hasContent = container.querySelector('table, div[class], svg, canvas, pre, select, button, .error, [class*="error"], [class*="plugin"], [class*="viewer"], [class*="summary"]');
+          if (hasContent) {{
+            clearInterval(_checkInterval);
             overlay.classList.add('fade-out');
             setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300);
-            observer.disconnect();
           }}
-        }});
-        observer.observe(container, {{ childList: true, subtree: true, characterData: true }});
-        // Fallback: remove overlay after 15s even if no mutation detected
-        setTimeout(function() {{ if (overlay.parentNode) {{ overlay.classList.add('fade-out'); setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300); }} }}, 15000);
+        }}, 200);
+        // Fallback: remove overlay after 30s
+        setTimeout(function() {{ clearInterval(_checkInterval); if (overlay.parentNode) {{ overlay.classList.add('fade-out'); setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300); }} }}, 30000);
       }}
       inst.render(container, '/file/' + encodeURIComponent(name), name);
     }} else {{
