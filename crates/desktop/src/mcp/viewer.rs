@@ -929,21 +929,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .viewer-content {{ flex: 1; overflow: auto; padding: 20px; background: #fff; }}
 
   /* No preview */
-  /* Unified loading overlay */
-  #pluginWrapper {{ position: relative; width: 100%; height: 100%; }}
-  #pluginLoadingOverlay {{
-    position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000;
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    background: #fff; transition: opacity 0.3s ease;
-  }}
-  #pluginLoadingOverlay.fade-out {{ opacity: 0; pointer-events: none; }}
-  .loading-spinner {{
-    width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #007bff;
-    border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px;
-  }}
-  .loading-text {{ font-size: 13px; color: #888; }}
-  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-  .no-preview {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: #999; }}
+.no-preview {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: #999; }}
   .no-preview-icon {{ font-size: 48px; margin-bottom: 16px; opacity: 0.4; }}
   .no-preview-title {{ font-size: 16px; font-weight: 600; color: #555; margin-bottom: 8px; }}
   .no-preview-msg {{ font-size: 13px; max-width: 400px; line-height: 1.6; margin-bottom: 16px; }}
@@ -1081,14 +1067,7 @@ function findPlugin(ext) {{
 
 async function renderPluginViewer(name, plugin, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-  content.innerHTML =
-    '<div id="pluginWrapper">' +
-      '<div id="pluginLoadingOverlay">' +
-        '<div class="loading-spinner"></div>' +
-        '<div class="loading-text">Loading ' + name + '</div>' +
-      '</div>' +
-      '<div id="pluginContainer"></div>' +
-    '</div>';
+  content.innerHTML = '<div id="pluginContainer"></div>';
 
   try {{
     // Load plugin CSS if specified
@@ -1122,21 +1101,6 @@ async function renderPluginViewer(name, plugin, actions, content) {{
     var container = document.getElementById('pluginContainer');
     if (container && inst && inst.render) {{
       container.innerHTML = '';
-      // Remove loading overlay when plugin renders meaningful content
-      var overlay = document.getElementById('pluginLoadingOverlay');
-      if (overlay) {{
-        var _checkInterval = setInterval(function() {{
-          // Check for real content: elements like table, div with class, svg, canvas, or error messages
-          var hasContent = container.querySelector('table, div[class], svg, canvas, pre, select, button, .error, [class*="error"], [class*="plugin"], [class*="viewer"], [class*="summary"]');
-          if (hasContent) {{
-            clearInterval(_checkInterval);
-            overlay.classList.add('fade-out');
-            setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300);
-          }}
-        }}, 200);
-        // Fallback: remove overlay after 30s
-        setTimeout(function() {{ clearInterval(_checkInterval); if (overlay.parentNode) {{ overlay.classList.add('fade-out'); setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300); }} }}, 30000);
-      }}
       inst.render(container, '/file/' + encodeURIComponent(name), name);
     }} else {{
       throw new Error('Plugin does not export AutoPipePlugin.render()');
