@@ -373,9 +373,14 @@ async fn files_list_handler(State(state): State<ViewerState>) -> Json<Vec<FileLi
         .collect();
     drop(files);
 
-    // Add remote files
+    // Add remote files (exclude index files from viewer list — they remain accessible via /file/ endpoint)
+    let index_exts = ["bai", "tbi", "csi", "crai", "fai", "idx"];
     let remote = get_remote_files_lock().await.lock().await;
     for (name, entry) in remote.iter() {
+        let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+        if index_exts.contains(&ext.as_str()) {
+            continue;
+        }
         items.push(FileListItem {
             name: name.clone(),
             mime: entry.mime.clone(),
@@ -924,6 +929,20 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .viewer-content {{ flex: 1; overflow: auto; padding: 20px; background: #fff; }}
 
   /* No preview */
+  /* Unified loading overlay */
+  #pluginWrapper {{ position: relative; width: 100%; height: 100%; }}
+  #pluginLoadingOverlay {{
+    position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #fff; transition: opacity 0.3s ease;
+  }}
+  #pluginLoadingOverlay.fade-out {{ opacity: 0; pointer-events: none; }}
+  .loading-spinner {{
+    width: 36px; height: 36px; border: 3px solid #e0e0e0; border-top-color: #007bff;
+    border-radius: 50%; animation: spin 0.8s linear infinite; margin-bottom: 12px;
+  }}
+  .loading-text {{ font-size: 13px; color: #888; }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
   .no-preview {{ display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; color: #999; }}
   .no-preview-icon {{ font-size: 48px; margin-bottom: 16px; opacity: 0.4; }}
   .no-preview-title {{ font-size: 16px; font-weight: 600; color: #555; margin-bottom: 8px; }}
@@ -1062,7 +1081,14 @@ function findPlugin(ext) {{
 
 async function renderPluginViewer(name, plugin, actions, content) {{
   actions.innerHTML = '<a class="btn" href="/file/' + encodeURIComponent(name) + '" download>Download</a>';
-  content.innerHTML = '<div id="pluginContainer">Loading plugin ' + plugin.name + '...</div>';
+  content.innerHTML =
+    '<div id="pluginWrapper">' +
+      '<div id="pluginLoadingOverlay">' +
+        '<div class="loading-spinner"></div>' +
+        '<div class="loading-text">Loading ' + name + '</div>' +
+      '</div>' +
+      '<div id="pluginContainer"></div>' +
+    '</div>';
 
   try {{
     // Load plugin CSS if specified
@@ -1096,6 +1122,20 @@ async function renderPluginViewer(name, plugin, actions, content) {{
     var container = document.getElementById('pluginContainer');
     if (container && inst && inst.render) {{
       container.innerHTML = '';
+      // Remove loading overlay when plugin renders content
+      var overlay = document.getElementById('pluginLoadingOverlay');
+      if (overlay) {{
+        var observer = new MutationObserver(function() {{
+          if (container.children.length > 0 || container.textContent.trim().length > 0) {{
+            overlay.classList.add('fade-out');
+            setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300);
+            observer.disconnect();
+          }}
+        }});
+        observer.observe(container, {{ childList: true, subtree: true, characterData: true }});
+        // Fallback: remove overlay after 15s even if no mutation detected
+        setTimeout(function() {{ if (overlay.parentNode) {{ overlay.classList.add('fade-out'); setTimeout(function() {{ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }}, 300); }} }}, 15000);
+      }}
       inst.render(container, '/file/' + encodeURIComponent(name), name);
     }} else {{
       throw new Error('Plugin does not export AutoPipePlugin.render()');

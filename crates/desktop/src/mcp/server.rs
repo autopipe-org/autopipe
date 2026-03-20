@@ -1996,14 +1996,19 @@ impl AutoPipeServer {
             }
             exts
         };
-        // Filter out files without a matching viewer plugin (e.g. .bai, .tbi index files)
+        // Index file extensions — kept in remote_files for IGV/plugin access, but hidden from viewer list
+        let index_exts = ["bai", "tbi", "csi", "crai", "fai", "idx"];
         let has_viewer = |name: &str| -> bool {
             let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
             ext.is_empty() || installed_plugin_exts.contains(&ext)
         };
+        let is_index_file = |name: &str| -> bool {
+            let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            index_exts.contains(&ext.as_str())
+        };
         {
             let mut skipped: Vec<String> = file_paths.iter().filter_map(|p| {
-                if has_viewer(p) { None } else {
+                if has_viewer(p) || is_index_file(p) { None } else {
                     Some(p.rsplit('.').next().unwrap_or("").to_lowercase())
                 }
             }).collect();
@@ -2015,7 +2020,8 @@ impl AutoPipeServer {
             }
         }
         files.retain(|(name, _, _)| has_viewer(name));
-        remote_files.retain(|(name, _, _, _)| has_viewer(name));
+        // Keep index files in remote_files (accessible via /file/ endpoint) but filter non-viewable, non-index files
+        remote_files.retain(|(name, _, _, _)| has_viewer(name) || is_index_file(name));
         if files.is_empty() && remote_files.is_empty() {
             let msg = if errors.is_empty() {
                 format!("No viewable files found in '{}'", params.path)
