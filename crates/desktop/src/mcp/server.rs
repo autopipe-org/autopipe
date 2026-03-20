@@ -1873,6 +1873,7 @@ impl AutoPipeServer {
 
         // Separate genomics files (remote, server-side pagination) from other files (local transfer)
         let genomics_remote_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf",
+                                     "fasta", "fa",
                                      "bai", "crai", "tbi", "csi", "fai", "idx"];
         let mut files: Vec<(String, Vec<u8>, String)> = Vec::new();
         let mut remote_files: Vec<(String, String, u64, String)> = Vec::new(); // (filename, remote_path, size, mime)
