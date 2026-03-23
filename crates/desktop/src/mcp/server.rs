@@ -163,8 +163,8 @@ struct UploadWorkflowParams {
     files: Vec<String>,
     /// Git commit message (optional, auto-generated if omitted)
     commit_message: Option<String>,
-    /// Semantic version string (e.g., "1.0.0"). Claude should determine this based on changes.
-    version: Option<String>,
+    /// Semantic version string (e.g., "1.0.0"). REQUIRED. For new pipelines use "1.0.0". For updates, increment the version (e.g., "1.0.1" for fixes, "1.1.0" for new features).
+    version: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -703,11 +703,9 @@ impl AutoPipeServer {
             }
         };
 
-        // Update version in metadata if provided
+        // Update version in metadata
         let mut meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
-        if let Some(ref ver) = params.version {
-            meta_json["version"] = serde_json::Value::String(ver.clone());
-        }
+        meta_json["version"] = serde_json::Value::String(params.version.clone());
         let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
 
         // Read all specified files from SSH
@@ -853,11 +851,7 @@ impl AutoPipeServer {
 
         // 6. Create commit
         let commit_msg = params.commit_message.unwrap_or_else(|| {
-            if let Some(ref ver) = params.version {
-                format!("Upload {} v{}", pipeline_name, ver)
-            } else {
-                format!("Upload {}", pipeline_name)
-            }
+            format!("Upload {} v{}", pipeline_name, params.version)
         });
 
         let new_commit_resp = client
@@ -900,23 +894,21 @@ impl AutoPipeServer {
             ))]));
         }
 
-        // 8. Create version tag if version is provided
-        if let Some(ref ver) = params.version {
-            let tag_name = format!("{}/v{}", pipeline_name, ver);
-            let _ = client
-                .post(format!(
-                    "https://api.github.com/repos/{}/{}/git/refs",
-                    owner, repo_name
-                ))
-                .header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", "autopipe-desktop")
-                .json(&serde_json::json!({
-                    "ref": format!("refs/tags/{}", tag_name),
-                    "sha": new_commit_sha
-                }))
-                .send()
-                .await;
-        }
+        // 8. Create version tag
+        let tag_name = format!("{}/v{}", pipeline_name, params.version);
+        let _ = client
+            .post(format!(
+                "https://api.github.com/repos/{}/{}/git/refs",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .json(&serde_json::json!({
+                "ref": format!("refs/tags/{}", tag_name),
+                "sha": new_commit_sha
+            }))
+            .send()
+            .await;
 
         let github_url = format!(
             "https://github.com/{}/{}/tree/main/pipelines/{}",
@@ -935,11 +927,7 @@ impl AutoPipeServer {
             pipeline_name,
             github_url,
             commit_url,
-            if let Some(ref ver) = params.version {
-                format!("Version tag: {}/v{}", pipeline_name, ver)
-            } else {
-                String::new()
-            }
+            format!("Version tag: {}/v{}", pipeline_name, params.version)
         ))]))
     }
 
@@ -2488,6 +2476,11 @@ impl ServerHandler for AutoPipeServer {
                  All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
                  Each pipeline uses exactly ONE Dockerfile. NEVER use Docker commands inside Snakefile rules.\n\
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\n\
+                 UPLOAD & VERSION RULES:\n\
+                 When uploading a pipeline, version is REQUIRED.\n\
+                 For new pipelines, use 1.0.0.\n\
+                 For updates, search the registry first with search_pipelines to find the current version, then increment it (patch for fixes, minor for new features).\n\
+                 Always pass the version to upload_workflow.\n\n\
                  VERSION & FORK TRACKING (PUBLISH):\n\
                  Each publish creates a new version entry in the registry.\n\
                  Same name → automatically linked as a new version.\n\
