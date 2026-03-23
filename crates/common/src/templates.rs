@@ -196,6 +196,9 @@ Every pipeline is a directory with 5 required files:
 - Copy Snakefile and config.yaml into `/pipeline`
 - Clean up: `conda clean -afy`
 - Set `WORKDIR /pipeline`
+- Each pipeline must have exactly ONE Dockerfile. Do NOT use Docker commands (docker run, docker pull) inside Snakefile rules.
+- If converting from Nextflow or other container-based workflows, install all required tools from every container into the single Dockerfile.
+- If the user already has a working Dockerfile from their analysis environment, use it as the base instead of writing one from scratch.
 
 ## config.yaml Rules
 - ALL configurable parameters go here, not in Snakefile

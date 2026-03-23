@@ -1522,7 +1522,21 @@ impl AutoPipeServer {
                 let rm_cmd = format!("rm -rf '{}'", shell_escape(&output_dir));
                 match self.ssh_run(&rm_cmd).await {
                     Ok((_, 0)) => results.push(format!("Removed output directory: {}", output_dir)),
-                    Ok((err, _)) => results.push(format!("Failed to remove output directory: {}", err.trim())),
+                    Ok((err, _)) => {
+                        // rm failed (likely root-owned files from Docker) — retry with Docker
+                        let docker_rm = format!(
+                            "docker run --rm -v '{}:/target' alpine rm -rf /target",
+                            shell_escape(&output_dir)
+                        );
+                        match self.ssh_run(&docker_rm).await {
+                            Ok((_, 0)) => {
+                                let mkdir_cmd = format!("mkdir -p '{}'", shell_escape(&output_dir));
+                                let _ = self.ssh_run(&mkdir_cmd).await;
+                                results.push(format!("Removed output directory via Docker (root-owned files): {}", output_dir));
+                            }
+                            _ => results.push(format!("Failed to remove output directory (permission denied): {}", err.trim())),
+                        }
+                    }
                     Err(e) => results.push(format!("Error removing output directory: {}", e)),
                 }
             } else {
@@ -2471,7 +2485,9 @@ impl ServerHandler for AutoPipeServer {
                  3. Generate pipeline files based on the templates and guide.\n\
                  4. Use upload_workflow to write the files to the remote server.\n\
                  5. Use validate_pipeline to verify the structure.\n\
-                 All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\n\
+                 All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
+                 Each pipeline uses exactly ONE Dockerfile. NEVER use Docker commands inside Snakefile rules.\n\
+                 If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\n\
                  VERSION & FORK TRACKING (PUBLISH):\n\
                  Each publish creates a new version entry in the registry.\n\
                  Same name → automatically linked as a new version.\n\

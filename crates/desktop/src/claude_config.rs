@@ -30,6 +30,7 @@ impl McpClient {
 ///
 /// - macOS:   ~/Library/Application Support/Claude/claude_desktop_config.json
 /// - Windows: %APPDATA%\Claude\claude_desktop_config.json
+///            or %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\ (MS Store)
 /// - Linux:   ~/.config/Claude/claude_desktop_config.json
 pub fn claude_desktop_config_path() -> PathBuf {
     #[cfg(target_os = "macos")]
@@ -40,10 +41,38 @@ pub fn claude_desktop_config_path() -> PathBuf {
     }
     #[cfg(target_os = "windows")]
     {
-        dirs::config_dir()
+        let normal = dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("Claude")
-            .join("claude_desktop_config.json")
+            .join("claude_desktop_config.json");
+        if normal.exists() {
+            return normal;
+        }
+
+        // Check MS Store path: %LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\
+        if let Some(local_data) = dirs::data_local_dir() {
+            let packages = local_data.join("Packages");
+            if packages.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&packages) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name();
+                        if name.to_string_lossy().starts_with("Claude_") {
+                            let store_path = entry.path()
+                                .join("LocalCache")
+                                .join("Roaming")
+                                .join("Claude")
+                                .join("claude_desktop_config.json");
+                            if store_path.exists() {
+                                return store_path;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Neither found — return normal path for new config creation
+        normal
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
