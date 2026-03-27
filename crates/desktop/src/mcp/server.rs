@@ -103,6 +103,27 @@ struct RemoveSymlinkParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct PrepareInputParams {
+    /// URL to download (http/https/ftp) OR absolute path on the remote server to symlink.
+    /// If it starts with http://, https://, or ftp://, the file is downloaded via Docker (wget/curl).
+    /// Otherwise, a symlink is created pointing to the given path.
+    source: String,
+    /// Subdirectory within pipelines_input to place the file (e.g. "run-001"). Optional.
+    #[serde(default)]
+    subdir: Option<String>,
+    /// Filename override for URL downloads. If omitted, inferred from the URL. Ignored for symlinks.
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RemoveInputParams {
+    /// Path relative to pipelines_input to remove (e.g. "run-001/data.fastq" or "data.fastq").
+    /// Symlinks are removed directly; regular/root-owned files are removed via Docker.
+    relative_path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct ListFilesParams {
     /// Remote directory path to list
     path: String,
@@ -462,18 +483,21 @@ impl AutoPipeServer {
             "Workspace Configuration:\n\
              - Base path (repo_path): {}\n\
              - Pipelines directory: {}\n\
+             - Input directory: {}\n\
              - Output directory: {}\n\
              - SSH: {}@{}:{}\n\n\
              When creating pipelines, save files under the Pipelines directory.\n\
-             When executing pipelines, outputs are automatically stored under the output directory.\n\
+             When preparing input data, use prepare_input to download from a URL or symlink a server path into the Input directory. Pass the returned path as input_dir to dry_run or execute_pipeline.\n\
+             When executing pipelines, outputs are automatically stored under the Output directory.\n\
              To view result files, use list_files and read_file directly on the output path.\n\
-             To link data, use create_symlink instead of copying files.",
+             To remove input files, use remove_input.",
             if config.repo_path.is_empty() {
                 "(not set)"
             } else {
                 &config.repo_path
             },
             config.full_pipelines_dir(),
+            config.full_input_dir(),
             config.full_output_dir(),
             config.ssh_user,
             config.ssh_host,
@@ -1773,6 +1797,165 @@ impl AutoPipeServer {
                 "Cannot write '{}': {}",
                 params.path, e
             ))])),
+        }
+    }
+
+    // ── Input preparation tools ─────────────────────────────────
+
+    #[tool(description = "Prepare input data for pipeline execution by downloading a file from a URL or symlinking an existing file on the remote server into the configured pipelines_input directory. \
+If source starts with http://, https://, or ftp://, the file is downloaded via Docker (wget with curl fallback) to avoid permission issues. \
+Otherwise, a symlink is created pointing to the given absolute path. \
+Returns the destination directory path — pass this as input_dir to dry_run or execute_pipeline.")]
+    async fn prepare_input(
+        &self,
+        Parameters(params): Parameters<PrepareInputParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let config = self.config();
+        let base = config.full_input_dir();
+        let dest_dir = match &params.subdir {
+            Some(sub) if !sub.is_empty() => format!("{}/{}", base.trim_end_matches('/'), sub.trim_matches('/')),
+            _ => base.clone(),
+        };
+
+        // Ensure destination directory exists
+        if let Err(e) = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&dest_dir))).await {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to create input directory '{}': {}", dest_dir, e
+            ))]));
+        }
+
+        let is_url = params.source.starts_with("http://")
+            || params.source.starts_with("https://")
+            || params.source.starts_with("ftp://");
+
+        if is_url {
+            // Infer filename from URL if not provided
+            let filename = params.filename
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    params.source
+                        .split('/')
+                        .last()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("downloaded_file")
+                        .to_string()
+                });
+
+            let dest_file = format!("{}/{}", dest_dir.trim_end_matches('/'), filename);
+            let cmd = format!(
+                "docker run --rm --network host -v '{}:/downloads' alpine sh -c \
+                 \"wget -qO '/downloads/{}' '{}' 2>&1 || curl -fsSL -o '/downloads/{}' '{}'\"",
+                shell_escape(&dest_dir),
+                shell_escape(&filename),
+                shell_escape(&params.source),
+                shell_escape(&filename),
+                shell_escape(&params.source),
+            );
+
+            match self.ssh_run(&cmd).await {
+                Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Downloaded: {}\nUse as input_dir: {}",
+                    dest_file, dest_dir
+                ))])),
+                Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Download failed for '{}':\n{}", params.source, output.trim()
+                ))])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        } else {
+            // Symlink: verify source exists
+            match self.ssh_run(&format!("test -e '{}' && echo 'exists'", shell_escape(&params.source))).await {
+                Ok((output, 0)) if output.trim().contains("exists") => {}
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Source path '{}' does not exist on the remote server", params.source
+                    ))]));
+                }
+            }
+
+            let link_name = std::path::Path::new(&params.source)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_else(|| "input".to_string());
+            let link_path = format!("{}/{}", dest_dir.trim_end_matches('/'), link_name);
+
+            match self.ssh_run(&format!("ln -sf '{}' '{}'", shell_escape(&params.source), shell_escape(&link_path))).await {
+                Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Linked: {} -> {}\nUse as input_dir: {}",
+                    link_path, params.source, dest_dir
+                ))])),
+                Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to create symlink: {}", output.trim()
+                ))])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            }
+        }
+    }
+
+    #[tool(description = "Remove a file or symlink from the pipelines_input directory. \
+Symlinks are removed directly. Regular files (including root-owned files created by Docker downloads) \
+are removed via Docker to handle permission issues. relative_path is relative to pipelines_input \
+(e.g. \"run-001/data.fastq\" or \"data.fastq\").")]
+    async fn remove_input(
+        &self,
+        Parameters(params): Parameters<RemoveInputParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let input_base = self.config().full_input_dir();
+        let full_path = format!(
+            "{}/{}",
+            input_base.trim_end_matches('/'),
+            params.relative_path.trim_matches('/')
+        );
+
+        // If it's a symlink, remove it directly (symlinks are owned by the SSH user)
+        match self.ssh_run(&format!("test -L '{}' && echo 'symlink'", shell_escape(&full_path))).await {
+            Ok((output, 0)) if output.trim().contains("symlink") => {
+                match self.ssh_run(&format!("rm '{}'", shell_escape(&full_path))).await {
+                    Ok((_, 0)) => return Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Removed symlink: {}", full_path
+                    ))])),
+                    Ok((output, _)) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to remove symlink: {}", output.trim()
+                    ))])),
+                    Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+                }
+            }
+            _ => {}
+        }
+
+        // Regular file: try direct rm first, fall back to Docker for root-owned files
+        match self.ssh_run(&format!("rm -rf '{}'", shell_escape(&full_path))).await {
+            Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Removed: {}", full_path
+            ))])),
+            Ok(_) => {
+                // Likely root-owned — remove via Docker
+                let parent = std::path::Path::new(&full_path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| input_base.clone());
+                let basename = std::path::Path::new(&full_path)
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let docker_cmd = format!(
+                    "docker run --rm -v '{}:/target' alpine rm -rf '/target/{}'",
+                    shell_escape(&parent),
+                    shell_escape(&basename),
+                );
+                match self.ssh_run(&docker_cmd).await {
+                    Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Removed via Docker (root-owned): {}", full_path
+                    ))])),
+                    Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Failed to remove '{}': {}", full_path, output.trim()
+                    ))])),
+                    Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+                }
+            }
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
 

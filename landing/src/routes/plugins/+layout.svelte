@@ -2,6 +2,7 @@
 	import { env } from '$env/dynamic/public';
 	let { children } = $props();
 	const hubUrl = env.PUBLIC_HUB_URL;
+	let menuOpen = $state(false);
 </script>
 
 <svelte:head>
@@ -17,10 +18,15 @@
 				<img src="/logo.png" alt="Autopipe" />
 				<span>Autopipe</span>
 			</a>
-			<div class="nav-links">
-				<a href={hubUrl} target="_blank" rel="noopener">Hub <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
-				<a href="/plugins" class="active">Plugins</a>
-				<a href="/getting-started">Getting Started</a>
+			<!-- svelte-ignore a11y_click_events_have_key_events -->
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<button class="hamburger" class:open={menuOpen} onclick={() => menuOpen = !menuOpen}>
+				<span></span><span></span><span></span>
+			</button>
+			<div class="nav-links" class:open={menuOpen}>
+				<a href={hubUrl} target="_blank" rel="noopener" onclick={() => menuOpen = false}>Hub <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+				<a href="/plugins" class="active" onclick={() => menuOpen = false}>Plugins</a>
+				<a href="/getting-started" onclick={() => menuOpen = false}>Getting Started</a>
 			</div>
 		</nav>
 	</header>
@@ -47,6 +53,12 @@
 	.nav-links { display: flex; gap: 32px; }
 	.nav-links a { text-decoration: none; color: #4b5563; font-weight: 500; font-size: 0.95rem; transition: color 0.2s; }
 	.nav-links a:hover, .nav-links a.active { color: #111; }
+
+	.hamburger { display: none; background: none; border: none; cursor: pointer; padding: 4px; flex-direction: column; gap: 5px; }
+	.hamburger span { display: block; width: 24px; height: 2px; background: #111; transition: transform 0.3s, opacity 0.3s; }
+	.hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+	.hamburger.open span:nth-child(2) { opacity: 0; }
+	.hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
 	:global(main) { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
 
@@ -134,4 +146,15 @@
 	:global(.readme-content ul, .readme-content ol) { padding-left: 24px; margin: 8px 0; }
 	:global(.readme-content a) { color: #0366d6; }
 	:global(.readme-empty) { color: #999; font-size: 14px; }
+
+	@media (max-width: 768px) {
+		.hamburger { display: flex; }
+		.nav-links { display: none; position: absolute; top: 100%; left: 0; right: 0; background: #fff; flex-direction: column; padding: 16px 24px; gap: 16px; border-bottom: 1px solid #eee; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+		.nav-links.open { display: flex; }
+		nav { position: relative; }
+		:global(.detail-layout) { flex-direction: column; }
+		:global(.detail-sidebar) { max-width: 100%; }
+		:global(.detail-info) { flex-wrap: wrap; gap: 16px; }
+		.footer-content { flex-direction: column; gap: 8px; }
+	}
 </style>

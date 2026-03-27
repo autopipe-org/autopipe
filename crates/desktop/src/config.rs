@@ -37,6 +37,7 @@ pub struct AppConfig {
     pub repo_path: String,
     pub pipelines_dir: String,
     pub output_dir: String,
+    pub input_dir: String,
     pub mcp_registered: bool,
     /// GitHub personal access token (obtained via device flow).
     #[serde(default)]
@@ -96,6 +97,7 @@ impl Default for AppConfig {
             repo_path: String::new(),
             pipelines_dir: "pipelines".into(),
             output_dir: "pipelines_output".into(),
+            input_dir: "pipelines_input".into(),
             mcp_registered: false,
             github_token: None,
             github_repo: default_github_repo(),
@@ -152,6 +154,11 @@ impl AppConfig {
     /// Full path to output directory on remote server.
     pub fn full_output_dir(&self) -> String {
         self.resolve_path(&self.output_dir)
+    }
+
+    /// Full path to input directory on remote server.
+    pub fn full_input_dir(&self) -> String {
+        self.resolve_path(&self.input_dir)
     }
 
     /// Full path to local plugins directory.

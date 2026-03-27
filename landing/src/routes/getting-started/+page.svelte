@@ -3,6 +3,7 @@
 
 	const hubUrl = env.PUBLIC_HUB_URL;
 	let showModal = $state(false);
+	let menuOpen = $state(false);
 </script>
 
 <svelte:head>
@@ -15,10 +16,15 @@
 			<img src="/logo.png" alt="Autopipe" />
 			<span>Autopipe</span>
 		</a>
-		<div class="nav-links">
-			<a href={hubUrl} target="_blank" rel="noopener">Hub <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
-			<a href="/plugins">Plugins</a>
-			<a href="/getting-started">Getting Started</a>
+		<!-- svelte-ignore a11y_click_events_have_key_events -->
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<button class="hamburger" class:open={menuOpen} onclick={() => menuOpen = !menuOpen}>
+			<span></span><span></span><span></span>
+		</button>
+		<div class="nav-links" class:open={menuOpen}>
+			<a href={hubUrl} target="_blank" rel="noopener" onclick={() => menuOpen = false}>Hub <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display:inline;vertical-align:middle;margin-left:2px"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>
+			<a href="/plugins" onclick={() => menuOpen = false}>Plugins</a>
+			<a href="/getting-started" onclick={() => menuOpen = false}>Getting Started</a>
 		</div>
 	</nav>
 </header>
@@ -33,7 +39,14 @@
 			<div class="step-number">1</div>
 			<div class="step-content">
 				<h2>Install Autopipe Desktop</h2>
-				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server. You also need an MCP-compatible AI application installed on the same computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener" class="subtle-link">Claude Desktop</a>.</p>
+				<div class="prerequisites">
+					<h4>Prerequisites</h4>
+					<ul>
+						<li>An MCP-compatible AI application on your local computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener" class="subtle-link">Claude Desktop</a></li>
+						<li>Docker installed on the remote server where pipelines will run — <a href="https://docs.docker.com/engine/install/#installation-procedures-for-supported-platforms" target="_blank" rel="noopener" class="subtle-link">Install Docker</a></li>
+					</ul>
+				</div>
+				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server.</p>
 				<div class="options">
 					<div class="option">
 						<h4>macOS</h4>
@@ -79,7 +92,6 @@
 				<img src="/Autopipe-guide.png" alt="Autopipe desktop app configuration" class="guide-img" onclick={() => showModal = true} />
 				<ol>
 					<li>In the <strong>SSH</strong> tab, enter your SSH host, username, and remote repository path for pipeline execution.
-						<p style="margin-top:4px;font-size:13px">Docker must be installed on the remote server — Autopipe uses it to build and run pipeline containers.</p>
 						<p style="margin-top:4px;font-size:13px">AutoPipe has been tested with Linux SSH servers. For Windows-based servers, WSL (Windows Subsystem for Linux) is required.</p>
 					</li>
 					<li>In the <strong>GitHub</strong> tab, connect your GitHub account and set a repository name for storing pipelines.</li>
@@ -205,6 +217,12 @@
 	.nav-links a { text-decoration: none; color: #4b5563; font-weight: 500; font-size: 0.95rem; }
 	.nav-links a:hover { color: #1a2332; }
 
+	.hamburger { display: none; background: none; border: none; cursor: pointer; padding: 4px; flex-direction: column; gap: 5px; }
+	.hamburger span { display: block; width: 24px; height: 2px; background: #1a2332; transition: transform 0.3s, opacity 0.3s; }
+	.hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+	.hamburger.open span:nth-child(2) { opacity: 0; }
+	.hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
 	main { max-width: 800px; margin: 0 auto; padding: 48px 24px 80px; }
 
 	.guide h1 { font-size: 2.25rem; font-weight: 700; margin-bottom: 12px; }
@@ -218,6 +236,11 @@
 	}
 	.step-content { flex: 1; }
 	.step-content h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 8px; }
+
+	.prerequisites { background: #f8f9fa; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+	.prerequisites h4 { font-size: 0.9rem; font-weight: 600; margin-bottom: 8px; color: #374151; }
+	.prerequisites ul { margin: 0; padding-left: 20px; }
+	.prerequisites li { font-size: 0.9rem; color: #4b5563; line-height: 1.8; }
 	.step-content p { color: #4b5563; margin-bottom: 12px; }
 	.step-content ol { color: #4b5563; padding-left: 20px; margin-top: 8px; }
 	.step-content ol li { margin-bottom: 4px; }
@@ -289,6 +312,10 @@
 	.footer-copy { color: #9ca3af; font-size: 0.8rem; }
 
 	@media (max-width: 768px) {
+		.hamburger { display: flex; }
+		.nav-links { display: none; position: absolute; top: 100%; left: 0; right: 0; background: #fff; flex-direction: column; padding: 16px 24px; gap: 16px; border-bottom: 1px solid #e5e7eb; box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+		.nav-links.open { display: flex; }
+		nav { position: relative; }
 		.step { flex-direction: column; gap: 12px; }
 		.next-grid { grid-template-columns: 1fr; }
 	}

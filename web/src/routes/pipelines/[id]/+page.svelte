@@ -266,7 +266,9 @@
 							{#if loadingFile}
 								<div class="code-loading">Loading...</div>
 							{:else}
+								{#key selectedFile}
 								<pre><code class="language-{detectLang(selectedFile)}">{fileContent}</code></pre>
+							{/key}
 							{/if}
 						</div>
 					{:else}
