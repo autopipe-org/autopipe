@@ -52,19 +52,19 @@
 						<h4>macOS</h4>
 						<p>Download the <code>.dmg</code> installer:</p>
 						<div class="btn-group">
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.8-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.8-macos-x64.dmg" class="btn-sm">Download for Intel</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.9-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.9-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
-						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.8.exe" class="btn-sm">Download for Windows</a>
+						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.9.exe" class="btn-sm">Download for Windows</a>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
 						<p>Download the <code>.deb</code> package:</p>
-						<a href="https://download.autopipe.org/linux/autopipe_0.0.8_amd64.deb" class="btn-sm">Download for Linux</a>
+						<a href="https://download.autopipe.org/linux/autopipe_0.0.9_amd64.deb" class="btn-sm">Download for Linux</a>
 					</div>
 				</div>
 				<div class="security-note">

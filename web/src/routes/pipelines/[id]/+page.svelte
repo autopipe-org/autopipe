@@ -97,7 +97,31 @@
 		return 'plaintext';
 	}
 
-	let hljsReady = $state(false);
+	let highlightedHtml = $state('');
+	let currentRequest = 0;
+
+	function setHtml(node: HTMLElement, html: string) {
+		node.innerHTML = html;
+		return {
+			update(h: string) { node.innerHTML = h; }
+		};
+	}
+
+	function escapeHtml(s: string): string {
+		return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
+
+	function applyHighlight(content: string, path: string) {
+		const hljs = (window as any).hljs;
+		if (hljs) {
+			const lang = detectLang(path.split('/').pop() || path);
+			try {
+				highlightedHtml = hljs.highlight(content, { language: lang }).value;
+				return;
+			} catch { /* fall through */ }
+		}
+		highlightedHtml = escapeHtml(content);
+	}
 
 	onMount(async () => {
 		const link = document.createElement('link');
@@ -106,42 +130,42 @@
 		document.head.appendChild(link);
 		const script = document.createElement('script');
 		script.src = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js';
-		script.onload = () => { hljsReady = true; };
+		script.onload = () => {
+			// Re-highlight if a file is already selected
+			if (fileContent && selectedFile) applyHighlight(fileContent, selectedFile);
+		};
 		document.head.appendChild(script);
-
-		// No auto-select — user picks a file from the tree
 	});
 
 	async function selectFile(path: string) {
 		selectedFile = path;
+		const myRequest = ++currentRequest;
 
 		if (fileContentCache[path]) {
 			fileContent = fileContentCache[path];
-			await tick();
-			highlightCode();
+			loadingFile = false;
+			if (myRequest === currentRequest) applyHighlight(fileContent, path);
 			return;
 		}
 
 		loadingFile = true;
+		fileContent = '';
+		highlightedHtml = '';
 		try {
 			const resp = await fetch(`/pipelines/${p.pipeline_id}/file?path=${encodeURIComponent(path)}`);
 			const json = await resp.json();
-			fileContent = json.content || '';
-			fileContentCache[path] = fileContent;
+			const content = json.content || '';
+			fileContentCache[path] = content;
+			if (myRequest === currentRequest) {
+				fileContent = content;
+				loadingFile = false;
+				applyHighlight(content, path);
+			}
 		} catch {
-			fileContent = '// Failed to load file';
-		}
-		loadingFile = false;
-		await tick();
-		highlightCode();
-	}
-
-	function highlightCode() {
-		if (typeof (window as any).hljs !== 'undefined') {
-			const el = document.querySelector('.code-viewer pre code');
-			if (el) {
-				(el as HTMLElement).removeAttribute('data-highlighted');
-				(window as any).hljs.highlightElement(el);
+			if (myRequest === currentRequest) {
+				fileContent = '// Failed to load file';
+				highlightedHtml = escapeHtml('// Failed to load file');
+				loadingFile = false;
 			}
 		}
 	}
@@ -266,9 +290,7 @@
 							{#if loadingFile}
 								<div class="code-loading">Loading...</div>
 							{:else}
-								{#key selectedFile}
-								<pre><code class="language-{detectLang(selectedFile)}">{fileContent}</code></pre>
-							{/key}
+								<pre><code use:setHtml={highlightedHtml} data-highlighted="yes" class="language-{detectLang(selectedFile)}"></code></pre>
 							{/if}
 						</div>
 					{:else}
