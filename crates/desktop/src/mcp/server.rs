@@ -79,6 +79,14 @@ struct StatusParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct DeletePipelineParams {
+    /// Full path to the pipeline source directory on the remote server (e.g. /home/user/pipelines/my-pipeline)
+    pipeline_dir: String,
+    /// Docker image name to remove along with the pipeline (e.g. autopipe-my-pipeline)
+    image_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct CleanupFailedParams {
     /// Docker image name (e.g. autopipe-my-pipeline)
     image_name: String,
@@ -114,6 +122,12 @@ struct PrepareInputParams {
     /// Filename override for URL downloads. If omitted, inferred from the URL. Ignored for symlinks.
     #[serde(default)]
     filename: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct CheckDownloadParams {
+    /// The filename used when prepare_input started the download (returned in the prepare_input response).
+    filename: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -345,6 +359,19 @@ impl AutoPipeServer {
             .await
             .map_err(|e| format!("Task error: {}", e))??;
         Ok((clean_content(&output), code))
+    }
+
+    async fn ssh_run_timed(&self, cmd: &str, timeout_secs: u64) -> Result<(String, i32), String> {
+        let config = self.config();
+        let cmd = cmd.to_string();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd)),
+        )
+        .await
+        .map_err(|_| format!("SSH command timed out after {}s", timeout_secs))?
+        .map_err(|e| format!("Task error: {}", e))?
+        .map(|(output, code)| (clean_content(&output), code))
     }
 
     async fn ssh_read_file(&self, path: &str) -> Result<String, String> {
@@ -1585,6 +1612,83 @@ impl AutoPipeServer {
         )]))
     }
 
+    #[tool(description = "Permanently delete a pipeline and all its associated artifacts (Docker image, containers). \
+ONLY call this when the user explicitly requests complete deletion of a pipeline. \
+This removes the pipeline source code — it cannot be undone and the pipeline must be recreated from scratch. \
+Uses Docker to handle root-owned files so permissions are never an issue.")]
+    async fn delete_pipeline(
+        &self,
+        Parameters(params): Parameters<DeletePipelineParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let mut results = Vec::new();
+
+        // 1. Stop and remove any running/stopped containers using this image
+        let stop_cmd = format!(
+            "docker ps -q --filter ancestor='{}' 2>/dev/null | xargs -r docker stop 2>/dev/null; \
+             docker ps -aq --filter ancestor='{}' 2>/dev/null | xargs -r docker rm 2>/dev/null",
+            shell_escape(&params.image_name),
+            shell_escape(&params.image_name),
+        );
+        let _ = self.ssh_run(&stop_cmd).await;
+        results.push(format!("Stopped and removed containers for image: {}", params.image_name));
+
+        // 2. Remove Docker image
+        let check_img = format!("docker images -q '{}' 2>/dev/null", shell_escape(&params.image_name));
+        if let Ok((output, 0)) = self.ssh_run(&check_img).await {
+            if !output.trim().is_empty() {
+                let rmi_cmd = format!("docker rmi '{}' 2>/dev/null", shell_escape(&params.image_name));
+                match self.ssh_run(&rmi_cmd).await {
+                    Ok((_, 0)) => results.push(format!("Removed Docker image: {}", params.image_name)),
+                    Ok((err, _)) => results.push(format!("Failed to remove image: {}", err.trim())),
+                    Err(e) => results.push(format!("Error removing image: {}", e)),
+                }
+            } else {
+                results.push(format!("Docker image not found (already removed): {}", params.image_name));
+            }
+        }
+
+        // 3. Delete pipeline directory — try rm -rf first, fall back to Docker
+        let check_dir = format!("test -d '{}' && echo 'exists'", shell_escape(&params.pipeline_dir));
+        match self.ssh_run(&check_dir).await {
+            Ok((output, 0)) if output.trim().contains("exists") => {
+                let rm_cmd = format!("rm -rf '{}'", shell_escape(&params.pipeline_dir));
+                match self.ssh_run(&rm_cmd).await {
+                    Ok((_, 0)) => {
+                        results.push(format!("Removed pipeline directory: {}", params.pipeline_dir));
+                    }
+                    _ => {
+                        // Fallback: mount parent dir and delete subdirectory via Docker
+                        let path = std::path::Path::new(&params.pipeline_dir);
+                        let parent = path.parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| "/".to_string());
+                        let dirname = path.file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let docker_rm = format!(
+                            "docker run --rm -v '{}:/target' alpine rm -rf '/target/{}'",
+                            shell_escape(&parent),
+                            shell_escape(&dirname),
+                        );
+                        match self.ssh_run(&docker_rm).await {
+                            Ok((_, 0)) => results.push(format!(
+                                "Removed pipeline directory via Docker (root-owned files): {}",
+                                params.pipeline_dir
+                            )),
+                            Ok((err, _)) => results.push(format!(
+                                "Failed to remove pipeline directory: {}", err.trim()
+                            )),
+                            Err(e) => results.push(format!("Error removing pipeline directory: {}", e)),
+                        }
+                    }
+                }
+            }
+            _ => results.push(format!("Pipeline directory not found: {}", params.pipeline_dir)),
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(results.join("\n"))]))
+    }
+
     // ── Remote file tools ───────────────────────────────────────
 
     #[tool(description = "Create a symbolic link on the remote SSH server. Use this to link input/output data instead of copying files. Prefer symlinks over cp for accessing result files and plots.")]
@@ -1803,9 +1907,11 @@ impl AutoPipeServer {
     // ── Input preparation tools ─────────────────────────────────
 
     #[tool(description = "Prepare input data for pipeline execution by downloading a file from a URL or symlinking an existing file on the remote server into the configured pipelines_input directory. \
-If source starts with http://, https://, or ftp://, the file is downloaded via Docker (wget with curl fallback) to avoid permission issues. \
+If source starts with http://, https://, or ftp://, the download runs in the background and returns immediately. \
+After calling this for a URL, automatically call check_download_status with the returned filename every 10 seconds until complete. Do NOT ask the user to check — poll automatically. \
 Otherwise, a symlink is created pointing to the given absolute path. \
-Returns the destination directory path — pass this as input_dir to dry_run or execute_pipeline.")]
+Returns the destination directory path — pass this as input_dir to dry_run or execute_pipeline. \
+If this tool fails, fall back to create_symlink using the dest_dir shown in the error message as the target directory.")]
     async fn prepare_input(
         &self,
         Parameters(params): Parameters<PrepareInputParams>,
@@ -1817,10 +1923,11 @@ Returns the destination directory path — pass this as input_dir to dry_run or 
             _ => base.clone(),
         };
 
-        // Ensure destination directory exists
-        if let Err(e) = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&dest_dir))).await {
+        // Ensure destination directory exists (with hard timeout to prevent hang)
+        if let Err(e) = self.ssh_run_timed(&format!("mkdir -p '{}'", shell_escape(&dest_dir)), 60).await {
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to create input directory '{}': {}", dest_dir, e
+                "Failed to create input directory '{}': {}\nFallback: use create_symlink with target='{}/{}'",
+                dest_dir, e, dest_dir, "<filename>"
             ))]));
         }
 
@@ -1844,52 +1951,119 @@ Returns the destination directory path — pass this as input_dir to dry_run or 
                 });
 
             let dest_file = format!("{}/{}", dest_dir.trim_end_matches('/'), filename);
+            let log_path = format!("/tmp/autopipe_dl_{}.log", filename);
+            let exit_path = format!("/tmp/autopipe_dl_{}.exit", filename);
+
+            // Remove stale exit/log files from a previous attempt
+            let _ = self.ssh_run_timed(&format!(
+                "rm -f '{}' '{}'", shell_escape(&log_path), shell_escape(&exit_path)
+            ), 10).await;
+
             let cmd = format!(
-                "docker run --rm --network host -v '{}:/downloads' alpine sh -c \
-                 \"wget -qO '/downloads/{}' '{}' 2>&1 || curl -fsSL -o '/downloads/{}' '{}'\"",
+                "nohup sh -c \"docker run --rm --network host -v '{}:/downloads' alpine sh -c \
+                 \\\"wget -qO '/downloads/{}' '{}' 2>&1 || curl -fsSL -o '/downloads/{}' '{}'\\\" \
+                 > '{}' 2>&1; echo \\$? > '{}'\" >/dev/null 2>&1 & echo $!",
                 shell_escape(&dest_dir),
                 shell_escape(&filename),
                 shell_escape(&params.source),
                 shell_escape(&filename),
                 shell_escape(&params.source),
+                shell_escape(&log_path),
+                shell_escape(&exit_path),
             );
 
-            match self.ssh_run(&cmd).await {
-                Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Downloaded: {}\nUse as input_dir: {}",
-                    dest_file, dest_dir
-                ))])),
+            match self.ssh_run_timed(&cmd, 10).await {
+                Ok((output, 0)) => {
+                    let pid = output.trim();
+                    Ok(CallToolResult::success(vec![Content::text(format!(
+                        "Download started in background (PID: {}).\nDestination: {}\nNow call check_download_status with filename='{}' every 10 seconds to monitor progress.",
+                        pid, dest_file, filename
+                    ))]))
+                }
                 Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Download failed for '{}':\n{}", params.source, output.trim()
+                    "Failed to start download for '{}':\n{}", params.source, output.trim()
                 ))])),
                 Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
             }
         } else {
-            // Symlink: verify source exists
-            match self.ssh_run(&format!("test -e '{}' && echo 'exists'", shell_escape(&params.source))).await {
-                Ok((output, 0)) if output.trim().contains("exists") => {}
-                _ => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Source path '{}' does not exist on the remote server", params.source
-                    ))]));
-                }
-            }
-
             let link_name = std::path::Path::new(&params.source)
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "input".to_string());
             let link_path = format!("{}/{}", dest_dir.trim_end_matches('/'), link_name);
 
-            match self.ssh_run(&format!("ln -sf '{}' '{}'", shell_escape(&params.source), shell_escape(&link_path))).await {
+            // Symlink: verify source exists (with hard timeout)
+            match self.ssh_run_timed(&format!("test -e '{}' && echo 'exists'", shell_escape(&params.source)), 60).await {
+                Ok((output, 0)) if output.trim().contains("exists") => {}
+                _ => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Source path '{}' does not exist on the remote server.\nFallback: use create_symlink with source='{}' target='{}'",
+                        params.source, params.source, link_path
+                    ))]));
+                }
+            }
+
+            match self.ssh_run_timed(&format!("ln -sf '{}' '{}'", shell_escape(&params.source), shell_escape(&link_path)), 60).await {
                 Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
                     "Linked: {} -> {}\nUse as input_dir: {}",
                     link_path, params.source, dest_dir
                 ))])),
                 Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to create symlink: {}", output.trim()
+                    "Failed to create symlink: {}\nFallback: use create_symlink with source='{}' target='{}'",
+                    output.trim(), params.source, link_path
                 ))])),
-                Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "{}\nFallback: use create_symlink with source='{}' target='{}'",
+                    e, params.source, link_path
+                ))])),
+            }
+        }
+    }
+
+    #[tool(description = "Check the status of a background file download started by prepare_input. \
+Returns downloading/success/failed status with recent log output. \
+Call this automatically every 10 seconds after prepare_input — do NOT wait for the user to ask.")]
+    async fn check_download_status(
+        &self,
+        Parameters(params): Parameters<CheckDownloadParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let log_path = format!("/tmp/autopipe_dl_{}.log", params.filename);
+        let exit_path = format!("/tmp/autopipe_dl_{}.exit", params.filename);
+
+        // Check if exit file exists (download finished)
+        let exit_code = match self.ssh_run_timed(&format!("cat '{}' 2>/dev/null", shell_escape(&exit_path)), 10).await {
+            Ok((output, 0)) if !output.trim().is_empty() => Some(output.trim().to_string()),
+            _ => None,
+        };
+
+        // Get recent log output
+        let recent_log = match self.ssh_run_timed(&format!("tail -20 '{}' 2>/dev/null", shell_escape(&log_path)), 10).await {
+            Ok((output, _)) => output,
+            Err(_) => String::new(),
+        };
+
+        match exit_code.as_deref() {
+            Some("0") => {
+                // Clean up temp files
+                let _ = self.ssh_run_timed(&format!(
+                    "rm -f '{}' '{}'", shell_escape(&log_path), shell_escape(&exit_path)
+                ), 10).await;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Download completed successfully: {}\n\nLog:\n{}",
+                    params.filename, recent_log
+                ))]))
+            }
+            Some(code) => {
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Download failed (exit code: {}).\n\nLog:\n{}",
+                    code, recent_log
+                ))]))
+            }
+            None => {
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Download in progress...\n\nRecent log:\n{}",
+                    recent_log
+                ))]))
             }
         }
     }
