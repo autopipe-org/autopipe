@@ -82,8 +82,9 @@ struct StatusParams {
 struct DeletePipelineParams {
     /// Full path to the pipeline source directory on the remote server (e.g. /home/user/pipelines/my-pipeline)
     pipeline_dir: String,
-    /// Docker image name to remove along with the pipeline (e.g. autopipe-my-pipeline)
-    image_name: String,
+    /// Docker image name to remove along with the pipeline (e.g. autopipe-my-pipeline). Optional — omit if no image was built.
+    #[serde(default)]
+    image_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1612,11 +1613,10 @@ impl AutoPipeServer {
         )]))
     }
 
-    #[tool(description = "Permanently delete a pipeline and all its associated artifacts (Docker image, containers). \
-ONLY call this when the user has explicitly asked to delete the pipeline. \
-Before calling this tool, ALWAYS ask the user once more to confirm: e.g. 'Are you sure? The pipeline source code will be permanently deleted and cannot be recovered.' Wait for explicit confirmation before proceeding. \
-Do NOT call this for build errors, execution failures, or any other error — use cleanup_failed for those cases. \
-This removes the pipeline source code — it cannot be undone and the pipeline must be recreated from scratch. \
+    #[tool(description = "Delete a pipeline's source code directory and its Docker image/containers from the remote server. \
+ONLY call this when the user has explicitly said they want to delete the local pipeline code (e.g. 'delete the pipeline', '파이프라인 삭제해줘'). \
+Do NOT call this during build errors, execution failures, code generation, or any troubleshooting — use cleanup_failed for those cases. \
+Before calling this tool, ask the user once to confirm (e.g. 'Are you sure you want to delete the pipeline source code?'), then call this tool immediately after confirmation. Do NOT ask the user to run commands manually. \
 Uses Docker to handle root-owned files so permissions are never an issue.")]
     async fn delete_pipeline(
         &self,
@@ -1624,28 +1624,29 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
     ) -> Result<CallToolResult, ErrorData> {
         let mut results = Vec::new();
 
-        // 1. Stop and remove any running/stopped containers using this image
-        let stop_cmd = format!(
-            "docker ps -q --filter ancestor='{}' 2>/dev/null | xargs -r docker stop 2>/dev/null; \
-             docker ps -aq --filter ancestor='{}' 2>/dev/null | xargs -r docker rm 2>/dev/null",
-            shell_escape(&params.image_name),
-            shell_escape(&params.image_name),
-        );
-        let _ = self.ssh_run(&stop_cmd).await;
-        results.push(format!("Stopped and removed containers for image: {}", params.image_name));
+        // 1. Stop and remove any running/stopped containers, and Docker image (if image_name provided)
+        if let Some(ref image_name) = params.image_name {
+            let stop_cmd = format!(
+                "docker ps -q --filter ancestor='{}' 2>/dev/null | xargs -r docker stop 2>/dev/null; \
+                 docker ps -aq --filter ancestor='{}' 2>/dev/null | xargs -r docker rm 2>/dev/null",
+                shell_escape(image_name),
+                shell_escape(image_name),
+            );
+            let _ = self.ssh_run(&stop_cmd).await;
+            results.push(format!("Stopped and removed containers for image: {}", image_name));
 
-        // 2. Remove Docker image
-        let check_img = format!("docker images -q '{}' 2>/dev/null", shell_escape(&params.image_name));
-        if let Ok((output, 0)) = self.ssh_run(&check_img).await {
-            if !output.trim().is_empty() {
-                let rmi_cmd = format!("docker rmi '{}' 2>/dev/null", shell_escape(&params.image_name));
-                match self.ssh_run(&rmi_cmd).await {
-                    Ok((_, 0)) => results.push(format!("Removed Docker image: {}", params.image_name)),
-                    Ok((err, _)) => results.push(format!("Failed to remove image: {}", err.trim())),
-                    Err(e) => results.push(format!("Error removing image: {}", e)),
+            let check_img = format!("docker images -q '{}' 2>/dev/null", shell_escape(image_name));
+            if let Ok((output, 0)) = self.ssh_run(&check_img).await {
+                if !output.trim().is_empty() {
+                    let rmi_cmd = format!("docker rmi '{}' 2>/dev/null", shell_escape(image_name));
+                    match self.ssh_run(&rmi_cmd).await {
+                        Ok((_, 0)) => results.push(format!("Removed Docker image: {}", image_name)),
+                        Ok((err, _)) => results.push(format!("Failed to remove image: {}", err.trim())),
+                        Err(e) => results.push(format!("Error removing image: {}", e)),
+                    }
+                } else {
+                    results.push(format!("Docker image not found (already removed): {}", image_name));
                 }
-            } else {
-                results.push(format!("Docker image not found (already removed): {}", params.image_name));
             }
         }
 
