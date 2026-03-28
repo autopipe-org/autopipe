@@ -1613,7 +1613,9 @@ impl AutoPipeServer {
     }
 
     #[tool(description = "Permanently delete a pipeline and all its associated artifacts (Docker image, containers). \
-ONLY call this when the user explicitly requests complete deletion of a pipeline. \
+ONLY call this when the user has explicitly asked to delete the pipeline. \
+Before calling this tool, ALWAYS ask the user once more to confirm: e.g. 'Are you sure? The pipeline source code will be permanently deleted and cannot be recovered.' Wait for explicit confirmation before proceeding. \
+Do NOT call this for build errors, execution failures, or any other error — use cleanup_failed for those cases. \
 This removes the pipeline source code — it cannot be undone and the pipeline must be recreated from scratch. \
 Uses Docker to handle root-owned files so permissions are never an issue.")]
     async fn delete_pipeline(
