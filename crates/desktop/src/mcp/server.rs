@@ -199,8 +199,6 @@ struct UploadWorkflowParams {
     files: Vec<String>,
     /// Git commit message (optional, auto-generated if omitted)
     commit_message: Option<String>,
-    /// Semantic version string (e.g., "1.0.0"). REQUIRED. For new pipelines use "1.0.0". For updates, increment the version (e.g., "1.0.1" for fixes, "1.1.0" for new features).
-    version: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -712,7 +710,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Requires GitHub login (configured in the GitHub tab). Returns the GitHub commit URL. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
+    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Version is auto-detected: if the pipeline already exists on GitHub, the patch version is incremented automatically. For new pipelines, version starts at 1.0.0 from the metadata. Returns the GitHub URL and version. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -755,32 +753,9 @@ impl AutoPipeServer {
             }
         };
 
-        // Update version in metadata
         let mut meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
-        meta_json["version"] = serde_json::Value::String(params.version.clone());
-        let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
-
-        // Read all specified files from SSH
-        let mut file_contents: Vec<(String, String)> = Vec::new();
-        for file_path in &files {
-            let remote_path = format!("{}/{}", dir, file_path);
-            let content = match self.ssh_read_file(&remote_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Cannot read '{}': {}", file_path, e
-                    ))]));
-                }
-            };
-            let cleaned = if file_path == "ro-crate-metadata.json" {
-                metadata_json_str.clone()
-            } else if file_path == "Snakefile" || file_path.ends_with(".yaml") || file_path.ends_with(".yml") {
-                normalize_paths(&clean_content(&content))
-            } else {
-                clean_content(&content)
-            };
-            file_contents.push((file_path.clone(), cleaned));
-        }
+        // Version will be determined after checking GitHub (see step 2.5 below)
+        let ssh_version = meta_json["version"].as_str().unwrap_or("1.0.0").to_string();
 
         let pipeline_name = &metadata.name;
         let repo_name = &config.github_repo;
@@ -829,6 +804,83 @@ impl AutoPipeServer {
                 ))]));
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // 2.5 Auto-detect version from existing GitHub metadata
+        let github_meta_resp = client
+            .get(format!(
+                "https://api.github.com/repos/{}/{}/contents/pipelines/{}/ro-crate-metadata.json",
+                owner, repo_name, pipeline_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .header("Accept", "application/vnd.github.raw")
+            .send()
+            .await;
+
+        let version = match github_meta_resp {
+            Ok(resp) if resp.status().is_success() => {
+                // Existing pipeline on GitHub → read version and increment patch
+                let github_meta_str = resp.text().await.unwrap_or_default();
+                let github_meta: serde_json::Value = serde_json::from_str(&github_meta_str).unwrap_or_default();
+
+                // Support both flat and RO-Crate format
+                let existing_version = if let Some(graph) = github_meta["@graph"].as_array() {
+                    graph.iter()
+                        .find(|n| n["@id"].as_str() == Some("./"))
+                        .and_then(|ds| ds["version"].as_str())
+                        .unwrap_or("1.0.0")
+                        .to_string()
+                } else {
+                    github_meta["version"].as_str().unwrap_or("1.0.0").to_string()
+                };
+
+                // Increment patch version
+                let parts: Vec<u32> = existing_version.split('.')
+                    .map(|p| p.parse().unwrap_or(0))
+                    .collect();
+                if parts.len() == 3 {
+                    format!("{}.{}.{}", parts[0], parts[1], parts[2] + 1)
+                } else {
+                    format!("{}.0.1", parts.first().unwrap_or(&1))
+                }
+            }
+            _ => {
+                // No existing file on GitHub (404) → first upload, use SSH metadata version
+                ssh_version.clone()
+            }
+        };
+
+        // Update version in metadata and read all files from SSH
+        meta_json["version"] = serde_json::Value::String(version.clone());
+        // Also update version inside RO-Crate @graph Dataset node if present
+        if let Some(graph) = meta_json["@graph"].as_array_mut() {
+            if let Some(dataset) = graph.iter_mut().find(|n| n["@id"].as_str() == Some("./")) {
+                dataset["version"] = serde_json::Value::String(version.clone());
+            }
+        }
+        let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
+
+        // Read all specified files from SSH
+        let mut file_contents: Vec<(String, String)> = Vec::new();
+        for file_path in &files {
+            let remote_path = format!("{}/{}", dir, file_path);
+            let content = match self.ssh_read_file(&remote_path).await {
+                Ok(c) => c,
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot read '{}': {}", file_path, e
+                    ))]));
+                }
+            };
+            let cleaned = if file_path == "ro-crate-metadata.json" {
+                metadata_json_str.clone()
+            } else if file_path == "Snakefile" || file_path.ends_with(".yaml") || file_path.ends_with(".yml") {
+                normalize_paths(&clean_content(&content))
+            } else {
+                clean_content(&content)
+            };
+            file_contents.push((file_path.clone(), cleaned));
         }
 
         // 3. Get latest commit SHA on main branch
@@ -903,7 +955,7 @@ impl AutoPipeServer {
 
         // 6. Create commit
         let commit_msg = params.commit_message.unwrap_or_else(|| {
-            format!("Upload {} v{}", pipeline_name, params.version)
+            format!("Upload {} v{}", pipeline_name, version)
         });
 
         let new_commit_resp = client
@@ -947,8 +999,8 @@ impl AutoPipeServer {
         }
 
         // 8. Create version tag
-        let tag_name = format!("{}/v{}", pipeline_name, params.version);
-        let _ = client
+        let tag_name = format!("{}/v{}", pipeline_name, version);
+        let tag_resp = client
             .post(format!(
                 "https://api.github.com/repos/{}/{}/git/refs",
                 owner, repo_name
@@ -960,7 +1012,16 @@ impl AutoPipeServer {
                 "sha": new_commit_sha
             }))
             .send()
-            .await;
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+        if !tag_resp.status().is_success() {
+            let err = tag_resp.text().await.unwrap_or_default();
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Code was pushed successfully but version tag '{}' creation failed: {}.\n\
+                 The commit is at: {}", tag_name, err, new_commit_sha
+            ))]));
+        }
 
         let github_url = format!(
             "https://github.com/{}/{}/tree/main/pipelines/{}",
@@ -979,11 +1040,11 @@ impl AutoPipeServer {
             pipeline_name,
             github_url,
             commit_url,
-            format!("Version tag: {}/v{}", pipeline_name, params.version)
+            format!("Version tag: {}/v{}", pipeline_name, version)
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry web page. PREREQUISITE: You MUST call upload_workflow FIRST to upload all pipeline files to GitHub before calling this tool. If the user asks to 'publish' a pipeline, that means upload_workflow first, then publish_workflow. Never call publish_workflow without calling upload_workflow in the same conversation. This performs security validation and makes the pipeline publicly visible on the registry website. IMPORTANT: Before publishing, ALWAYS search the registry first using search_pipelines with both the pipeline name and key tool names. Compare the content (tools, description, analysis type) of search results against the new pipeline. VERSION UPGRADE: If a similar pipeline exists AND the author matches yours, ask the user: '기존 파이프라인 [name] v[version]의 버전업으로 등록할까요?'. If yes, set forked_from to that pipeline_id (same name will be kept by the server). If no, omit forked_from. FORK (Based on): If a similar pipeline exists but by a DIFFERENT author, inform the user: '레지스트리에 [author]님의 [name] v[version] 파이프라인과 유사합니다. Based on으로 등록하겠습니다.' and set forked_from to that pipeline_id. The user can choose any name freely. NAME DEDUP: If forked_from is omitted and the name already exists, the server auto-appends a numeric suffix (e.g. 'name 2').")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. Duplicate detection is handled automatically by this tool: same name + same author = version upgrade, same name + different author = returns info for user to choose (rename or 'Based on'). If the user wants to mark as 'Based on', call this tool again with forked_from set to the existing pipeline_id.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -998,15 +1059,108 @@ impl AutoPipeServer {
             }
         };
 
-        // Call registry publish endpoint with just github_url + token
         let base = config.registry_url.trim_end_matches('/');
         let client = reqwest::Client::new();
+
+        // Get GitHub username for author comparison
+        let user_resp = client
+            .get("https://api.github.com/user")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let github_user: serde_json::Value = user_resp.json().await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let my_author = github_user["login"].as_str().unwrap_or_default().to_string();
+
+        // Parse github_url to get owner/repo/path
+        // Expected format: https://github.com/{owner}/{repo}/tree/main/pipelines/{name}
+        let pipeline_name = {
+            let parts: Vec<&str> = params.github_url.trim_end_matches('/').split('/').collect();
+            // Find "pipelines" in path and take the next segment as pipeline name
+            let mut name = String::new();
+            for (i, part) in parts.iter().enumerate() {
+                if *part == "pipelines" {
+                    if let Some(n) = parts.get(i + 1) {
+                        name = n.to_string();
+                    }
+                    break;
+                }
+            }
+            if name.is_empty() {
+                // Fallback: fetch metadata from GitHub
+                let owner = parts.get(3).unwrap_or(&"");
+                let repo = parts.get(4).unwrap_or(&"");
+                let subpath = parts.iter().skip(7).cloned().collect::<Vec<_>>().join("/");
+                let meta_path = if subpath.is_empty() {
+                    "ro-crate-metadata.json".to_string()
+                } else {
+                    format!("{}/ro-crate-metadata.json", subpath)
+                };
+                if let Some(meta_str) = fetch_github_file(&client, owner, repo, &meta_path, &token).await {
+                    let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
+                    if let Some(graph) = meta["@graph"].as_array() {
+                        graph.iter()
+                            .find(|n| n["@id"].as_str() == Some("./"))
+                            .and_then(|ds| ds["name"].as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    } else {
+                        meta["name"].as_str().unwrap_or_default().to_string()
+                    }
+                } else {
+                    String::new()
+                }
+            } else {
+                name
+            }
+        };
+
+        // Auto-detect duplicate: search registry for same name
+        let mut resolved_forked_from = params.forked_from;
+        if resolved_forked_from.is_none() && !pipeline_name.is_empty() {
+            if let Ok(search_resp) = client
+                .get(format!("{}/api/pipelines", base))
+                .query(&[("q", &pipeline_name)])
+                .send()
+                .await
+            {
+                if let Ok(results) = search_resp.json::<Vec<serde_json::Value>>().await {
+                    let exact_match = results.iter().find(|p| {
+                        p["name"].as_str().map(|n| n == pipeline_name).unwrap_or(false)
+                    });
+
+                    if let Some(existing) = exact_match {
+                        let existing_author = existing["author"].as_str().unwrap_or_default();
+                        let existing_id = existing["pipeline_id"].as_i64().unwrap_or(0);
+                        let existing_version = existing["version"].as_str().unwrap_or("?");
+
+                        if existing_author == my_author {
+                            // Same name + same author → auto version upgrade
+                            resolved_forked_from = Some(existing_id as i32);
+                        } else {
+                            // Same name + different author → ask user
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "A pipeline named '{}' already exists by '{}' (v{}, ID: {}).\n\
+                                 Ask the user:\n\
+                                 1. Change the pipeline name to avoid conflict\n\
+                                 2. Mark as 'Based on' this pipeline (call publish_workflow again with forked_from={})",
+                                pipeline_name, existing_author, existing_version, existing_id, existing_id
+                            ))]));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Call registry publish endpoint
         let resp = client
             .post(format!("{}/api/publish", base))
             .json(&serde_json::json!({
                 "github_url": params.github_url,
                 "github_token": token,
-                "forked_from": params.forked_from,
+                "forked_from": resolved_forked_from,
             }))
             .send()
             .await
@@ -2831,22 +2985,19 @@ impl ServerHandler for AutoPipeServer {
                  1. Call get_generation_guide to learn the pipeline format rules.\n\
                  2. Call get_templates to get the Snakefile, Dockerfile, config.yaml, and ro-crate-metadata.json templates.\n\
                  3. Generate pipeline files based on the templates and guide.\n\
-                 4. Use upload_workflow to write the files to the remote server.\n\
+                 4. Use write_file to write each generated file to the pipeline directory on the SSH server.\n\
                  5. Use validate_pipeline to verify the structure.\n\
                  All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
                  Each pipeline uses exactly ONE Dockerfile. NEVER use Docker commands inside Snakefile rules.\n\
-                 If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\n\
-                 UPLOAD & VERSION RULES:\n\
-                 When uploading a pipeline, version is REQUIRED.\n\
-                 For new pipelines, use 1.0.0.\n\
-                 For updates, search the registry first with search_pipelines to find the current version, then increment it (patch for fixes, minor for new features).\n\
-                 Always pass the version to upload_workflow.\n\n\
-                 VERSION & FORK TRACKING (PUBLISH):\n\
-                 Each publish creates a new version entry in the registry.\n\
-                 Same name → automatically linked as a new version.\n\
-                 Similar to existing → set forked_from to that pipeline ID.\n\
-                 Brand new → omit forked_from.\n\
-                 Before publishing, ALWAYS search the registry first."
+                 If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
+                 Do NOT call upload_workflow or publish_workflow during pipeline creation.\n\
+                 Only call them when the user explicitly asks to upload to GitHub or publish to the registry.\n\n\
+                 UPLOAD & PUBLISH RULES:\n\
+                 When the user asks to upload OR publish, ALWAYS do both steps together:\n\
+                 1. Call upload_workflow (version is auto-detected from GitHub, do NOT pass a version).\n\
+                 2. Then immediately call publish_workflow with the returned github_url.\n\
+                 Only skip publish if the user explicitly says 'upload to GitHub only'.\n\
+                 Duplicate names and version upgrades are handled automatically by the tools."
                     .into(),
             ),
             ..Default::default()
