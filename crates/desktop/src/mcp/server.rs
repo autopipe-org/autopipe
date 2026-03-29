@@ -754,8 +754,16 @@ impl AutoPipeServer {
         };
 
         let mut meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
-        // Version will be determined after checking GitHub (see step 2.5 below)
-        let ssh_version = meta_json["version"].as_str().unwrap_or("1.0.0").to_string();
+        // Read version from SSH metadata (support both flat and RO-Crate format)
+        let ssh_version = if let Some(graph) = meta_json["@graph"].as_array() {
+            graph.iter()
+                .find(|n| n["@id"].as_str() == Some("./"))
+                .and_then(|ds| ds["version"].as_str())
+                .unwrap_or("1.0.0")
+                .to_string()
+        } else {
+            meta_json["version"].as_str().unwrap_or("1.0.0").to_string()
+        };
 
         let pipeline_name = &metadata.name;
         let repo_name = &config.github_repo;
@@ -807,48 +815,36 @@ impl AutoPipeServer {
         }
 
         // 2.5 Auto-detect version from existing GitHub metadata
-        let github_meta_resp = client
-            .get(format!(
-                "https://api.github.com/repos/{}/{}/contents/pipelines/{}/ro-crate-metadata.json",
-                owner, repo_name, pipeline_name
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "autopipe-desktop")
-            .header("Accept", "application/vnd.github.raw")
-            .send()
-            .await;
+        let github_meta_path = format!("pipelines/{}/ro-crate-metadata.json", pipeline_name);
+        let github_meta_content = fetch_github_file(&client, &owner, repo_name, &github_meta_path, &token).await;
 
-        let version = match github_meta_resp {
-            Ok(resp) if resp.status().is_success() => {
-                // Existing pipeline on GitHub → read version and increment patch
-                let github_meta_str = resp.text().await.unwrap_or_default();
-                let github_meta: serde_json::Value = serde_json::from_str(&github_meta_str).unwrap_or_default();
+        let version = if let Some(github_meta_str) = github_meta_content {
+            // Existing pipeline on GitHub → read version and increment patch
+            let github_meta: serde_json::Value = serde_json::from_str(&github_meta_str).unwrap_or_default();
 
-                // Support both flat and RO-Crate format
-                let existing_version = if let Some(graph) = github_meta["@graph"].as_array() {
-                    graph.iter()
-                        .find(|n| n["@id"].as_str() == Some("./"))
-                        .and_then(|ds| ds["version"].as_str())
-                        .unwrap_or("1.0.0")
-                        .to_string()
-                } else {
-                    github_meta["version"].as_str().unwrap_or("1.0.0").to_string()
-                };
+            // Support both flat and RO-Crate format
+            let existing_version = if let Some(graph) = github_meta["@graph"].as_array() {
+                graph.iter()
+                    .find(|n| n["@id"].as_str() == Some("./"))
+                    .and_then(|ds| ds["version"].as_str())
+                    .unwrap_or("1.0.0")
+                    .to_string()
+            } else {
+                github_meta["version"].as_str().unwrap_or("1.0.0").to_string()
+            };
 
-                // Increment patch version
-                let parts: Vec<u32> = existing_version.split('.')
-                    .map(|p| p.parse().unwrap_or(0))
-                    .collect();
-                if parts.len() == 3 {
-                    format!("{}.{}.{}", parts[0], parts[1], parts[2] + 1)
-                } else {
-                    format!("{}.0.1", parts.first().unwrap_or(&1))
-                }
+            // Increment patch version
+            let parts: Vec<u32> = existing_version.split('.')
+                .map(|p| p.parse().unwrap_or(0))
+                .collect();
+            if parts.len() == 3 {
+                format!("{}.{}.{}", parts[0], parts[1], parts[2] + 1)
+            } else {
+                format!("{}.0.1", parts.first().unwrap_or(&1))
             }
-            _ => {
-                // No existing file on GitHub (404) → first upload, use SSH metadata version
-                ssh_version.clone()
-            }
+        } else {
+            // No existing file on GitHub (404) → first upload, use SSH metadata version
+            ssh_version.clone()
         };
 
         // Update version in metadata and read all files from SSH
