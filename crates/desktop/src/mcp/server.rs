@@ -711,7 +711,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Version is auto-detected: if the pipeline already exists on GitHub, the patch version is incremented automatically. For new pipelines, version starts at 1.0.0 from the metadata. Returns the GitHub URL and version. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
+    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Version is auto-detected: if the pipeline already exists on GitHub, the patch version is incremented automatically. For new pipelines, version starts at 1.0.0 from the metadata. Returns the GitHub URL and version. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -1041,7 +1041,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. Duplicate detection is handled automatically by this tool: same name + same author = version upgrade, same name + different author = returns info for user to choose (rename or 'Based on'). If the user wants to mark as 'Based on', call this tool again with forked_from set to the existing pipeline_id.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user '기존 파이프라인의 버전업으로 등록할까요?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -1134,8 +1134,14 @@ impl AutoPipeServer {
                         let existing_version = existing["version"].as_str().unwrap_or("?");
 
                         if existing_author == my_author {
-                            // Same name + same author → auto version upgrade
-                            resolved_forked_from = Some(existing_id as i32);
+                            // Same name + same author → ask user before version upgrade
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Your pipeline '{}' v{} already exists in the registry (ID: {}).\n\
+                                 Ask the user whether to publish as a version upgrade of the existing pipeline.\n\
+                                 If yes: call publish_workflow again with forked_from={}.\n\
+                                 If no: the user should change the pipeline name and retry.",
+                                pipeline_name, existing_version, existing_id, existing_id
+                            ))]));
                         } else {
                             // Same name + different author → ask user
                             return Ok(CallToolResult::error(vec![Content::text(format!(

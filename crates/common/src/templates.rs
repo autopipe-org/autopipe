@@ -214,7 +214,10 @@ Every pipeline is a directory with 5 required files:
 - Must follow RO-Crate 1.1 specification (JSON-LD)
 - Dataset node requires: `name`, `description`, `version`, `license`
 - `creator`: Person objects with `name` field
-- `softwareRequirements`: SoftwareApplication objects with `name` field
+- `softwareRequirements`: SoftwareApplication objects with `name` field.
+  ONLY include bioinformatics tools that directly analyze or process data in the Snakefile rules.
+  Do NOT include programming languages, package managers, workflow engines, system libraries,
+  or any infrastructure dependencies (Python, R, snakemake, conda, pip, etc.).
 - `input` / `output`: FormalParameter objects with `name` and `encodingFormat`
 - `keywords`: array of search tags
 - `programmingLanguage`: always reference Snakemake
