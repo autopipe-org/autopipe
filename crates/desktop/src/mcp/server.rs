@@ -322,9 +322,10 @@ fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String
 
 /// Fetch a single file from GitHub Contents API.
 async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, path: &str, token: &str) -> Option<String> {
+    let encoded_path = path.split('/').map(|seg| seg.replace(" ", "%20")).collect::<Vec<_>>().join("/");
     let url = format!(
         "https://api.github.com/repos/{}/{}/contents/{}",
-        owner, repo, path
+        owner, repo, encoded_path
     );
     let resp = client
         .get(&url)
