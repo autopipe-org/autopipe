@@ -1041,7 +1041,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user '기존 파이프라인의 버전업으로 등록할까요?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -1682,7 +1682,7 @@ impl AutoPipeServer {
 
     // ── Cleanup tools ────────────────────────────────────────────
 
-    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool.")]
+    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. Uses Docker to handle root-owned files when normal rm fails due to permissions. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool.")]
     async fn cleanup_failed(
         &self,
         Parameters(params): Parameters<CleanupFailedParams>,
@@ -1771,7 +1771,7 @@ impl AutoPipeServer {
     }
 
     #[tool(description = "Delete a pipeline's source code directory and its Docker image/containers from the remote server. \
-ONLY call this when the user has explicitly said they want to delete the local pipeline code (e.g. 'delete the pipeline', '파이프라인 삭제해줘'). \
+ONLY call this when the user has explicitly said they want to delete the local pipeline code (e.g. 'delete the pipeline', 'remove the pipeline'). \
 Do NOT call this during build errors, execution failures, code generation, or any troubleshooting — use cleanup_failed for those cases. \
 Before calling this tool, ask the user once to confirm (e.g. 'Are you sure you want to delete the pipeline source code?'), then call this tool immediately after confirmation. Do NOT ask the user to run commands manually. \
 Uses Docker to handle root-owned files so permissions are never an issue.")]
