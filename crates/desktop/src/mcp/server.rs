@@ -448,23 +448,28 @@ impl AutoPipeServer {
         format!(" -v '{}:/var/run/docker.sock' -v /usr/bin/docker:/usr/bin/docker", socket_path)
     }
 
-    /// Find symlink targets inside a directory and return extra Docker -v mounts.
-    async fn resolve_symlink_mounts(&self, dir: &str) -> String {
+    /// Find symlink target directories inside a directory.
+    async fn resolve_symlink_targets(&self, dir: &str) -> Vec<String> {
         let cmd = format!(
             "find '{}' -maxdepth 3 -type l -exec readlink -f '{{}}' \\; 2>/dev/null | xargs -I{{}} dirname '{{}}' | sort -u",
             shell_escape(dir)
         );
-        let dirs = match self.ssh_run(&cmd).await {
-            Ok((output, 0)) => clean_content(&output),
-            _ => return String::new(),
-        };
+        match self.ssh_run(&cmd).await {
+            Ok((output, 0)) => clean_content(&output)
+                .trim()
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty() && l != dir && l.starts_with('/'))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
 
+    /// Find symlink targets inside a directory and return extra Docker -v mounts.
+    async fn resolve_symlink_mounts(&self, dir: &str) -> String {
+        let targets = self.resolve_symlink_targets(dir).await;
         let mut mounts = String::new();
-        for target_dir in dirs.trim().lines() {
-            let target_dir = target_dir.trim();
-            if target_dir.is_empty() || target_dir == dir || !target_dir.starts_with('/') {
-                continue;
-            }
+        for target_dir in &targets {
             mounts.push_str(&format!(" -v '{}:{}:ro'", shell_escape(target_dir), shell_escape(target_dir)));
         }
         mounts
@@ -1490,7 +1495,10 @@ impl AutoPipeServer {
             None => String::new(),
         };
 
-        let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
+        let symlink_targets = self.resolve_symlink_targets(&params.input_dir).await;
+        let symlink_mounts: String = symlink_targets.iter()
+            .map(|t| format!(" -v '{}:{}:ro'", shell_escape(t), shell_escape(t)))
+            .collect();
 
         let (docker_socket_mount, host_path_mounts, host_env_vars) = if params.needs_docker_socket.unwrap_or(false) {
             let socket = self.resolve_docker_socket_mount().await;
@@ -1501,6 +1509,10 @@ impl AutoPipeServer {
             );
             if let Some(ref dir) = pipeline_dir {
                 host_mounts += &format!(" -v '{}:{}'", shell_escape(dir), shell_escape(dir));
+            }
+            // Include symlink targets in host_path_mounts so child containers can access them
+            for target in &symlink_targets {
+                host_mounts += &format!(" -v '{}:{}:ro'", shell_escape(target), shell_escape(target));
             }
             let env_vars = format!(
                 " -e HOST_INPUT_DIR='{}' -e HOST_OUTPUT_DIR='{}'{}",
@@ -1551,7 +1563,10 @@ impl AutoPipeServer {
             None => String::new(),
         };
 
-        let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
+        let symlink_targets = self.resolve_symlink_targets(&params.input_dir).await;
+        let symlink_mounts: String = symlink_targets.iter()
+            .map(|t| format!(" -v '{}:{}:ro'", shell_escape(t), shell_escape(t)))
+            .collect();
 
         let (docker_socket_mount, host_path_mounts, host_env_vars) = if params.needs_docker_socket.unwrap_or(false) {
             let socket = self.resolve_docker_socket_mount().await;
@@ -1562,6 +1577,9 @@ impl AutoPipeServer {
             );
             if let Some(ref dir) = pipeline_dir {
                 host_mounts += &format!(" -v '{}:{}'", shell_escape(dir), shell_escape(dir));
+            }
+            for target in &symlink_targets {
+                host_mounts += &format!(" -v '{}:{}:ro'", shell_escape(target), shell_escape(target));
             }
             let env_vars = format!(
                 " -e HOST_INPUT_DIR='{}' -e HOST_OUTPUT_DIR='{}'{}",
