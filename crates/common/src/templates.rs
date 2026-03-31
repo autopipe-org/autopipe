@@ -249,11 +249,18 @@ When the pipeline uses nextflow, nf-core, or any command that runs Docker inside
   without Docker socket access and ask if they want a different approach.
 - Always use `-profile docker` for nextflow when approved.
 - Install nextflow in the Dockerfile: `RUN curl -s https://get.nextflow.io | bash && mv nextflow /usr/local/bin/`
-- CRITICAL: In Snakefile rules that call nextflow, ALWAYS set `export NXF_HOME=/output/.nextflow` before the nextflow command. This ensures Nextflow caches assets in the mounted output directory so child Docker containers can access them. Example:
+- CRITICAL: When needs_docker_socket=true, the environment variables HOST_INPUT_DIR, HOST_OUTPUT_DIR, and HOST_PIPELINE_DIR are automatically set inside the container with the actual host paths. In Snakefile rules that call nextflow or docker, ALWAYS use these variables instead of /input, /output, /pipeline. Also set NXF_HOME to $HOST_OUTPUT_DIR/.nextflow. Example:
   ```
   shell:
-      "export NXF_HOME=/output/.nextflow && nextflow run nf-core/rnaseq -profile docker ..."
+      """
+      export NXF_HOME=$HOST_OUTPUT_DIR/.nextflow
+      nextflow run nf-core/rnaseq -profile docker \
+          --input $HOST_INPUT_DIR/samplesheet.csv \
+          --outdir $HOST_OUTPUT_DIR/nfcore \
+          -w $HOST_OUTPUT_DIR/.nextflow/work
+      """
   ```
+  For non-nextflow rules in the same Snakefile, keep using /input, /output, /pipeline as usual.
 - Keep everything in a single Snakefile + single Dockerfile as usual.
 
 ## Safety Rules
