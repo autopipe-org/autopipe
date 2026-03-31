@@ -34,12 +34,26 @@ struct PipelineDirParams {
     pipeline_dir: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PipelineStep {
+    #[serde(rename = "type")]
+    step_type: String,
+    snakefile: Option<String>,
+    dockerfile: Option<String>,
+    image: Option<String>,
+    pipeline: Option<String>,
+    config: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct BuildParams {
     /// Remote path to the pipeline directory (on the SSH server)
     pipeline_dir: String,
     /// Docker image name/tag
     image_name: String,
+    /// Dockerfile name (default: "Dockerfile"). Use "Dockerfile.pre", "Dockerfile.post" etc. for multi-step pipelines.
+    #[serde(default)]
+    dockerfile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -449,7 +463,195 @@ impl AutoPipeServer {
         mounts
     }
 
+    /// Ensure Nextflow is installed on the remote server.
+    async fn ensure_nextflow(&self) -> Result<(), String> {
+        if let Ok((_, 0)) = self.ssh_run("which nextflow 2>/dev/null").await {
+            return Ok(());
+        }
+        match self.ssh_run("curl -s https://get.nextflow.io | bash && sudo mv nextflow /usr/local/bin/").await {
+            Ok((_, 0)) => Ok(()),
+            Ok((output, _)) => Err(format!("Failed to install Nextflow: {}", output)),
+            Err(e) => Err(format!("Failed to install Nextflow: {}", e)),
+        }
+    }
 
+    /// Execute a multi-step pipeline defined by pipeline_order.json.
+    async fn execute_ordered_pipeline(
+        &self,
+        steps: &[PipelineStep],
+        pipeline_dir: &str,
+        params: &ExecuteParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        let output_dir = self.resolve_output_dir(&params.run_name);
+        let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
+        let cores = params.cores.unwrap_or(8);
+        let total = steps.len();
+
+        // 1. Ensure Nextflow is installed if any step requires it
+        if steps.iter().any(|s| s.step_type == "nextflow") {
+            if let Err(e) = self.ensure_nextflow().await {
+                return Ok(CallToolResult::error(vec![Content::text(e)]));
+            }
+        }
+
+        // 2. Create output directory
+        let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
+
+        // 3. Write run metadata
+        let run_meta = serde_json::json!({
+            "run_name": params.run_name,
+            "image_name": params.image_name,
+            "input_dir": params.input_dir,
+            "pipeline_type": "ordered",
+            "steps": total,
+            "started_at": chrono::Utc::now().to_rfc3339()
+        }).to_string();
+        let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
+        let _ = self.ssh_write_file(&meta_path, &run_meta).await;
+
+        // 4. Generate wrapper script
+        let mut script = String::from("#!/bin/bash\nset -e\n\n");
+        let mut prev_output = params.input_dir.clone();
+
+        for (i, step) in steps.iter().enumerate() {
+            let step_num = i + 1;
+            let step_output = if i == total - 1 {
+                output_dir.clone()
+            } else {
+                format!("{}/step_{}", output_dir.trim_end_matches('/'), i)
+            };
+
+            script += &format!("mkdir -p '{}'\n", shell_escape(&step_output));
+
+            match step.step_type.as_str() {
+                "snakemake" => {
+                    let snakefile = step.snakefile.as_deref().unwrap_or("Snakefile");
+                    let image_name = step.image.as_deref().unwrap_or(&params.image_name);
+
+                    script += &format!(
+                        "echo '[STEP {}/{} RUN] snakemake {} - STARTED'\n\
+                         docker run --rm --entrypoint snakemake \
+                           -v '{}:/pipeline' \
+                           -v '{}:/input:ro' \
+                           -v '{}:/output' -w /output \
+                           '{}' --cores {} --rerun-incomplete \
+                           --snakefile /pipeline/{} \
+                           --configfile /pipeline/config.yaml\n\
+                         if [ $? -ne 0 ]; then\n\
+                           echo '[STEP {}/{} RUN] snakemake {} - FAILED'\n\
+                           exit 1\n\
+                         fi\n\
+                         echo '[STEP {}/{} RUN] snakemake {} - DONE'\n\n",
+                        step_num, total, snakefile,
+                        shell_escape(pipeline_dir),
+                        shell_escape(&prev_output),
+                        shell_escape(&step_output),
+                        shell_escape(image_name), cores,
+                        shell_escape(snakefile),
+                        step_num, total, snakefile,
+                        step_num, total, snakefile,
+                    );
+                }
+                "nextflow" => {
+                    let nf_pipeline = step.pipeline.as_deref().unwrap_or("");
+                    let nf_config = step.config.as_deref()
+                        .map(|c| format!("-c '{}/{}'", shell_escape(pipeline_dir), shell_escape(c)))
+                        .unwrap_or_default();
+
+                    script += &format!(
+                        "echo '[STEP {}/{} RUN] nextflow {} - STARTED'\n\
+                         nextflow run '{}' {} \
+                           --input '{}' \
+                           --outdir '{}'\n\
+                         if [ $? -ne 0 ]; then\n\
+                           echo '[STEP {}/{} RUN] nextflow {} - FAILED'\n\
+                           exit 1\n\
+                         fi\n\
+                         echo '[STEP {}/{} RUN] nextflow {} - DONE'\n\n",
+                        step_num, total, nf_pipeline,
+                        shell_escape(nf_pipeline), nf_config,
+                        shell_escape(&prev_output),
+                        shell_escape(&step_output),
+                        step_num, total, nf_pipeline,
+                        step_num, total, nf_pipeline,
+                    );
+                }
+                _ => {}
+            }
+
+            prev_output = step_output;
+        }
+
+        // 5. Write script to server and execute with nohup
+        let script_path = format!("{}/.run_pipeline.sh", output_dir.trim_end_matches('/'));
+        if let Err(e) = self.ssh_write_file(&script_path, &script).await {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to write pipeline script: {}", e
+            ))]));
+        }
+
+        let cmd = format!(
+            "nohup bash '{}' > '{}' 2>&1 &\necho $!",
+            shell_escape(&script_path), shell_escape(&log_path)
+        );
+
+        match self.ssh_run(&cmd).await {
+            Ok((output, 0)) => {
+                let pid = output.trim().lines().last().unwrap_or("unknown");
+
+                // Monitor first ~90 seconds
+                let check_intervals = [10u64, 20, 30, 30];
+                for wait_secs in check_intervals {
+                    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+
+                    let still_running = match self.ssh_run(&format!(
+                        "kill -0 {} 2>/dev/null && echo running || echo done", pid
+                    )).await {
+                        Ok((out, _)) => out.trim() == "running",
+                        _ => false,
+                    };
+
+                    if !still_running {
+                        let log_tail = match self.ssh_run(&format!("tail -30 '{}' 2>/dev/null", shell_escape(&log_path))).await {
+                            Ok((out, 0)) => out,
+                            _ => "(no log available)".to_string(),
+                        };
+
+                        let has_failed = log_tail.contains("FAILED");
+                        let all_done = log_tail.lines().filter(|l| l.contains("- DONE")).count() == total;
+
+                        if all_done {
+                            return Ok(CallToolResult::success(vec![Content::text(format!(
+                                "Pipeline completed successfully! All {total} steps done.\n\
+                                 Output directory: {}\n\
+                                 Log: {}\n\n{}",
+                                output_dir, log_path, log_tail
+                            ))]));
+                        } else if has_failed {
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "Pipeline FAILED.\n\
+                                 Output directory: {}\n\
+                                 Log: {}\n\n{}",
+                                output_dir, log_path, log_tail
+                            ))]));
+                        }
+                    }
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Pipeline is running ({total} steps, no errors in first 90s). PID: {pid}.\n\
+                     Output directory: {}\n\
+                     Log file: {}\n\
+                     Check progress with list_running_pipelines.",
+                    output_dir, log_path
+                ))]))
+            }
+            Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to start pipeline:\n{}", output
+            ))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        }
+    }
 
 
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
@@ -1354,16 +1556,17 @@ impl AutoPipeServer {
 
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry.")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, fix the pipeline, and retry. For multi-step pipelines with pipeline_order.json, call build_image for EACH Snakemake step's Dockerfile before calling execute_pipeline. Use the dockerfile parameter to specify which Dockerfile to build (e.g., dockerfile='Dockerfile.qc'). Nextflow steps do NOT need build_image.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let log_path = format!("{}/build_{}.log", params.pipeline_dir, params.image_name);
+        let dockerfile = params.dockerfile.as_deref().unwrap_or("Dockerfile");
 
         let cmd = format!(
-            "cd '{}' && nohup docker build -t '{}' . > '{}' 2>&1 &\necho $!",
-            shell_escape(&params.pipeline_dir), shell_escape(&params.image_name), shell_escape(&log_path)
+            "cd '{}' && nohup docker build -f '{}' -t '{}' . > '{}' 2>&1 &\necho $!",
+            shell_escape(&params.pipeline_dir), shell_escape(dockerfile), shell_escape(&params.image_name), shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -1470,11 +1673,23 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. For multi-step pipelines with pipeline_order.json, all steps (Snakemake and Nextflow) are executed in order automatically.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Check for pipeline_order.json (multi-step pipeline with Nextflow support)
+        if let Some(dir) = self.find_pipeline_dir(&params.image_name).await {
+            let order_path = format!("{}/pipeline_order.json", dir);
+            if let Ok(order_content) = self.ssh_read_file(&order_path).await {
+                let cleaned = clean_content(&order_content);
+                if let Ok(steps) = serde_json::from_str::<Vec<PipelineStep>>(&cleaned) {
+                    return self.execute_ordered_pipeline(&steps, &dir, &params).await;
+                }
+            }
+        }
+
+        // Standard single-step Snakemake pipeline
         let cores = params.cores.unwrap_or(8);
         let output_dir = self.resolve_output_dir(&params.run_name);
         let container_name = format!("{}-run", params.run_name);
@@ -1798,24 +2013,16 @@ impl AutoPipeServer {
         if params.remove_output.unwrap_or(false) {
             let check_dir = format!("test -d '{}'", shell_escape(&output_dir));
             if let Ok((_, 0)) = self.ssh_run(&check_dir).await {
-                let rm_cmd = format!("rm -rf '{}'", shell_escape(&output_dir));
-                match self.ssh_run(&rm_cmd).await {
-                    Ok((_, 0)) => results.push(format!("Removed output directory: {}", output_dir)),
-                    Ok((err, _)) => {
-                        // rm failed (likely root-owned files from Docker) — retry with Docker
-                        let docker_rm = format!(
-                            "docker run --rm -v '{}:/target' alpine rm -rf /target",
-                            shell_escape(&output_dir)
-                        );
-                        match self.ssh_run(&docker_rm).await {
-                            Ok((_, 0)) => {
-                                let mkdir_cmd = format!("mkdir -p '{}'", shell_escape(&output_dir));
-                                let _ = self.ssh_run(&mkdir_cmd).await;
-                                results.push(format!("Removed output directory via Docker (root-owned files): {}", output_dir));
-                            }
-                            _ => results.push(format!("Failed to remove output directory (permission denied): {}", err.trim())),
-                        }
+                let docker_rm = format!(
+                    "docker run --rm -v '{}:/target' alpine rm -rf /target",
+                    shell_escape(&output_dir)
+                );
+                match self.ssh_run(&docker_rm).await {
+                    Ok((_, 0)) => {
+                        let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
+                        results.push(format!("Removed output directory: {}", output_dir));
                     }
+                    Ok((err, _)) => results.push(format!("Failed to remove output directory: {}", err.trim())),
                     Err(e) => results.push(format!("Error removing output directory: {}", e)),
                 }
             } else {
@@ -1889,40 +2096,26 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
             }
         }
 
-        // 3. Delete pipeline directory — try rm -rf first, fall back to Docker
+        // 3. Delete pipeline directory via Docker
         let check_dir = format!("test -d '{}' && echo 'exists'", shell_escape(&params.pipeline_dir));
         match self.ssh_run(&check_dir).await {
             Ok((output, 0)) if output.trim().contains("exists") => {
-                let rm_cmd = format!("rm -rf '{}'", shell_escape(&params.pipeline_dir));
-                match self.ssh_run(&rm_cmd).await {
-                    Ok((_, 0)) => {
-                        results.push(format!("Removed pipeline directory: {}", params.pipeline_dir));
-                    }
-                    _ => {
-                        // Fallback: mount parent dir and delete subdirectory via Docker
-                        let path = std::path::Path::new(&params.pipeline_dir);
-                        let parent = path.parent()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "/".to_string());
-                        let dirname = path.file_name()
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let docker_rm = format!(
-                            "docker run --rm -v '{}:/target' alpine rm -rf '/target/{}'",
-                            shell_escape(&parent),
-                            shell_escape(&dirname),
-                        );
-                        match self.ssh_run(&docker_rm).await {
-                            Ok((_, 0)) => results.push(format!(
-                                "Removed pipeline directory via Docker (root-owned files): {}",
-                                params.pipeline_dir
-                            )),
-                            Ok((err, _)) => results.push(format!(
-                                "Failed to remove pipeline directory: {}", err.trim()
-                            )),
-                            Err(e) => results.push(format!("Error removing pipeline directory: {}", e)),
-                        }
-                    }
+                let path = std::path::Path::new(&params.pipeline_dir);
+                let parent = path.parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "/".to_string());
+                let dirname = path.file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let docker_rm = format!(
+                    "docker run --rm -v '{}:/target' alpine rm -rf '/target/{}'",
+                    shell_escape(&parent),
+                    shell_escape(&dirname),
+                );
+                match self.ssh_run(&docker_rm).await {
+                    Ok((_, 0)) => results.push(format!("Removed pipeline directory: {}", params.pipeline_dir)),
+                    Ok((err, _)) => results.push(format!("Failed to remove pipeline directory: {}", err.trim())),
+                    Err(e) => results.push(format!("Error removing pipeline directory: {}", e)),
                 }
             }
             _ => results.push(format!("Pipeline directory not found: {}", params.pipeline_dir)),
@@ -2341,36 +2534,27 @@ are removed via Docker to handle permission issues. relative_path is relative to
             _ => {}
         }
 
-        // Regular file: try direct rm first, fall back to Docker for root-owned files
-        match self.ssh_run(&format!("rm -rf '{}'", shell_escape(&full_path))).await {
+        // Remove file/directory via Docker (handles root-owned files)
+        let parent = std::path::Path::new(&full_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| input_base.clone());
+        let basename = std::path::Path::new(&full_path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let docker_cmd = format!(
+            "docker run --rm -v '{}:/target' alpine rm -rf '/target/{}'",
+            shell_escape(&parent),
+            shell_escape(&basename),
+        );
+        match self.ssh_run(&docker_cmd).await {
             Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Removed: {}", full_path
             ))])),
-            Ok(_) => {
-                // Likely root-owned — remove via Docker
-                let parent = std::path::Path::new(&full_path)
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|| input_base.clone());
-                let basename = std::path::Path::new(&full_path)
-                    .file_name()
-                    .map(|f| f.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let docker_cmd = format!(
-                    "docker run --rm -v '{}:/target' alpine rm -rf '/target/{}'",
-                    shell_escape(&parent),
-                    shell_escape(&basename),
-                );
-                match self.ssh_run(&docker_cmd).await {
-                    Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
-                        "Removed via Docker (root-owned): {}", full_path
-                    ))])),
-                    Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to remove '{}': {}", full_path, output.trim()
-                    ))])),
-                    Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
-                }
-            }
+            Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to remove '{}': {}", full_path, output.trim()
+            ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
         }
     }
@@ -3077,9 +3261,18 @@ impl ServerHandler for AutoPipeServer {
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
                  Do NOT call upload_workflow or publish_workflow during pipeline creation.\n\
                  Only call them when the user explicitly asks to upload to GitHub or publish to the registry.\n\n\
+                 NEXTFLOW / NF-CORE SUPPORT:\n\
+                 When the user wants to use nf-core or Nextflow pipelines:\n\
+                 - Create a pipeline_order.json defining the execution order.\n\
+                 - Each Snakemake step needs its own Snakefile.{name} and Dockerfile.{name}.\n\
+                 - Nextflow steps need only a nextflow.config. No Dockerfile for Nextflow.\n\
+                 - NEVER call nextflow inside a Snakefile rule (causes Docker-in-Docker).\n\
+                 - For multi-step pipelines, execute_pipeline handles all steps automatically.\n\
+                 - For Nextflow-only pipelines, no build_image is needed.\n\
+                 - When only Snakemake is used, do NOT create pipeline_order.json.\n\n\
                  UPLOAD & PUBLISH RULES:\n\
                  When the user asks to upload OR publish, ALWAYS do both steps together:\n\
-                 1. Call upload_workflow (version is auto-detected from GitHub, do NOT pass a version).\n\
+                 1. Call upload_workflow (version is auto-detected from GitHub tags, do NOT pass a version).\n\
                  2. Then immediately call publish_workflow with the returned github_url.\n\
                  Only skip publish if the user explicitly says 'upload to GitHub only'.\n\
                  Duplicate names and version upgrades are handled automatically by the tools."

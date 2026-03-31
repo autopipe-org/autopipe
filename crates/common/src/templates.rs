@@ -238,10 +238,30 @@ Every pipeline is a directory with 5 required files:
 - Example in Snakefile: `"input/{sample}.fastq.gz"` (relative to Docker workdir)
 - Example in config.yaml: `reference: "/input/reference.fa"`
 
+## Nextflow / nf-core Support
+When the user wants to use nf-core or Nextflow pipelines:
+- Create a `pipeline_order.json` defining the execution order of all steps.
+- Each Snakemake step needs its own `Snakefile.{name}` and `Dockerfile.{name}`.
+- Nextflow steps need only a `nextflow.config`. Do NOT create a Dockerfile for Nextflow steps.
+- Do NOT call `nextflow run` inside a Snakefile rule. This causes Docker-in-Docker which is not supported.
+- Each step's output becomes the next step's input automatically.
+- If only Nextflow is used (no Snakemake steps), no Dockerfile is needed.
+- When only Snakemake is used (no Nextflow), do NOT create pipeline_order.json — use the existing single Snakefile + Dockerfile format.
+
+pipeline_order.json format:
+```json
+[
+  {"type": "snakemake", "snakefile": "Snakefile.qc", "dockerfile": "Dockerfile.qc"},
+  {"type": "nextflow", "pipeline": "nf-core/rnaseq", "config": "nextflow.config"},
+  {"type": "snakemake", "snakefile": "Snakefile.de", "dockerfile": "Dockerfile.de"}
+]
+```
+
 ## Safety Rules
-1. All pipelines use Snakemake format only.
-2. Every pipeline must have a Dockerfile.
+1. Pipelines use Snakemake and/or Nextflow format.
+2. Snakemake steps must have a Dockerfile. Nextflow steps must NOT have a Dockerfile.
 3. NEVER modify or delete user input data. Mount as read-only (:ro).
 4. NEVER run destructive commands on user-provided paths.
 5. NEVER hardcode absolute host paths in pipeline files.
+6. NEVER call nextflow inside a Snakefile rule.
 "#;
