@@ -433,6 +433,21 @@ impl AutoPipeServer {
         )
     }
 
+    /// Resolve Docker socket mount path (rootless → /run/user/$UID/docker.sock, fallback → /var/run/docker.sock).
+    async fn resolve_docker_socket_mount(&self) -> String {
+        let check_cmd = "test -S /run/user/$(id -u)/docker.sock && echo rootless || echo root";
+        let socket_path = match self.ssh_run(check_cmd).await {
+            Ok((output, 0)) if clean_content(&output).trim() == "rootless" => {
+                match self.ssh_run("echo /run/user/$(id -u)/docker.sock").await {
+                    Ok((path, 0)) => clean_content(&path).trim().to_string(),
+                    _ => "/var/run/docker.sock".to_string(),
+                }
+            }
+            _ => "/var/run/docker.sock".to_string(),
+        };
+        format!(" -v '{}:/var/run/docker.sock' -v /usr/bin/docker:/usr/bin/docker", socket_path)
+    }
+
     /// Find symlink targets inside a directory and return extra Docker -v mounts.
     async fn resolve_symlink_mounts(&self, dir: &str) -> String {
         let cmd = format!(
@@ -1461,10 +1476,13 @@ impl AutoPipeServer {
         Parameters(params): Parameters<DryRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
+        let dry_run_dir = format!("{}/.dry_run_tmp", self.config().full_output_dir().trim_end_matches('/'));
         let output_dir = params
             .output_dir
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| self.config().full_output_dir());
+            .unwrap_or_else(|| dry_run_dir.clone());
+
+        let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
 
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
             Some(dir) => format!("-v '{}:/pipeline'", shell_escape(&dir)),
@@ -1474,9 +1492,9 @@ impl AutoPipeServer {
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
         let docker_socket_mount = if params.needs_docker_socket.unwrap_or(false) {
-            " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker"
+            self.resolve_docker_socket_mount().await
         } else {
-            ""
+            String::new()
         };
 
         let cmd = format!(
@@ -1484,11 +1502,21 @@ impl AutoPipeServer {
             pipeline_mount, docker_socket_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
-        match self.ssh_run(&cmd).await {
+        let result = match self.ssh_run(&cmd).await {
             Ok((output, 0)) => Ok(CallToolResult::success(vec![Content::text(output)])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(output)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+        };
+
+        // Clean up dry_run temp directory
+        if output_dir == dry_run_dir {
+            let _ = self.ssh_run(&format!(
+                "docker run --rm -v '{}:/target' alpine rm -rf /target",
+                shell_escape(&dry_run_dir)
+            )).await;
         }
+
+        result
     }
 
     #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
@@ -1509,9 +1537,9 @@ impl AutoPipeServer {
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
         let docker_socket_mount = if params.needs_docker_socket.unwrap_or(false) {
-            " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker"
+            self.resolve_docker_socket_mount().await
         } else {
-            ""
+            String::new()
         };
 
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", shell_escape(&container_name))).await;

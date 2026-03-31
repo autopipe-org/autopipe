@@ -40,6 +40,7 @@ pub const DOCKERFILE_TEMPLATE: &str = r#"FROM condaforge/miniforge3:latest
 RUN conda install -y -c bioconda -c conda-forge \
     snakemake-minimal \
     bash \
+    curl \
     # tool1=version \
     # tool2=version \
     && conda clean -afy
