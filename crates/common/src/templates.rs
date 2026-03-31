@@ -238,13 +238,16 @@ Every pipeline is a directory with 5 required files:
 - Example in Snakefile: `"input/{sample}.fastq.gz"` (relative to Docker workdir)
 - Example in config.yaml: `reference: "/input/reference.fa"`
 
-## Nextflow / nf-core Support
-When the user wants to use nf-core or Nextflow pipelines inside a Snakemake workflow:
-- Add `nextflow run` commands inside Snakefile rules (e.g., `nextflow run nf-core/rnaseq -profile docker ...`).
-- Always use `-profile docker` so Nextflow uses containerized processes.
+## Nextflow / nf-core / Docker-in-Docker Support
+When the pipeline uses nextflow, nf-core, or any command that runs Docker inside the container:
+- BEFORE calling build_image, you MUST ask the user for confirmation:
+  "This pipeline uses external containers (e.g., nf-core images) that are not inspected by AutoPipe.
+   Running it requires mounting the host Docker socket. Proceed with build and execution?"
+- If the user APPROVES: call build_image, then execute_pipeline with needs_docker_socket=true.
+- If the user DECLINES: stop. Do NOT build or execute. Tell the user this pipeline cannot run
+  without Docker socket access and ask if they want a different approach.
+- Always use `-profile docker` for nextflow when approved.
 - Install nextflow in the Dockerfile: `RUN curl -s https://get.nextflow.io | bash && mv nextflow /usr/local/bin/`
-- Docker socket is automatically mounted when nextflow is detected — no extra configuration needed.
-- Do NOT create separate pipeline_order.json or multiple Snakefiles for Nextflow steps.
 - Keep everything in a single Snakefile + single Dockerfile as usual.
 
 ## Safety Rules
