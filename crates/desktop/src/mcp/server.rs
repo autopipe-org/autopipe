@@ -3102,8 +3102,7 @@ impl ServerHandler for AutoPipeServer {
                  All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
                  NEVER use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is nextflow run with -profile docker.\n\
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
-                 Do NOT call upload_workflow or publish_workflow during pipeline creation.\n\
-                 Only call them when the user explicitly asks to upload to GitHub or publish to the registry.\n\n\
+                 CRITICAL: NEVER call upload_workflow or publish_workflow unless the user EXPLICITLY says 'upload', 'publish', or 'register'. Pipeline creation, building, and execution do NOT require uploading or publishing. These are completely separate actions that require explicit user request.\n\n\
                  UPLOAD & PUBLISH RULES:\n\
                  When the user asks to upload OR publish, ALWAYS do both steps together:\n\
                  1. Call upload_workflow (version is auto-detected from GitHub, do NOT pass a version).\n\
