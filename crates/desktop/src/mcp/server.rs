@@ -1359,8 +1359,10 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<BuildParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let log_path = format!("{}/build_{}.log", params.pipeline_dir, params.image_name);
+        let log_dir = self.config().full_output_dir();
+        let log_path = format!("{}/build_{}.log", log_dir.trim_end_matches('/'), params.image_name);
 
+        let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&log_dir))).await;
         let cmd = format!(
             "cd '{}' && nohup docker build -t '{}' . > '{}' 2>&1 &\necho $!",
             shell_escape(&params.pipeline_dir), shell_escape(&params.image_name), shell_escape(&log_path)
@@ -1402,16 +1404,23 @@ impl AutoPipeServer {
         };
 
         // Get recent log output
-        let pipelines_dir = self.config().full_pipelines_dir();
-        let log_path = format!("{}/build_{}.log", pipelines_dir, params.image_name);
-        // Also check in pipeline subdirectories
-        let find_log = format!(
-            "find '{}' -name 'build_{}.log' 2>/dev/null | head -1",
-            shell_escape(&pipelines_dir), shell_escape(&params.image_name)
-        );
-        let actual_log_path = match self.ssh_run(&find_log).await {
-            Ok((output, 0)) if !output.trim().is_empty() => output.trim().to_string(),
-            _ => log_path,
+        let log_dir = self.config().full_output_dir();
+        let log_path = format!("{}/build_{}.log", log_dir.trim_end_matches('/'), params.image_name);
+        let actual_log_path = log_path.clone();
+        let actual_log_path = match self.ssh_run(&format!("test -f '{}' && echo exists", shell_escape(&log_path))).await {
+            Ok((output, 0)) if output.trim().contains("exists") => log_path,
+            _ => {
+                // Fallback: search in pipelines dir (for old builds)
+                let pipelines_dir = self.config().full_pipelines_dir();
+                let find_log = format!(
+                    "find '{}' -name 'build_{}.log' 2>/dev/null | head -1",
+                    shell_escape(&pipelines_dir), shell_escape(&params.image_name)
+                );
+                match self.ssh_run(&find_log).await {
+                    Ok((output, 0)) if !output.trim().is_empty() => output.trim().to_string(),
+                    _ => actual_log_path,
+                }
+            }
         };
 
         let tail_cmd = format!("tail -30 '{}' 2>/dev/null", shell_escape(&actual_log_path));
@@ -2398,7 +2407,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
             // List files in directory (non-recursive, max 50)
             match self
                 .ssh_run(&format!(
-                    "find '{}' -maxdepth 1 -type f ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
+                    "find '{}' -maxdepth 1 -type f ! -name '.*' ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
                     shell_escape(&params.path)
                 ))
                 .await
