@@ -711,7 +711,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. Version is auto-detected: if the pipeline already exists on GitHub, the patch version is incremented automatically. For new pipelines, version starts at 1.0.0 from the metadata. Returns the GitHub URL and version. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
+    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -754,17 +754,8 @@ impl AutoPipeServer {
             }
         };
 
-        let mut meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
-        // Read version from SSH metadata (support both flat and RO-Crate format)
-        let ssh_version = if let Some(graph) = meta_json["@graph"].as_array() {
-            graph.iter()
-                .find(|n| n["@id"].as_str() == Some("./"))
-                .and_then(|ds| ds["version"].as_str())
-                .unwrap_or("1.0.0")
-                .to_string()
-        } else {
-            meta_json["version"].as_str().unwrap_or("1.0.0").to_string()
-        };
+        let meta_json: serde_json::Value = serde_json::from_str(&cleaned_meta).unwrap_or_default();
+        let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
 
         let pipeline_name = &metadata.name;
         let repo_name = &config.github_repo;
@@ -815,49 +806,6 @@ impl AutoPipeServer {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
-        // 2.5 Auto-detect version from existing GitHub metadata
-        let github_meta_path = format!("pipelines/{}/ro-crate-metadata.json", pipeline_name);
-        let github_meta_content = fetch_github_file(&client, &owner, repo_name, &github_meta_path, &token).await;
-
-        let version = if let Some(github_meta_str) = github_meta_content {
-            // Existing pipeline on GitHub → read version and increment patch
-            let github_meta: serde_json::Value = serde_json::from_str(&github_meta_str).unwrap_or_default();
-
-            // Support both flat and RO-Crate format
-            let existing_version = if let Some(graph) = github_meta["@graph"].as_array() {
-                graph.iter()
-                    .find(|n| n["@id"].as_str() == Some("./"))
-                    .and_then(|ds| ds["version"].as_str())
-                    .unwrap_or("1.0.0")
-                    .to_string()
-            } else {
-                github_meta["version"].as_str().unwrap_or("1.0.0").to_string()
-            };
-
-            // Increment patch version
-            let parts: Vec<u32> = existing_version.split('.')
-                .map(|p| p.parse().unwrap_or(0))
-                .collect();
-            if parts.len() == 3 {
-                format!("{}.{}.{}", parts[0], parts[1], parts[2] + 1)
-            } else {
-                format!("{}.0.1", parts.first().unwrap_or(&1))
-            }
-        } else {
-            // No existing file on GitHub (404) → first upload, use SSH metadata version
-            ssh_version.clone()
-        };
-
-        // Update version in metadata and read all files from SSH
-        meta_json["version"] = serde_json::Value::String(version.clone());
-        // Also update version inside RO-Crate @graph Dataset node if present
-        if let Some(graph) = meta_json["@graph"].as_array_mut() {
-            if let Some(dataset) = graph.iter_mut().find(|n| n["@id"].as_str() == Some("./")) {
-                dataset["version"] = serde_json::Value::String(version.clone());
-            }
-        }
-        let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
-
         // Read all specified files from SSH
         let mut file_contents: Vec<(String, String)> = Vec::new();
         for file_path in &files {
@@ -880,25 +828,36 @@ impl AutoPipeServer {
             file_contents.push((file_path.clone(), cleaned));
         }
 
-        // 3. Get latest commit SHA on main branch
-        let ref_resp = client
-            .get(format!(
-                "https://api.github.com/repos/{}/{}/git/ref/heads/main",
-                owner, repo_name
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "autopipe-desktop")
-            .send()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        // 3. Get latest commit SHA on main branch (retry up to 5 times for newly created repos)
+        let mut latest_sha = String::new();
+        for attempt in 0..5 {
+            let ref_resp = client
+                .get(format!(
+                    "https://api.github.com/repos/{}/{}/git/ref/heads/main",
+                    owner, repo_name
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .send()
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
-        let ref_body: serde_json::Value = ref_resp.json().await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let latest_sha = ref_body["object"]["sha"].as_str().unwrap_or_default().to_string();
+            let ref_body: serde_json::Value = ref_resp.json().await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            latest_sha = ref_body["object"]["sha"].as_str().unwrap_or_default().to_string();
+
+            if !latest_sha.is_empty() {
+                break;
+            }
+            if attempt < 4 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
 
         if latest_sha.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "Could not get latest commit SHA from the repository.",
+                "Could not get latest commit SHA. The repository may not have a main branch. \
+                 Please ensure the repository is initialized with at least one commit.",
             )]));
         }
 
@@ -952,7 +911,7 @@ impl AutoPipeServer {
 
         // 6. Create commit
         let commit_msg = params.commit_message.unwrap_or_else(|| {
-            format!("Upload {} v{}", pipeline_name, version)
+            format!("Upload {}", pipeline_name)
         });
 
         let new_commit_resp = client
@@ -995,31 +954,6 @@ impl AutoPipeServer {
             ))]));
         }
 
-        // 8. Create version tag
-        let tag_name = format!("{}/v{}", pipeline_name, version);
-        let tag_resp = client
-            .post(format!(
-                "https://api.github.com/repos/{}/{}/git/refs",
-                owner, repo_name
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "autopipe-desktop")
-            .json(&serde_json::json!({
-                "ref": format!("refs/tags/{}", tag_name),
-                "sha": new_commit_sha
-            }))
-            .send()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if !tag_resp.status().is_success() {
-            let err = tag_resp.text().await.unwrap_or_default();
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Code was pushed successfully but version tag '{}' creation failed: {}.\n\
-                 The commit is at: {}", tag_name, err, new_commit_sha
-            ))]));
-        }
-
         let github_url = format!(
             "https://github.com/{}/{}/tree/main/pipelines/{}",
             owner, repo_name, pipeline_name
@@ -1032,12 +966,10 @@ impl AutoPipeServer {
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Successfully uploaded '{}' to GitHub!\n\
              Pipeline URL: {}\n\
-             Commit: {}\n\
-             {}",
+             Commit: {}",
             pipeline_name,
             github_url,
-            commit_url,
-            format!("Version tag: {}/v{}", pipeline_name, version)
+            commit_url
         ))]))
     }
 
@@ -1157,6 +1089,156 @@ impl AutoPipeServer {
             }
         }
 
+        // Determine version from GitHub tags and update metadata
+        let url_parts: Vec<&str> = params.github_url.trim_end_matches('/').split('/').collect();
+        let gh_owner = url_parts.get(3).unwrap_or(&"").to_string();
+        let gh_repo = url_parts.get(4).unwrap_or(&"").to_string();
+
+        // Fetch existing tags for this pipeline: refs/tags/{pipeline_name}/v*
+        let tag_prefix = pipeline_name.replace(' ', "-");
+        let tags_url = format!(
+            "https://api.github.com/repos/{}/{}/git/matching-refs/tags/{}/v",
+            gh_owner, gh_repo, tag_prefix
+        );
+        let tags_resp = client
+            .get(&tags_url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await;
+
+        let version = match tags_resp {
+            Ok(resp) if resp.status().is_success() => {
+                let tags: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+                if tags.is_empty() {
+                    "1.0.0".to_string()
+                } else {
+                    // Find the latest version from tags
+                    let mut latest = (1u32, 0u32, 0u32);
+                    for tag in &tags {
+                        if let Some(ref_str) = tag["ref"].as_str() {
+                            // ref: "refs/tags/pipeline_name/v1.2.3"
+                            if let Some(ver_str) = ref_str.rsplit("/v").next() {
+                                let parts: Vec<u32> = ver_str.split('.')
+                                    .map(|p| p.parse().unwrap_or(0))
+                                    .collect();
+                                if parts.len() == 3 {
+                                    let v = (parts[0], parts[1], parts[2]);
+                                    if v > latest { latest = v; }
+                                }
+                            }
+                        }
+                    }
+                    format!("{}.{}.{}", latest.0, latest.1, latest.2 + 1)
+                }
+            }
+            _ => "1.0.0".to_string(),
+        };
+
+        // Update version in GitHub metadata before publishing
+        let meta_path = format!("pipelines/{}/ro-crate-metadata.json", pipeline_name);
+        if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, &meta_path, &token).await {
+            let mut meta_json: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
+
+            // Update version in both top-level and RO-Crate @graph
+            meta_json["version"] = serde_json::Value::String(version.clone());
+            if let Some(graph) = meta_json["@graph"].as_array_mut() {
+                if let Some(dataset) = graph.iter_mut().find(|n| n["@id"].as_str() == Some("./")) {
+                    dataset["version"] = serde_json::Value::String(version.clone());
+                }
+            }
+            let updated_meta = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
+
+            // Commit the version update to GitHub
+            let ref_resp = client
+                .get(format!(
+                    "https://api.github.com/repos/{}/{}/git/ref/heads/main",
+                    gh_owner, gh_repo
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .send()
+                .await;
+
+            if let Ok(ref_r) = ref_resp {
+                if let Ok(ref_body) = ref_r.json::<serde_json::Value>().await {
+                    let latest_sha = ref_body["object"]["sha"].as_str().unwrap_or_default().to_string();
+                    if !latest_sha.is_empty() {
+                        // Get base tree
+                        if let Ok(commit_r) = client.get(format!(
+                            "https://api.github.com/repos/{}/{}/git/commits/{}",
+                            gh_owner, gh_repo, latest_sha
+                        )).header("Authorization", format!("Bearer {}", token))
+                        .header("User-Agent", "autopipe-desktop")
+                        .send().await {
+                            if let Ok(commit_body) = commit_r.json::<serde_json::Value>().await {
+                                let base_tree = commit_body["tree"]["sha"].as_str().unwrap_or_default();
+
+                                // Create tree with updated metadata
+                                let encoded_meta_path = meta_path.replace(" ", "%20");
+                                let _ = encoded_meta_path; // suppress warning, we use meta_path directly in JSON
+                                if let Ok(tree_r) = client.post(format!(
+                                    "https://api.github.com/repos/{}/{}/git/trees",
+                                    gh_owner, gh_repo
+                                )).header("Authorization", format!("Bearer {}", token))
+                                .header("User-Agent", "autopipe-desktop")
+                                .json(&serde_json::json!({
+                                    "base_tree": base_tree,
+                                    "tree": [{
+                                        "path": meta_path,
+                                        "mode": "100644",
+                                        "type": "blob",
+                                        "content": updated_meta
+                                    }]
+                                })).send().await {
+                                    if let Ok(tree_body) = tree_r.json::<serde_json::Value>().await {
+                                        let new_tree = tree_body["sha"].as_str().unwrap_or_default();
+
+                                        // Create commit
+                                        if let Ok(commit_r2) = client.post(format!(
+                                            "https://api.github.com/repos/{}/{}/git/commits",
+                                            gh_owner, gh_repo
+                                        )).header("Authorization", format!("Bearer {}", token))
+                                        .header("User-Agent", "autopipe-desktop")
+                                        .json(&serde_json::json!({
+                                            "message": format!("Publish {} v{}", pipeline_name, version),
+                                            "tree": new_tree,
+                                            "parents": [latest_sha]
+                                        })).send().await {
+                                            if let Ok(commit_body2) = commit_r2.json::<serde_json::Value>().await {
+                                                let new_sha = commit_body2["sha"].as_str().unwrap_or_default().to_string();
+
+                                                // Update branch ref
+                                                let _ = client.patch(format!(
+                                                    "https://api.github.com/repos/{}/{}/git/refs/heads/main",
+                                                    gh_owner, gh_repo
+                                                )).header("Authorization", format!("Bearer {}", token))
+                                                .header("User-Agent", "autopipe-desktop")
+                                                .json(&serde_json::json!({ "sha": new_sha }))
+                                                .send().await;
+
+                                                // Create version tag (replace spaces with hyphens for valid git tag)
+                                                let tag_name = format!("{}/v{}", pipeline_name.replace(' ', "-"), version);
+                                                let _ = client.post(format!(
+                                                    "https://api.github.com/repos/{}/{}/git/refs",
+                                                    gh_owner, gh_repo
+                                                )).header("Authorization", format!("Bearer {}", token))
+                                                .header("User-Agent", "autopipe-desktop")
+                                                .json(&serde_json::json!({
+                                                    "ref": format!("refs/tags/{}", tag_name),
+                                                    "sha": new_sha
+                                                })).send().await;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Call registry publish endpoint
         let resp = client
             .post(format!("{}/api/publish", base))
@@ -1178,10 +1260,10 @@ impl AutoPipeServer {
             let name = body["name"].as_str().unwrap_or("unknown");
             let web_url = format!("{}/pipelines/{}", base, pipeline_id);
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Successfully published '{}' to the registry!\n\
+                "Successfully published '{}' v{} to the registry!\n\
                  Web page: {}\n\
                  Pipeline ID: {}",
-                name, web_url, pipeline_id
+                name, version, web_url, pipeline_id
             ))]))
         } else if status.as_u16() == 422 {
             let issues = body["issues"]
@@ -1370,14 +1452,14 @@ impl AutoPipeServer {
             .unwrap_or_else(|| self.config().full_output_dir());
 
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
-            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", shell_escape(&dir)),
+            Some(dir) => format!("-v '{}:/pipeline'", shell_escape(&dir)),
             None => String::new(),
         };
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
         let cmd = format!(
-            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
             pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
@@ -1399,7 +1481,7 @@ impl AutoPipeServer {
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
         let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
-            Some(dir) => format!("-v '{}:/pipeline' -w /pipeline", shell_escape(&dir)),
+            Some(dir) => format!("-v '{}:/pipeline'", shell_escape(&dir)),
             None => String::new(),
         };
 
@@ -1420,7 +1502,7 @@ impl AutoPipeServer {
         let _ = self.ssh_write_file(&meta_path, &run_meta).await;
 
         let cmd = format!(
-            "nohup docker run --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            "nohup docker run --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
             shell_escape(&container_name), pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
