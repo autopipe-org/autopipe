@@ -58,6 +58,9 @@ struct DryRunParams {
     output_dir: Option<String>,
     /// Number of CPU cores (default: 8)
     cores: Option<u32>,
+    /// Set to true if the pipeline needs Docker access inside the container (e.g., nextflow -profile docker, docker run, singularity exec). Mounts the host Docker socket.
+    #[serde(default)]
+    needs_docker_socket: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -70,6 +73,9 @@ struct ExecuteParams {
     input_dir: String,
     /// Number of CPU cores (default: 8)
     cores: Option<u32>,
+    /// Set to true if the pipeline needs Docker access inside the container (e.g., nextflow -profile docker, docker run, singularity exec). Mounts the host Docker socket.
+    #[serde(default)]
+    needs_docker_socket: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1467,17 +1473,10 @@ impl AutoPipeServer {
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
-        // Detect nextflow in Snakefile → mount Docker socket
-        let docker_socket_mount = if let Some(ref dir) = self.find_pipeline_dir(&params.image_name).await {
-            let snakefile_path = format!("{}/Snakefile", dir);
-            match self.ssh_read_file(&snakefile_path).await {
-                Ok(content) if content.contains("nextflow run") => {
-                    " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker".to_string()
-                }
-                _ => String::new(),
-            }
+        let docker_socket_mount = if params.needs_docker_socket.unwrap_or(false) {
+            " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker"
         } else {
-            String::new()
+            ""
         };
 
         let cmd = format!(
@@ -1509,17 +1508,10 @@ impl AutoPipeServer {
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
-        // Detect nextflow in Snakefile → mount Docker socket for nf-core support
-        let docker_socket_mount = if let Some(ref dir) = self.find_pipeline_dir(&params.image_name).await {
-            let snakefile_path = format!("{}/Snakefile", dir);
-            match self.ssh_read_file(&snakefile_path).await {
-                Ok(content) if content.contains("nextflow run") => {
-                    " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker".to_string()
-                }
-                _ => String::new(),
-            }
+        let docker_socket_mount = if params.needs_docker_socket.unwrap_or(false) {
+            " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker"
         } else {
-            String::new()
+            ""
         };
 
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", shell_escape(&container_name))).await;

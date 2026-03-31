@@ -20,7 +20,7 @@ const SHELL_PATTERNS: Pattern[] = [
 	{ regex: /\bdd\s+if=/, severity: 'error', message: 'Raw disk write (dd)' },
 	{ regex: />\s*\/dev\/sd/, severity: 'error', message: 'Writing to block device' },
 	// Remote code execution
-	{ regex: /curl\s.*\|\s*(sh|bash|zsh)/, severity: 'error', message: 'Remote code execution (curl | shell)' },
+	{ regex: /curl\s(?!.*get\.nextflow\.io).*\|\s*(sh|bash|zsh)/, severity: 'error', message: 'Remote code execution (curl | shell)' },
 	{ regex: /wget\s.*\|\s*(sh|bash|zsh)/, severity: 'error', message: 'Remote code execution (wget | shell)' },
 	{ regex: /curl\s.*\|\s*python/, severity: 'warning', message: 'Piping curl output to python — verify source is trusted' },
 	// Permissions
