@@ -1484,22 +1484,32 @@ impl AutoPipeServer {
 
         let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
 
-        let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
-            Some(dir) => format!("-v '{}:/pipeline'", shell_escape(&dir)),
+        let pipeline_dir = self.find_pipeline_dir(&params.image_name).await;
+        let pipeline_mount = match &pipeline_dir {
+            Some(dir) => format!("-v '{}:/pipeline'", shell_escape(dir)),
             None => String::new(),
         };
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
-        let docker_socket_mount = if params.needs_docker_socket.unwrap_or(false) {
-            self.resolve_docker_socket_mount().await
+        let (docker_socket_mount, host_path_mounts) = if params.needs_docker_socket.unwrap_or(false) {
+            let socket = self.resolve_docker_socket_mount().await;
+            let mut host_mounts = format!(
+                " -v '{}:{}:ro' -v '{}:{}'",
+                shell_escape(&params.input_dir), shell_escape(&params.input_dir),
+                shell_escape(&output_dir), shell_escape(&output_dir),
+            );
+            if let Some(ref dir) = pipeline_dir {
+                host_mounts += &format!(" -v '{}:{}'", shell_escape(dir), shell_escape(dir));
+            }
+            (socket, host_mounts)
         } else {
-            String::new()
+            (String::new(), String::new())
         };
 
         let cmd = format!(
-            "docker run --rm --entrypoint snakemake {}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, docker_socket_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
+            "docker run --rm --entrypoint snakemake {}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            pipeline_mount, docker_socket_mount, host_path_mounts, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
         let result = match self.ssh_run(&cmd).await {
@@ -1529,17 +1539,27 @@ impl AutoPipeServer {
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
-        let pipeline_mount = match self.find_pipeline_dir(&params.image_name).await {
-            Some(dir) => format!("-v '{}:/pipeline'", shell_escape(&dir)),
+        let pipeline_dir = self.find_pipeline_dir(&params.image_name).await;
+        let pipeline_mount = match &pipeline_dir {
+            Some(dir) => format!("-v '{}:/pipeline'", shell_escape(dir)),
             None => String::new(),
         };
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
-        let docker_socket_mount = if params.needs_docker_socket.unwrap_or(false) {
-            self.resolve_docker_socket_mount().await
+        let (docker_socket_mount, host_path_mounts) = if params.needs_docker_socket.unwrap_or(false) {
+            let socket = self.resolve_docker_socket_mount().await;
+            let mut host_mounts = format!(
+                " -v '{}:{}:ro' -v '{}:{}'",
+                shell_escape(&params.input_dir), shell_escape(&params.input_dir),
+                shell_escape(&output_dir), shell_escape(&output_dir),
+            );
+            if let Some(ref dir) = pipeline_dir {
+                host_mounts += &format!(" -v '{}:{}'", shell_escape(dir), shell_escape(dir));
+            }
+            (socket, host_mounts)
         } else {
-            String::new()
+            (String::new(), String::new())
         };
 
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", shell_escape(&container_name))).await;
@@ -1557,8 +1577,8 @@ impl AutoPipeServer {
         let _ = self.ssh_write_file(&meta_path, &run_meta).await;
 
         let cmd = format!(
-            "nohup docker run --entrypoint snakemake --name '{}' {}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            shell_escape(&container_name), pipeline_mount, docker_socket_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
+            "nohup docker run --entrypoint snakemake --name '{}' {}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            shell_escape(&container_name), pipeline_mount, docker_socket_mount, host_path_mounts, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {

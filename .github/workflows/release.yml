@@ -176,9 +176,14 @@ jobs:
           ditto AutoPipe.app dmg-content/AutoPipe.app
           ln -s /Applications dmg-content/Applications
           sync
-          sleep 2
-          hdiutil create -volname "AutoPipe" -srcfolder dmg-content \
-            -ov -format UDZO "$DMG_NAME"
+          sleep 5
+          # Retry hdiutil up to 3 times (macOS indexing can lock files)
+          for i in 1 2 3; do
+            hdiutil create -volname "AutoPipe" -srcfolder dmg-content \
+              -ov -format UDZO "$DMG_NAME" && break
+            echo "hdiutil attempt $i failed, retrying in 5s..."
+            sleep 5
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
