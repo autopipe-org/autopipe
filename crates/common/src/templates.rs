@@ -196,7 +196,7 @@ Every pipeline is a directory with 5 required files:
 - Copy Snakefile and config.yaml into `/pipeline`
 - Clean up: `conda clean -afy`
 - Set `WORKDIR /pipeline`
-- Each pipeline must have exactly ONE Dockerfile. Do NOT use Docker commands (docker run, docker pull) inside Snakefile rules.
+- Do NOT use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is `nextflow run` with `-profile docker`, which manages its own containers through the mounted Docker socket.
 - If converting from Nextflow or other container-based workflows, install all required tools from every container into the single Dockerfile.
 - If the user already has a working Dockerfile from their analysis environment, use it as the base instead of writing one from scratch.
 
@@ -238,10 +238,20 @@ Every pipeline is a directory with 5 required files:
 - Example in Snakefile: `"input/{sample}.fastq.gz"` (relative to Docker workdir)
 - Example in config.yaml: `reference: "/input/reference.fa"`
 
+## Nextflow / nf-core Support
+When the user wants to use nf-core or Nextflow pipelines inside a Snakemake workflow:
+- Add `nextflow run` commands inside Snakefile rules (e.g., `nextflow run nf-core/rnaseq -profile docker ...`).
+- Always use `-profile docker` so Nextflow uses containerized processes.
+- Install nextflow in the Dockerfile: `RUN curl -s https://get.nextflow.io | bash && mv nextflow /usr/local/bin/`
+- Docker socket is automatically mounted when nextflow is detected — no extra configuration needed.
+- Do NOT create separate pipeline_order.json or multiple Snakefiles for Nextflow steps.
+- Keep everything in a single Snakefile + single Dockerfile as usual.
+
 ## Safety Rules
-1. All pipelines use Snakemake format only.
+1. Pipelines use Snakemake format. Nextflow is allowed only inside Snakefile rules via `nextflow run`.
 2. Every pipeline must have a Dockerfile.
 3. NEVER modify or delete user input data. Mount as read-only (:ro).
 4. NEVER run destructive commands on user-provided paths.
 5. NEVER hardcode absolute host paths in pipeline files.
+6. NEVER use `docker run` or `docker pull` directly inside Snakefile rules.
 "#;

@@ -1467,9 +1467,22 @@ impl AutoPipeServer {
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
+        // Detect nextflow in Snakefile → mount Docker socket
+        let docker_socket_mount = if let Some(ref dir) = self.find_pipeline_dir(&params.image_name).await {
+            let snakefile_path = format!("{}/Snakefile", dir);
+            match self.ssh_read_file(&snakefile_path).await {
+                Ok(content) if content.contains("nextflow run") => {
+                    " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker".to_string()
+                }
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
         let cmd = format!(
-            "docker run --rm --entrypoint snakemake {} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
+            "docker run --rm --entrypoint snakemake {}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            pipeline_mount, docker_socket_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
         match self.ssh_run(&cmd).await {
@@ -1496,6 +1509,19 @@ impl AutoPipeServer {
 
         let symlink_mounts = self.resolve_symlink_mounts(&params.input_dir).await;
 
+        // Detect nextflow in Snakefile → mount Docker socket for nf-core support
+        let docker_socket_mount = if let Some(ref dir) = self.find_pipeline_dir(&params.image_name).await {
+            let snakefile_path = format!("{}/Snakefile", dir);
+            match self.ssh_read_file(&snakefile_path).await {
+                Ok(content) if content.contains("nextflow run") => {
+                    " -v /var/run/docker.sock:/var/run/docker.sock -v /usr/bin/docker:/usr/bin/docker".to_string()
+                }
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", shell_escape(&container_name))).await;
         let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
 
@@ -1511,8 +1537,8 @@ impl AutoPipeServer {
         let _ = self.ssh_write_file(&meta_path, &run_meta).await;
 
         let cmd = format!(
-            "nohup docker run --entrypoint snakemake --name '{}' {} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            shell_escape(&container_name), pipeline_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
+            "nohup docker run --entrypoint snakemake --name '{}' {}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            shell_escape(&container_name), pipeline_mount, docker_socket_mount, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -3082,7 +3108,7 @@ impl ServerHandler for AutoPipeServer {
                  4. Use write_file to write each generated file to the pipeline directory on the SSH server.\n\
                  5. Use validate_pipeline to verify the structure.\n\
                  All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
-                 Each pipeline uses exactly ONE Dockerfile. NEVER use Docker commands inside Snakefile rules.\n\
+                 NEVER use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is nextflow run with -profile docker.\n\
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
                  Do NOT call upload_workflow or publish_workflow during pipeline creation.\n\
                  Only call them when the user explicitly asks to upload to GitHub or publish to the registry.\n\n\
