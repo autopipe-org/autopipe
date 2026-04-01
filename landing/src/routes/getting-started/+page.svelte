@@ -43,7 +43,7 @@
 					<h4>Prerequisites</h4>
 					<ul>
 						<li>An MCP-compatible AI application on your local computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener" class="subtle-link">Claude Desktop</a></li>
-						<li>Docker installed on the remote server where pipelines will run — <a href="https://docs.docker.com/engine/install/#installation-procedures-for-supported-platforms" target="_blank" rel="noopener" class="subtle-link">Install Docker</a></li>
+						<li>Docker installed on the remote server where pipelines will run — <a href="https://docs.docker.com/engine/install/#installation-procedures-for-supported-platforms" target="_blank" rel="noopener" class="subtle-link">Install Docker</a>. Docker must be usable without <code>sudo</code>.</li>
 					</ul>
 				</div>
 				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server.</p>
@@ -52,19 +52,19 @@
 						<h4>macOS</h4>
 						<p>Download the <code>.dmg</code> installer:</p>
 						<div class="btn-group">
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.9-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.9-macos-x64.dmg" class="btn-sm">Download for Intel</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.11-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
+							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.11-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
-						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.9.exe" class="btn-sm">Download for Windows</a>
+						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.11.exe" class="btn-sm">Download for Windows</a>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
 						<p>Download the <code>.deb</code> package:</p>
-						<a href="https://download.autopipe.org/linux/autopipe_0.0.9_amd64.deb" class="btn-sm">Download for Linux</a>
+						<a href="https://download.autopipe.org/linux/autopipe_0.0.11_amd64.deb" class="btn-sm">Download for Linux</a>
 					</div>
 				</div>
 				<div class="security-note">

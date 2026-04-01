@@ -1242,18 +1242,6 @@ impl AutoPipeServer {
                                                 .header("User-Agent", "autopipe-desktop")
                                                 .json(&serde_json::json!({ "sha": new_sha }))
                                                 .send().await;
-
-                                                // Create version tag (replace spaces with hyphens for valid git tag)
-                                                let tag_name = format!("{}/v{}", pipeline_name.replace(' ', "-"), version);
-                                                let _ = client.post(format!(
-                                                    "https://api.github.com/repos/{}/{}/git/refs",
-                                                    gh_owner, gh_repo
-                                                )).header("Authorization", format!("Bearer {}", token))
-                                                .header("User-Agent", "autopipe-desktop")
-                                                .json(&serde_json::json!({
-                                                    "ref": format!("refs/tags/{}", tag_name),
-                                                    "sha": new_sha
-                                                })).send().await;
                                             }
                                         }
                                     }
@@ -1265,7 +1253,7 @@ impl AutoPipeServer {
             }
         }
 
-        // Call registry publish endpoint
+        // Call registry publish endpoint FIRST, then create tag only on success
         let resp = client
             .post(format!("{}/api/publish", base))
             .json(&serde_json::json!({
@@ -1282,6 +1270,29 @@ impl AutoPipeServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         if status.is_success() {
+            // Create version tag only after successful publish
+            let tag_name = format!("{}/v{}", pipeline_name.replace(' ', "-"), version);
+            if let Ok(ref_r) = client.get(format!(
+                "https://api.github.com/repos/{}/{}/git/ref/heads/main",
+                gh_owner, gh_repo
+            )).header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send().await {
+                if let Ok(ref_body) = ref_r.json::<serde_json::Value>().await {
+                    if let Some(sha) = ref_body["object"]["sha"].as_str() {
+                        let _ = client.post(format!(
+                            "https://api.github.com/repos/{}/{}/git/refs",
+                            gh_owner, gh_repo
+                        )).header("Authorization", format!("Bearer {}", token))
+                        .header("User-Agent", "autopipe-desktop")
+                        .json(&serde_json::json!({
+                            "ref": format!("refs/tags/{}", tag_name),
+                            "sha": sha
+                        })).send().await;
+                    }
+                }
+            }
+
             let pipeline_id = body["pipeline_id"].as_i64().unwrap_or(0);
             let name = body["name"].as_str().unwrap_or("unknown");
             let web_url = format!("{}/pipelines/{}", base, pipeline_id);

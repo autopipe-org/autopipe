@@ -140,15 +140,16 @@ export function validateSecurity(
 		}
 	}
 
-	// Check Dockerfile RUN commands
+	// Check Dockerfile RUN commands (remote code execution patterns downgraded to warning since Dockerfile runs only at build time)
 	const runCommands = extractRunCommands(dockerfile);
 	for (const cmd of runCommands) {
 		for (const pattern of SHELL_PATTERNS) {
 			if (pattern.regex.test(cmd.content)) {
+				const isRemoteExec = pattern.message.includes('Remote code execution') || pattern.message.includes('curl') || pattern.message.includes('wget');
 				issues.push({
 					line: cmd.line,
 					file: 'Dockerfile',
-					severity: pattern.severity,
+					severity: isRemoteExec ? 'warning' : pattern.severity,
 					message: pattern.message
 				});
 			}
