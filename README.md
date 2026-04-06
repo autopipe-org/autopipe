@@ -6,6 +6,10 @@ AutoPipe is an AI-powered platform for creating, executing, and sharing reproduc
   <img src="docs/autopipe-schematic.png" alt="AutoPipe Architecture" width="800" />
 </p>
 
+<p align="center">
+  <img src="docs/figure_user.png" alt="AutoPipe User Workflow" width="800" />
+</p>
+
 ## Key Features
 
 ### AI Pipeline Generation
