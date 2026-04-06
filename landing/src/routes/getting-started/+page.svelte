@@ -45,6 +45,13 @@
 						<li>An MCP-compatible AI application on your local computer — we recommend <a href="https://claude.ai/download" target="_blank" rel="noopener" class="subtle-link">Claude Desktop</a></li>
 						<li>Docker installed on the remote server where pipelines will run — <a href="https://docs.docker.com/engine/install/#installation-procedures-for-supported-platforms" target="_blank" rel="noopener" class="subtle-link">Install Docker</a>. Docker must be usable without <code>sudo</code>.</li>
 					</ul>
+					<details class="server-setup">
+						<summary>Need to configure a new server?</summary>
+						<div class="server-setup-content">
+							<p>Run the following command on your server to automatically install SSH, Docker, Git, and verify the environment. The script will also display the SSH configuration values needed for the Autopipe desktop app.</p>
+							<div class="code-block">curl -fsSL https://download.autopipe.org/setup.sh | bash</div>
+						</div>
+					</details>
 				</div>
 				<p>Download the desktop app for your platform. It provides a GUI for configuration and runs as an MCP server.</p>
 				<div class="options">
@@ -114,15 +121,15 @@
 			<div class="step-number">3</div>
 			<div class="step-content">
 				<h2>Create or Find a Pipeline</h2>
-				<p>Open Claude Desktop and describe what you want to analyze. You can create a new pipeline from scratch:</p>
+				<p>Open your AI app and describe what you want to analyze. You can create a new pipeline from scratch:</p>
 				<div class="example-chat">
 					<div class="user-msg">Use Autopipe to create a variant calling pipeline for paired-end WGS data using BWA-MEM2 and GATK HaplotypeCaller</div>
 				</div>
-				<p>Or find an existing pipeline — browse <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> directly, or ask Claude to search for you:</p>
+				<p>Or find an existing pipeline — browse <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> directly, or ask your AI to search for you:</p>
 				<div class="example-chat">
 					<div class="user-msg">Use Autopipe to find a RNA-seq differential expression pipeline</div>
 				</div>
-				<p>When creating a new pipeline, Claude will use Autopipe to:</p>
+				<p>When creating a new pipeline, your AI app will use Autopipe to:</p>
 				<ol>
 					<li>Generate a <strong>Snakefile</strong> with the analysis workflow</li>
 					<li>Create a <strong>Dockerfile</strong> with all required tools</li>
@@ -138,11 +145,11 @@
 			<div class="step-number">4</div>
 			<div class="step-content">
 				<h2>Run Your Pipeline</h2>
-				<p>Once your pipeline is ready, ask Claude to execute it:</p>
+				<p>Once your pipeline is ready, ask your AI to execute it:</p>
 				<div class="example-chat">
 					<div class="user-msg">Build the Docker image and run a dry-run first, then execute on my samples in /data/wgs_samples</div>
 				</div>
-				<p class="hint">Claude will build the Docker image, run a dry-run to validate, and then execute the full pipeline on your server.</p>
+				<p class="hint">Autopipe will build the Docker image, run a dry-run to validate, and then execute the full pipeline on your server.</p>
 			</div>
 		</section>
 
@@ -241,6 +248,11 @@
 	.prerequisites h4 { font-size: 0.9rem; font-weight: 600; margin-bottom: 8px; color: #374151; }
 	.prerequisites ul { margin: 0; padding-left: 20px; }
 	.prerequisites li { font-size: 0.9rem; color: #4b5563; line-height: 1.8; }
+	.server-setup { margin-top: 12px; border-top: 1px solid #e5e7eb; padding-top: 12px; }
+	.server-setup summary { font-size: 0.85rem; font-weight: 500; color: #0f4c5c; cursor: pointer; user-select: none; }
+	.server-setup summary:hover { color: #0d3d4a; }
+	.server-setup-content { margin-top: 10px; }
+	.server-setup-content p { font-size: 0.85rem; color: #6b7280; margin-bottom: 8px; }
 	.step-content p { color: #4b5563; margin-bottom: 12px; }
 	.step-content ol { color: #4b5563; padding-left: 20px; margin-top: 8px; }
 	.step-content ol li { margin-bottom: 4px; }

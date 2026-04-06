@@ -8,7 +8,7 @@
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>`,
 			title: 'AI Pipeline Generation',
-			desc: 'Describe your analysis in natural language. Claude AI generates a complete Snakemake pipeline with Dockerfile, config, and metadata.'
+			desc: 'Describe your analysis in natural language. AI generates a complete Snakemake pipeline with Dockerfile, config, and metadata.'
 		},
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><path d="M9 3v18"/><path d="M14 9l3 3-3 3"/></svg>`,
@@ -31,7 +31,7 @@
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-6"/></svg>`,
 			title: 'IGV Genomics',
-			desc: 'Visualize BAM, BED, and GFF files with IGV.js. Supports reference genome selection for interactive genome browsing.'
+			desc: 'Visualize BAM, BED, GFF, and more with IGV.js. Supports reference genome selection for interactive genome browsing.'
 		},
 		{
 			icon: `<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`,
@@ -127,7 +127,7 @@
 <!-- Download CTA -->
 <section class="download">
 	<h2>Get Autopipe Desktop</h2>
-	<p>Download the desktop app to create, execute, and manage bioinformatics pipelines with Claude AI.</p>
+	<p>Download the desktop app to create, execute, and manage bioinformatics pipelines with AI.</p>
 	<div class="download-buttons">
 		<a href="/getting-started" class="btn-primary">Get Started</a>
 		<a href={hubUrl} target="_blank" rel="noopener" class="btn-secondary">Browse AutoPipeHub</a>
