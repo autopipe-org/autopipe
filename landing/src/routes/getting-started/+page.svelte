@@ -101,7 +101,7 @@
 					<li>In the <strong>SSH</strong> tab, enter your SSH host, username, and remote repository path for pipeline execution.
 						<p style="margin-top:4px;font-size:13px">AutoPipe has been tested with Linux SSH servers. For Windows-based servers, WSL (Windows Subsystem for Linux) is required.</p>
 					</li>
-					<li>In the <strong>GitHub</strong> tab, connect your GitHub account and set a repository name for storing pipelines.</li>
+					<li>In the <strong>GitHub</strong> tab, connect your GitHub account.</li>
 					<li>In the <strong>Setup</strong> tab, click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings and register the MCP server.</li>
 					<li>Restart your MCP-compatible AI app (e.g., Claude Desktop) to connect with AutoPipe.</li>
 				</ol>

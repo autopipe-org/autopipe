@@ -967,13 +967,6 @@ impl AutoPipeApp {
             ui.separator();
             ui.add_space(10.0);
 
-            ui.label("Pipeline Repository:");
-            ui.horizontal(|ui| {
-                ui.label(format!("{}/", &username));
-                ui.text_edit_singleline(&mut self.config.github_repo);
-            });
-            ui.label("Workflows will be committed to this repository.");
-
             // Resolve username if not loaded yet
             if self.github_username.is_none() {
                 if let Some(ref token) = self.config.github_token {
@@ -1046,11 +1039,6 @@ impl AutoPipeApp {
             ui.separator();
             ui.add_space(10.0);
 
-            ui.label("Pipeline Repository:");
-            ui.horizontal(|ui| {
-                ui.label("<username>/");
-                ui.text_edit_singleline(&mut self.config.github_repo);
-            });
         }
     }
 }

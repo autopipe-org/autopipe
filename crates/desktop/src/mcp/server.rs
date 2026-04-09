@@ -205,6 +205,8 @@ struct UploadWorkflowParams {
     files: Vec<String>,
     /// Git commit message (optional, auto-generated if omitted)
     commit_message: Option<String>,
+    /// GitHub repository name for this pipeline (e.g., "variant-calling-wgs"). Ask the user for this name before calling.
+    repo_name: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -727,7 +729,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub by committing files to the user's autopipe-pipelines repository. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub token error, tell the user to log in via the GitHub tab in the Autopipe desktop app and try again. No restart is needed.")]
+    #[tool(description = "Upload a pipeline to GitHub by creating a dedicated repository for this pipeline. Each pipeline gets its own repo with files at the root level. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub token error, tell the user to log in via the GitHub tab in the Autopipe desktop app and try again. No restart is needed. REPO NAME: Ask the user for a repository name before calling this tool.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -774,7 +776,7 @@ impl AutoPipeServer {
         let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
 
         let pipeline_name = &metadata.name;
-        let repo_name = &config.github_repo;
+        let repo_name = &params.repo_name;
 
         let client = reqwest::Client::new();
 
@@ -898,7 +900,7 @@ impl AutoPipeServer {
             .filter(|(_, content)| !content.is_empty())
             .map(|(name, content)| {
                 serde_json::json!({
-                    "path": format!("pipelines/{}/{}", pipeline_name, name),
+                    "path": name,
                     "mode": "100644",
                     "type": "blob",
                     "content": content
@@ -971,8 +973,8 @@ impl AutoPipeServer {
         }
 
         let github_url = format!(
-            "https://github.com/{}/{}/tree/main/pipelines/{}",
-            owner, repo_name, pipeline_name
+            "https://github.com/{}/{}",
+            owner, repo_name
         );
         let commit_url = format!(
             "https://github.com/{}/{}/commit/{}",
@@ -1019,46 +1021,32 @@ impl AutoPipeServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let my_author = github_user["login"].as_str().unwrap_or_default().to_string();
 
-        // Parse github_url to get owner/repo/path
-        // Expected format: https://github.com/{owner}/{repo}/tree/main/pipelines/{name}
-        let pipeline_name = {
-            let parts: Vec<&str> = params.github_url.trim_end_matches('/').split('/').collect();
-            // Find "pipelines" in path and take the next segment as pipeline name
-            let mut name = String::new();
-            for (i, part) in parts.iter().enumerate() {
-                if *part == "pipelines" {
-                    if let Some(n) = parts.get(i + 1) {
-                        name = n.to_string();
-                    }
-                    break;
-                }
+        // Parse github_url to get owner/repo
+        // Expected format: https://github.com/{owner}/{repo}
+        let (gh_owner, gh_repo, _, _) = match parse_github_url(&params.github_url) {
+            Some(parsed) => parsed,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid GitHub URL: {}", params.github_url
+                ))]));
             }
-            if name.is_empty() {
-                // Fallback: fetch metadata from GitHub
-                let owner = parts.get(3).unwrap_or(&"");
-                let repo = parts.get(4).unwrap_or(&"");
-                let subpath = parts.iter().skip(7).cloned().collect::<Vec<_>>().join("/");
-                let meta_path = if subpath.is_empty() {
-                    "ro-crate-metadata.json".to_string()
+        };
+
+        // Fetch pipeline name from ro-crate-metadata.json at repo root
+        let pipeline_name = {
+            if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, "ro-crate-metadata.json", Some(token.as_str())).await {
+                let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
+                if let Some(graph) = meta["@graph"].as_array() {
+                    graph.iter()
+                        .find(|n| n["@id"].as_str() == Some("./"))
+                        .and_then(|ds| ds["name"].as_str())
+                        .unwrap_or_default()
+                        .to_string()
                 } else {
-                    format!("{}/ro-crate-metadata.json", subpath)
-                };
-                if let Some(meta_str) = fetch_github_file(&client, owner, repo, &meta_path, &token).await {
-                    let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
-                    if let Some(graph) = meta["@graph"].as_array() {
-                        graph.iter()
-                            .find(|n| n["@id"].as_str() == Some("./"))
-                            .and_then(|ds| ds["name"].as_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    } else {
-                        meta["name"].as_str().unwrap_or_default().to_string()
-                    }
-                } else {
-                    String::new()
+                    meta["name"].as_str().unwrap_or_default().to_string()
                 }
             } else {
-                name
+                String::new()
             }
         };
 
@@ -1106,10 +1094,6 @@ impl AutoPipeServer {
         }
 
         // Determine version from GitHub tags and update metadata
-        let url_parts: Vec<&str> = params.github_url.trim_end_matches('/').split('/').collect();
-        let gh_owner = url_parts.get(3).unwrap_or(&"").to_string();
-        let gh_repo = url_parts.get(4).unwrap_or(&"").to_string();
-
         // Fetch existing tags for this pipeline: refs/tags/{pipeline_name}/v*
         let tag_prefix = pipeline_name.replace(' ', "-");
         let tags_url = format!(
@@ -1152,8 +1136,8 @@ impl AutoPipeServer {
         };
 
         // Update version in GitHub metadata before publishing
-        let meta_path = format!("pipelines/{}/ro-crate-metadata.json", pipeline_name);
-        if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, &meta_path, &token).await {
+        let meta_path = "ro-crate-metadata.json".to_string();
+        if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, &meta_path, Some(token.as_str())).await {
             let mut meta_json: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
 
             // Update version in both top-level and RO-Crate @graph
