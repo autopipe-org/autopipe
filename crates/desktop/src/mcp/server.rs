@@ -327,20 +327,20 @@ fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String
 }
 
 /// Fetch a single file from GitHub Contents API.
-async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, path: &str, token: &str) -> Option<String> {
+async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, path: &str, token: Option<&str>) -> Option<String> {
     let encoded_path = path.split('/').map(|seg| seg.replace(" ", "%20")).collect::<Vec<_>>().join("/");
     let url = format!(
         "https://api.github.com/repos/{}/{}/contents/{}",
         owner, repo, encoded_path
     );
-    let resp = client
+    let mut req = client
         .get(&url)
         .header("Accept", "application/vnd.github.raw")
-        .header("User-Agent", "autopipe-desktop")
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .ok()?;
+        .header("User-Agent", "autopipe-desktop");
+    if let Some(token) = token {
+        req = req.header("Authorization", format!("Bearer {}", token));
+    }
+    let resp = req.send().await.ok()?;
     if resp.status().is_success() {
         resp.text().await.ok()
     } else {
@@ -646,94 +646,84 @@ impl AutoPipeServer {
             }
         }
 
-        // 4. Fetch ALL files from GitHub using Trees API (recursive)
-        let client = reqwest::Client::new();
-        let mut written = Vec::new();
+        // 4. Clone repo via gh CLI on SSH server
         let config = self.config();
-        let github_token = match &config.github_token {
-            Some(t) if !t.is_empty() => t.clone(),
-            _ => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
-                )]));
-            }
+        let github_token: Option<String> = config.github_token
+            .as_ref()
+            .filter(|t| !t.is_empty())
+            .cloned();
+
+        let tmp_dir = format!("/tmp/autopipe-clone-{}", std::process::id());
+        let clone_cmd = match &github_token {
+            Some(token) => format!(
+                "GH_TOKEN='{}' gh repo clone {}/{} '{}'",
+                token, owner, repo, tmp_dir
+            ),
+            None => format!(
+                "gh repo clone {}/{} '{}'",
+                owner, repo, tmp_dir
+            ),
         };
 
-        // Get the tree for the pipeline directory
-        let tree_path = if path.is_empty() { String::new() } else { path.clone() };
-        let tree_url = format!(
-            "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
-            owner, repo
-        );
-        let tree_resp = client
-            .get(&tree_url)
-            .header("User-Agent", "autopipe-desktop")
-            .header("Authorization", format!("Bearer {}", github_token))
-            .send()
-            .await;
-
-        let file_entries: Vec<(String, String)> = match tree_resp {
-            Ok(resp) if resp.status().is_success() => {
-                let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                let prefix = if tree_path.is_empty() {
-                    String::new()
+        match self.ssh_run(&clone_cmd).await {
+            Ok((_, 0)) => {}
+            Ok((output, code)) => {
+                let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
+                let msg = if code == 128 || output.contains("Could not resolve") || output.contains("not found") {
+                    "This repository appears to be private or unavailable."
                 } else {
-                    format!("{}/", tree_path)
+                    &output
                 };
-                body["tree"]
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter_map(|entry| {
-                        let entry_path = entry["path"].as_str().unwrap_or_default();
-                        let entry_type = entry["type"].as_str().unwrap_or_default();
-                        if entry_type == "blob" && entry_path.starts_with(&prefix) {
-                            let relative = entry_path.strip_prefix(&prefix).unwrap_or(entry_path);
-                            Some((relative.to_string(), entry_path.to_string()))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to clone repository: {}", msg
+                ))]));
             }
-            _ => {
-                // Fallback: if Trees API fails, try known files
-                let fallback_names = ["Snakefile", "Dockerfile", "config.yaml", "ro-crate-metadata.json", "README.md"];
-                fallback_names
-                    .iter()
-                    .map(|f| {
-                        let full = if tree_path.is_empty() {
-                            f.to_string()
-                        } else {
-                            format!("{}/{}", tree_path, f)
-                        };
-                        (f.to_string(), full)
-                    })
-                    .collect()
-            }
-        };
-
-        for (relative_path, github_path) in &file_entries {
-            if let Some(content) = fetch_github_file(&client, &owner, &repo, github_path, &github_token).await {
-                let remote_path = format!("{}/{}", dir, relative_path);
-                // Create subdirectories if needed
-                if let Some(parent) = relative_path.rfind('/') {
-                    let subdir = format!("{}/{}", dir, &relative_path[..parent]);
-                    let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&subdir))).await;
-                }
-                if let Err(e) = self.ssh_write_file(&remote_path, &content).await {
-                    return Ok(CallToolResult::error(vec![Content::text(format!(
-                        "Failed to write {}: {}",
-                        relative_path, e
-                    ))]));
-                }
-                written.push(relative_path.as_str());
+            Err(e) => {
+                let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SSH error: {}", e
+                ))]));
             }
         }
 
+        // 5. Extract subpath if needed, then move to target dir
+        let source = if path.is_empty() {
+            tmp_dir.clone()
+        } else {
+            format!("{}/{}", tmp_dir, path)
+        };
+
+        // Move files to target directory
+        let move_result = self.ssh_run(&format!(
+            "cp -r '{}'/* '{}' 2>/dev/null; cp -r '{}'/.* '{}' 2>/dev/null; rm -rf '{}'",
+            shell_escape(&source), shell_escape(&dir),
+            shell_escape(&source), shell_escape(&dir),
+            shell_escape(&tmp_dir)
+        )).await;
+
+        if let Err(e) = move_result {
+            let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to move files: {}", e
+            ))]));
+        }
+
+        // 6. List downloaded files
+        let file_list = match self.ssh_run(&format!(
+            "find '{}' -type f -not -path '*/.git/*' | sed 's|{}/||'",
+            shell_escape(&dir), shell_escape(&dir)
+        )).await {
+            Ok((output, 0)) => output.trim().to_string(),
+            _ => "(unable to list files)".to_string(),
+        };
+
+        // Clean up .git directory
+        let _ = self.ssh_run(&format!("rm -rf '{}/.git'", shell_escape(&dir))).await;
+
+        let file_count = file_list.lines().count();
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Downloaded pipeline '{}' to {} (remote server)\nFiles ({}):\n{}",
-            pipeline.name, dir, written.len(), written.join("\n")
+            pipeline.name, dir, file_count, file_list
         ))]))
     }
 
