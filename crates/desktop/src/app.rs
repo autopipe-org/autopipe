@@ -194,12 +194,6 @@ impl AutoPipeApp {
                     }
                 }
 
-                // Check GitHub login
-                if self.config.github_token.is_none() {
-                    self.tab_errors[2] = true;
-                    errors.push("GitHub not linked");
-                }
-
                 if !errors.is_empty() {
                     self.save_ok = false;
                     self.status_message = errors.join(" · ");
