@@ -211,6 +211,10 @@ Every pipeline is a directory with 5 required files:
   - Output directory is mounted at `/output` at runtime
   - Do NOT use absolute host paths like `/home/user/data/...`
 
+## Pipeline Naming
+- Before generating ro-crate-metadata.json, ask the user what name they want for their pipeline.
+- This name will be displayed on the AutoPipe registry when published.
+
 ## ro-crate-metadata.json (RO-Crate Format)
 - Must follow RO-Crate 1.1 specification (JSON-LD)
 - Dataset node requires: `name`, `description`, `version`, `license`
