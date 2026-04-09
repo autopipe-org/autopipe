@@ -42,6 +42,12 @@ pub struct AppConfig {
     /// GitHub personal access token (obtained via device flow).
     #[serde(default)]
     pub github_token: Option<String>,
+    /// GitHub repository name for uploads (default: "autopipe-hub"). Used when per_pipeline_repo is false.
+    #[serde(default = "default_github_repo")]
+    pub github_repo: String,
+    /// When true, each pipeline gets its own GitHub repository. When false, all pipelines go into github_repo.
+    #[serde(default)]
+    pub per_pipeline_repo: bool,
     /// Local directory for viewer plugins (default: platform-specific data dir).
     #[serde(default = "default_plugins_dir")]
     pub plugins_dir: String,
@@ -57,6 +63,10 @@ fn default_registry_urls() -> Vec<String> {
     ]
 }
 
+
+fn default_github_repo() -> String {
+    "autopipe-hub".into()
+}
 
 fn default_plugins_dir() -> String {
     #[cfg(target_os = "windows")]
@@ -94,6 +104,8 @@ impl Default for AppConfig {
             input_dir: "pipelines_input".into(),
             mcp_registered: false,
             github_token: None,
+            github_repo: default_github_repo(),
+            per_pipeline_repo: false,
             plugins_dir: default_plugins_dir(),
         }
     }

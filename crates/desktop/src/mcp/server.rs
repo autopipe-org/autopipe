@@ -205,8 +205,9 @@ struct UploadWorkflowParams {
     files: Vec<String>,
     /// Git commit message (optional, auto-generated if omitted)
     commit_message: Option<String>,
-    /// GitHub repository name for this pipeline (e.g., "variant-calling-wgs"). Ask the user for this name before calling.
-    repo_name: String,
+    /// GitHub repository name. Required only when per-pipeline repo mode is enabled. Omit when using single repo mode.
+    #[serde(default)]
+    repo_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -534,13 +535,19 @@ impl AutoPipeServer {
     #[tool(description = "Get the configured workspace paths on the remote SSH server. Call this first to understand where pipelines and outputs are stored.")]
     async fn get_workspace_info(&self) -> Result<CallToolResult, ErrorData> {
         let config = self.config();
+        let upload_mode = if config.per_pipeline_repo {
+            "per-pipeline repo (ask user for repo name when uploading)".to_string()
+        } else {
+            format!("single repo ({})", config.github_repo)
+        };
         let info = format!(
             "Workspace Configuration:\n\
              - Base path (repo_path): {}\n\
              - Pipelines directory: {}\n\
              - Input directory: {}\n\
              - Output directory: {}\n\
-             - SSH: {}@{}:{}\n\n\
+             - SSH: {}@{}:{}\n\
+             - Upload mode: {}\n\n\
              When creating pipelines, save files under the Pipelines directory.\n\
              When preparing input data, use prepare_input to download from a URL or symlink a server path into the Input directory. Pass the returned path as input_dir to dry_run or execute_pipeline.\n\
              When executing pipelines, outputs are automatically stored under the Output directory.\n\
@@ -557,6 +564,7 @@ impl AutoPipeServer {
             config.ssh_user,
             config.ssh_host,
             config.ssh_port,
+            upload_mode,
         );
         Ok(CallToolResult::success(vec![Content::text(info)]))
     }
@@ -729,7 +737,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub by creating a dedicated repository for this pipeline. Each pipeline gets its own repo with files at the root level. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub token error, tell the user to log in via the GitHub tab in the Autopipe desktop app and try again. No restart is needed. REPO NAME: Ask the user for a repository name before calling this tool.")]
+    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub token error, tell the user to log in via the GitHub tab in the Autopipe desktop app and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -776,7 +784,18 @@ impl AutoPipeServer {
         let metadata_json_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
 
         let pipeline_name = &metadata.name;
-        let repo_name = &params.repo_name;
+        let (repo_name, path_prefix) = if config.per_pipeline_repo {
+            match &params.repo_name {
+                Some(name) => (name.clone(), String::new()),
+                None => {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "Per-pipeline repo mode is enabled but no repo_name provided. Ask the user for a repository name."
+                    )]));
+                }
+            }
+        } else {
+            (config.github_repo.clone(), format!("pipelines/{}/", pipeline_name))
+        };
 
         let client = reqwest::Client::new();
 
@@ -900,7 +919,7 @@ impl AutoPipeServer {
             .filter(|(_, content)| !content.is_empty())
             .map(|(name, content)| {
                 serde_json::json!({
-                    "path": name,
+                    "path": format!("{}{}", path_prefix, name),
                     "mode": "100644",
                     "type": "blob",
                     "content": content
@@ -972,10 +991,12 @@ impl AutoPipeServer {
             ))]));
         }
 
-        let github_url = format!(
-            "https://github.com/{}/{}",
-            owner, repo_name
-        );
+        let github_url = if config.per_pipeline_repo {
+            format!("https://github.com/{}/{}", owner, repo_name)
+        } else {
+            format!("https://github.com/{}/{}/tree/main/pipelines/{}",
+                owner, repo_name, pipeline_name)
+        };
         let commit_url = format!(
             "https://github.com/{}/{}/commit/{}",
             owner, repo_name, new_commit_sha
@@ -1022,8 +1043,9 @@ impl AutoPipeServer {
         let my_author = github_user["login"].as_str().unwrap_or_default().to_string();
 
         // Parse github_url to get owner/repo
-        // Expected format: https://github.com/{owner}/{repo}
-        let (gh_owner, gh_repo, _, _) = match parse_github_url(&params.github_url) {
+        let is_single_repo = params.github_url.contains("/pipelines/");
+
+        let (gh_owner, gh_repo, _, subpath) = match parse_github_url(&params.github_url) {
             Some(parsed) => parsed,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1032,8 +1054,22 @@ impl AutoPipeServer {
             }
         };
 
-        // Fetch pipeline name from ro-crate-metadata.json at repo root
-        let pipeline_name = {
+        // Fetch pipeline name
+        let pipeline_name = if is_single_repo {
+            // Single repo: extract name from URL path (pipelines/{name})
+            let parts: Vec<&str> = params.github_url.trim_end_matches('/').split('/').collect();
+            let mut name = String::new();
+            for (i, part) in parts.iter().enumerate() {
+                if *part == "pipelines" {
+                    if let Some(n) = parts.get(i + 1) {
+                        name = n.to_string();
+                    }
+                    break;
+                }
+            }
+            name
+        } else {
+            // Per-pipeline repo: read from ro-crate-metadata.json at root
             if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, "ro-crate-metadata.json", Some(token.as_str())).await {
                 let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
                 if let Some(graph) = meta["@graph"].as_array() {
@@ -1048,6 +1084,31 @@ impl AutoPipeServer {
             } else {
                 String::new()
             }
+        };
+
+        // If single repo and name extraction failed, fallback to metadata
+        let pipeline_name = if pipeline_name.is_empty() {
+            let meta_path = if is_single_repo {
+                format!("{}/ro-crate-metadata.json", subpath)
+            } else {
+                "ro-crate-metadata.json".to_string()
+            };
+            if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, &meta_path, Some(token.as_str())).await {
+                let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
+                if let Some(graph) = meta["@graph"].as_array() {
+                    graph.iter()
+                        .find(|n| n["@id"].as_str() == Some("./"))
+                        .and_then(|ds| ds["name"].as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    meta["name"].as_str().unwrap_or_default().to_string()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            pipeline_name
         };
 
         // Auto-detect duplicate: search registry for same name
@@ -1136,7 +1197,11 @@ impl AutoPipeServer {
         };
 
         // Update version in GitHub metadata before publishing
-        let meta_path = "ro-crate-metadata.json".to_string();
+        let meta_path = if is_single_repo {
+            format!("pipelines/{}/ro-crate-metadata.json", pipeline_name)
+        } else {
+            "ro-crate-metadata.json".to_string()
+        };
         if let Some(meta_str) = fetch_github_file(&client, &gh_owner, &gh_repo, &meta_path, Some(token.as_str())).await {
             let mut meta_json: serde_json::Value = serde_json::from_str(&meta_str).unwrap_or_default();
 

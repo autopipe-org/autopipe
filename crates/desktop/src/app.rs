@@ -967,6 +967,22 @@ impl AutoPipeApp {
             ui.separator();
             ui.add_space(10.0);
 
+            ui.checkbox(&mut self.config.per_pipeline_repo, "Create separate repository per pipeline");
+            ui.add_space(5.0);
+
+            if !self.config.per_pipeline_repo {
+                ui.label("Pipeline Repository:");
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}/", &username));
+                    ui.text_edit_singleline(&mut self.config.github_repo);
+                });
+                ui.label("Workflows will be committed to this repository.");
+            } else {
+                ui.label("AI will ask for a repository name when uploading.");
+            }
+
+            ui.add_space(10.0);
+
             // Resolve username if not loaded yet
             if self.github_username.is_none() {
                 if let Some(ref token) = self.config.github_token {
