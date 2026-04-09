@@ -35,3 +35,7 @@ The AutoPipe desktop app provides a graphical interface for configuring SSH conn
 ## Links
 
 AutoPipe is free and open source. Get started at **[autopipe.org](https://autopipe.org)**.
+
+## License
+
+This project is licensed under the BSD 3-Clause License - see the [LICENSE](LICENSE) file for details.
