@@ -96,12 +96,12 @@
 				<p>Open the Autopipe desktop app and fill in your settings across the tabs.</p>
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-				<img src="/Autopipe-guide.png" alt="Autopipe desktop app configuration" class="guide-img" onclick={() => showModal = true} />
+				<img src="/autopipe-guide.png" alt="Autopipe desktop app configuration" class="guide-img" onclick={() => showModal = true} />
 				<ol>
 					<li>In the <strong>SSH</strong> tab, enter your SSH host, username, and remote repository path for pipeline execution.
 						<p style="margin-top:4px;font-size:13px">AutoPipe has been tested with Linux SSH servers. For Windows-based servers, WSL (Windows Subsystem for Linux) is required.</p>
 					</li>
-					<li>In the <strong>GitHub</strong> tab, connect your GitHub account.</li>
+					<li>In the <strong>GitHub</strong> tab, connect your GitHub account. If you check <strong>"Create separate repository per pipeline"</strong>, each pipeline will be stored in its own repository. If unchecked, specify a shared repository name to store all pipelines in one repository.</li>
 					<li>In the <strong>Setup</strong> tab, click <strong>"Save and Register & Minimize to Tray"</strong> to save your settings and register the MCP server.</li>
 					<li>Restart your MCP-compatible AI app (e.g., Claude Desktop) to connect with AutoPipe.</li>
 				</ol>
@@ -112,7 +112,7 @@
 			<!-- svelte-ignore a11y_click_events_have_key_events -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div class="modal-overlay" onclick={() => showModal = false}>
-				<img src="/Autopipe-guide.png" alt="Autopipe desktop app configuration" class="modal-img" />
+				<img src="/autopipe-guide.png" alt="Autopipe desktop app configuration" class="modal-img" />
 			</div>
 		{/if}
 

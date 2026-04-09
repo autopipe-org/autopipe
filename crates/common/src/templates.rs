@@ -267,6 +267,11 @@ When the pipeline uses nextflow, nf-core, or any command that runs Docker inside
   For non-nextflow rules in the same Snakefile, keep using /input, /output, /pipeline as usual.
 - Keep everything in a single Snakefile + single Dockerfile as usual.
 
+## Upload Rules
+- When uploading a pipeline, ONLY include files that are part of the pipeline: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any scripts/ or other files YOU created for this pipeline.
+- NEVER include files or directories that were not created as part of the pipeline generation.
+- Before calling upload_workflow, verify the file list by checking what exists in the pipeline directory. Do NOT recursively include unrelated subdirectories.
+
 ## Safety Rules
 1. Pipelines use Snakemake format. Nextflow is allowed only inside Snakefile rules via `nextflow run`.
 2. Every pipeline must have a Dockerfile.

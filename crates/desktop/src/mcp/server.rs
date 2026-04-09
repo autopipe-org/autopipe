@@ -1168,11 +1168,35 @@ impl AutoPipeServer {
             .send()
             .await;
 
+        // Also check registry for existing version (fallback when repo has no tags)
+        let registry_version: Option<String> = if let Ok(search_resp) = client
+            .get(format!("{}/api/pipelines", base))
+            .query(&[("q", &pipeline_name)])
+            .send()
+            .await
+        {
+            search_resp.json::<Vec<serde_json::Value>>().await.ok()
+                .and_then(|results| results.iter()
+                    .find(|p| p["name"].as_str().map(|n| n == pipeline_name).unwrap_or(false))
+                    .and_then(|p| p["version"].as_str())
+                    .map(|v| v.to_string()))
+        } else { None };
+
         let version = match tags_resp {
             Ok(resp) if resp.status().is_success() => {
                 let tags: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
                 if tags.is_empty() {
-                    "1.0.0".to_string()
+                    // No tags: check registry version
+                    if let Some(ref reg_ver) = registry_version {
+                        let parts: Vec<u32> = reg_ver.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+                        if parts.len() == 3 {
+                            format!("{}.{}.{}", parts[0], parts[1], parts[2] + 1)
+                        } else {
+                            "1.0.0".to_string()
+                        }
+                    } else {
+                        "1.0.0".to_string()
+                    }
                 } else {
                     // Find the latest version from tags
                     let mut latest = (1u32, 0u32, 0u32);
