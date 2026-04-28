@@ -31,6 +31,8 @@ export async function validate() {
   }
   if (!manifest.version || typeof manifest.version !== 'string') {
     errors.push('"version" is required and must be a string');
+  } else if (!/^\d+\.\d+\.\d+$/.test(manifest.version)) {
+    errors.push(`"version" must follow semver format (e.g., 1.0.0), got: ${manifest.version}`);
   }
   if (!Array.isArray(manifest.extensions) || manifest.extensions.length === 0) {
     errors.push('"extensions" is required and must be a non-empty array');

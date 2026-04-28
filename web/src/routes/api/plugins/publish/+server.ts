@@ -2,6 +2,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import { db, schema } from '$lib/server/db.js';
 import { sanitizeErrorMessage } from '$lib/server/security.js';
+import { compareSemver } from '$lib/server/plugins.js';
 import { and, eq, sql } from 'drizzle-orm';
 
 const { userPlugins } = schema;
@@ -119,7 +120,69 @@ export const POST: RequestHandler = async ({ request }) => {
 			: [];
 		const newVersion = (metadata.version as string) || '1.0.0';
 
-		// 5. Create GitHub Release for version pinning
+		// forked_from: trust the value the client sends (no auto-detection)
+		const resolvedForkedFrom: number | null =
+			typeof forked_from === 'number' ? forked_from : null;
+
+		// Resolve action (UPDATE existing same-author row, or INSERT new) BEFORE
+		// touching GitHub. This way a version conflict 409 leaves no orphan release.
+		type ExistingRow = typeof userPlugins.$inferSelect;
+		let updateTarget: ExistingRow | null = null;
+
+		if (resolvedForkedFrom === null) {
+			// Same name + same author → UPDATE candidate
+			const sameAuthorMatch = await db
+				.select()
+				.from(userPlugins)
+				.where(and(eq(userPlugins.name, name), eq(userPlugins.author, author)))
+				.limit(1);
+
+			if (sameAuthorMatch.length > 0) {
+				updateTarget = sameAuthorMatch[0];
+				const previousVersion = updateTarget.version ?? '1.0.0';
+
+				// Enforce strict version increase for same-author updates
+				if (compareSemver(newVersion, previousVersion) <= 0) {
+					return json(
+						{
+							error: `Version v${newVersion} must be higher than the currently published v${previousVersion}`,
+							previous_version: previousVersion,
+							submitted_version: newVersion
+						},
+						{ status: 409 }
+					);
+				}
+			} else {
+				// Different author with same name → append " 2", " 3", ... suffix
+				const existingName = await db
+					.select({ pluginId: userPlugins.pluginId })
+					.from(userPlugins)
+					.where(eq(userPlugins.name, name))
+					.limit(1);
+				if (existingName.length > 0) {
+					let suffix = 2;
+					const MAX_DEDUP_ATTEMPTS = 100;
+					while (suffix <= MAX_DEDUP_ATTEMPTS) {
+						const candidate = `${metadata.name} ${suffix}`;
+						const dup = await db
+							.select({ pluginId: userPlugins.pluginId })
+							.from(userPlugins)
+							.where(eq(userPlugins.name, candidate))
+							.limit(1);
+						if (dup.length === 0) {
+							name = candidate;
+							break;
+						}
+						suffix++;
+					}
+					if (suffix > MAX_DEDUP_ATTEMPTS) {
+						return json({ error: 'Too many plugins with this name' }, { status: 409 });
+					}
+				}
+			}
+		}
+
+		// 6. Create GitHub Release for version pinning (only after version validation)
 		let releaseTag = `v${newVersion}`;
 		let releaseWarning: string | null = null;
 		try {
@@ -161,91 +224,50 @@ export const POST: RequestHandler = async ({ request }) => {
 			? `${baseGithubUrl}/tree/${releaseTag}`
 			: baseGithubUrl;
 
-		// forked_from: trust the value the client sends (no auto-detection)
-		const resolvedForkedFrom: number | null =
-			typeof forked_from === 'number' ? forked_from : null;
+		// 7. UPDATE existing same-author row, or INSERT new
+		if (updateTarget) {
+			const previousVersion = updateTarget.version ?? '1.0.0';
+			const existingHistory = Array.isArray(updateTarget.versionHistory)
+				? (updateTarget.versionHistory as Array<{ version: string; updated_at: string }>)
+				: [];
 
-		if (resolvedForkedFrom === null) {
-			// Check for existing plugin with same name AND same author → UPDATE
-			const sameAuthorMatch = await db
-				.select()
-				.from(userPlugins)
-				.where(and(eq(userPlugins.name, name), eq(userPlugins.author, author)))
-				.limit(1);
-
-			if (sameAuthorMatch.length > 0) {
-				const existing = sameAuthorMatch[0];
-				const previousVersion = existing.version ?? '1.0.0';
-				const existingHistory = Array.isArray(existing.versionHistory)
-					? (existing.versionHistory as Array<{ version: string; updated_at: string }>)
-					: [];
-
-				// Append previous version to history (with github_url for version pinning)
-				const updatedHistory = [
-					...existingHistory,
-					{
-						version: previousVersion,
-						updated_at: existing.updatedAt?.toISOString() ?? new Date().toISOString(),
-						github_url: existing.githubUrl
-					}
-				];
-
-				await db
-					.update(userPlugins)
-					.set({
-						version: newVersion,
-						description: (metadata.description as string) || '',
-						category: (metadata.category as string) || '',
-						extensions,
-						tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
-						githubUrl: versionedGithubUrl,
-						metadataJson: metadata,
-						readme: readme || '',
-						versionHistory: updatedHistory,
-						updatedAt: new Date()
-					})
-					.where(eq(userPlugins.pluginId, existing.pluginId));
-
-				return json(
-					{
-						plugin_id: existing.pluginId,
-						name,
-						author,
-						updated: true,
-						previous_version: previousVersion,
-						new_version: newVersion,
-						...(releaseWarning && { release_warning: releaseWarning })
-					},
-					{ status: 200 }
-				);
-			}
-
-			// Different author with same name → append suffix
-			const existingName = await db
-				.select({ pluginId: userPlugins.pluginId })
-				.from(userPlugins)
-				.where(eq(userPlugins.name, name))
-				.limit(1);
-			if (existingName.length > 0) {
-				let suffix = 2;
-				const MAX_DEDUP_ATTEMPTS = 100;
-				while (suffix <= MAX_DEDUP_ATTEMPTS) {
-					const candidate = `${metadata.name} ${suffix}`;
-					const dup = await db
-						.select({ pluginId: userPlugins.pluginId })
-						.from(userPlugins)
-						.where(eq(userPlugins.name, candidate))
-						.limit(1);
-					if (dup.length === 0) {
-						name = candidate;
-						break;
-					}
-					suffix++;
+			const updatedHistory = [
+				...existingHistory,
+				{
+					version: previousVersion,
+					updated_at: updateTarget.updatedAt?.toISOString() ?? new Date().toISOString(),
+					github_url: updateTarget.githubUrl
 				}
-				if (suffix > MAX_DEDUP_ATTEMPTS) {
-					return json({ error: 'Too many plugins with this name' }, { status: 409 });
-				}
-			}
+			];
+
+			await db
+				.update(userPlugins)
+				.set({
+					version: newVersion,
+					description: (metadata.description as string) || '',
+					category: (metadata.category as string) || '',
+					extensions,
+					tags: Array.isArray(metadata.tags) ? (metadata.tags as string[]) : [],
+					githubUrl: versionedGithubUrl,
+					metadataJson: metadata,
+					readme: readme || '',
+					versionHistory: updatedHistory,
+					updatedAt: new Date()
+				})
+				.where(eq(userPlugins.pluginId, updateTarget.pluginId));
+
+			return json(
+				{
+					plugin_id: updateTarget.pluginId,
+					name,
+					author,
+					updated: true,
+					previous_version: previousVersion,
+					new_version: newVersion,
+					...(releaseWarning && { release_warning: releaseWarning })
+				},
+				{ status: 200 }
+			);
 		}
 
 		// INSERT new plugin
