@@ -2,6 +2,9 @@
 	import { env } from '$env/dynamic/public';
 
 	const hubUrl = env.PUBLIC_HUB_URL;
+	const downloadUrl = env.PUBLIC_DOWNLOAD_URL ?? 'https://download.autopipe.org';
+	const version = env.PUBLIC_AUTOPIPE_VERSION ?? 'v0.0.11';
+	const versionBare = version.replace(/^v/, '');
 	let showModal = $state(false);
 	let menuOpen = $state(false);
 </script>
@@ -59,19 +62,19 @@
 						<h4>macOS</h4>
 						<p>Download the <code>.dmg</code> installer:</p>
 						<div class="btn-group">
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.11-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
-							<a href="https://download.autopipe.org/macOS/AutoPipe-v0.0.11-macos-x64.dmg" class="btn-sm">Download for Intel</a>
+							<a href="{downloadUrl}/macOS/AutoPipe-{version}-macos-arm64.dmg" class="btn-sm">Download for Apple Silicon</a>
+							<a href="{downloadUrl}/macOS/AutoPipe-{version}-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
 					</div>
 					<div class="option">
 						<h4>Windows</h4>
 						<p>Download the <code>.exe</code> installer:</p>
-						<a href="https://download.autopipe.org/windows/AutoPipe-Setup-v0.0.11.exe" class="btn-sm">Download for Windows</a>
+						<a href="{downloadUrl}/windows/AutoPipe-Setup-{version}.exe" class="btn-sm">Download for Windows</a>
 					</div>
 					<div class="option">
 						<h4>Linux</h4>
 						<p>Download the <code>.deb</code> package:</p>
-						<a href="https://download.autopipe.org/linux/autopipe_0.0.11_amd64.deb" class="btn-sm">Download for Linux</a>
+						<a href="{downloadUrl}/linux/autopipe_{versionBare}_amd64.deb" class="btn-sm">Download for Linux</a>
 					</div>
 				</div>
 				<div class="security-note">

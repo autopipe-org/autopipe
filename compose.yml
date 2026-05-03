@@ -1,14 +1,14 @@
 services:
   db:
     image: postgres:18-alpine
-    restart: unless-stopped
+    restart: always
     environment:
       POSTGRES_DB: autopipe_wf
       POSTGRES_USER: autopipe
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-autopipe123}"
     volumes:
       - pgdata:/var/lib/postgresql/18/docker
-      - ./autopipe_wf_dump.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./db-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U autopipe -d autopipe_wf"]
       interval: 10s
@@ -19,6 +19,7 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+    restart: always
     ports:
       - "8090:8090"
     environment:
@@ -38,11 +39,14 @@ services:
     build:
       context: ./landing
       dockerfile: Dockerfile
+    restart: always
     ports:
       - "8091:8091"
     environment:
       PORT: "8091"
       PUBLIC_HUB_URL: "${PUBLIC_HUB_URL:-https://hub.autopipe.org}"
+      PUBLIC_DOWNLOAD_URL: "${PUBLIC_DOWNLOAD_URL:-https://download.autopipe.org}"
+      PUBLIC_AUTOPIPE_VERSION: "${AUTOPIPE_VERSION:-v0.0.11}"
       POSTGRES_HOST: "db"
       POSTGRES_PORT: "5432"
       POSTGRES_DB: "${POSTGRES_DB:-autopipe_wf}"
@@ -51,6 +55,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+
+  download:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "8092:80"
+    volumes:
+      - ./autopipe-download:/usr/share/nginx/html:ro
 
 volumes:
   pgdata:
