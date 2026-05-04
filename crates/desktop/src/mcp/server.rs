@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 
 use crate::config::{AppConfig, DEFAULT_MCP_PORT, MCP_PORT_FALLBACK_RANGE};
+use crate::mcp::path_translate::windows_to_wsl;
 use crate::mcp::viewer;
 use crate::ssh;
 
@@ -632,8 +633,11 @@ impl AutoPipeServer {
         };
 
         // 3. Create directory on remote server
+        // Convert any Windows-style path the user may have typed (e.g.
+        // C:\Users\me\pipelines) into the WSL form (/mnt/c/Users/me/pipelines).
         let base_dir = params
             .output_dir
+            .map(|p| windows_to_wsl(&p))
             .unwrap_or_else(|| self.config().full_pipelines_dir());
         let dir = format!(
             "{}/{}",
@@ -786,7 +790,10 @@ impl AutoPipeServer {
             }
         };
 
-        let dir = &params.pipeline_dir;
+        // Translate Windows paths (e.g. C:\Users\me\pipeline) to WSL form so
+        // the SSH side can find the directory on a WSL backend.
+        let pipeline_dir_translated = windows_to_wsl(&params.pipeline_dir);
+        let dir = &pipeline_dir_translated;
 
         // Ensure ro-crate-metadata.json is always included
         let mut files = params.files;
@@ -1435,7 +1442,9 @@ impl AutoPipeServer {
         &self,
         Parameters(params): Parameters<PipelineDirParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let dir = &params.pipeline_dir;
+        // Translate Windows-style paths to WSL form before any SSH lookup.
+        let pipeline_dir_translated = windows_to_wsl(&params.pipeline_dir);
+        let dir = &pipeline_dir_translated;
         let mut errors: Vec<String> = Vec::new();
         let required = [
             "Snakefile",
@@ -1497,9 +1506,10 @@ impl AutoPipeServer {
         let log_path = format!("{}/build_{}.log", log_dir.trim_end_matches('/'), params.image_name);
 
         let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&log_dir))).await;
+        let pipeline_dir = windows_to_wsl(&params.pipeline_dir);
         let cmd = format!(
             "cd '{}' && nohup docker build -t '{}' . > '{}' 2>&1 &\necho $!",
-            shell_escape(&params.pipeline_dir), shell_escape(&params.image_name), shell_escape(&log_path)
+            shell_escape(&pipeline_dir), shell_escape(&params.image_name), shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -1590,9 +1600,12 @@ impl AutoPipeServer {
     ) -> Result<CallToolResult, ErrorData> {
         let cores = params.cores.unwrap_or(8);
         let dry_run_dir = format!("{}/.dry_run_tmp", self.config().full_output_dir().trim_end_matches('/'));
+        // Convert any Windows-style paths supplied by the user.
+        let input_dir = windows_to_wsl(&params.input_dir);
         let output_dir = params
             .output_dir
             .filter(|s| !s.is_empty())
+            .map(|s| windows_to_wsl(&s))
             .unwrap_or_else(|| dry_run_dir.clone());
 
         let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
@@ -1603,7 +1616,7 @@ impl AutoPipeServer {
             None => String::new(),
         };
 
-        let symlink_targets = self.resolve_symlink_targets(&params.input_dir).await;
+        let symlink_targets = self.resolve_symlink_targets(&input_dir).await;
         let symlink_mounts: String = symlink_targets.iter()
             .map(|t| format!(" -v '{}:{}:ro'", shell_escape(t), shell_escape(t)))
             .collect();
@@ -1612,7 +1625,7 @@ impl AutoPipeServer {
             let socket = self.resolve_docker_socket_mount().await;
             let mut host_mounts = format!(
                 " -v '{}:{}:ro' -v '{}:{}'",
-                shell_escape(&params.input_dir), shell_escape(&params.input_dir),
+                shell_escape(&input_dir), shell_escape(&input_dir),
                 shell_escape(&output_dir), shell_escape(&output_dir),
             );
             if let Some(ref dir) = pipeline_dir {
@@ -1624,7 +1637,7 @@ impl AutoPipeServer {
             }
             let env_vars = format!(
                 " -e HOST_INPUT_DIR='{}' -e HOST_OUTPUT_DIR='{}'{}",
-                shell_escape(&params.input_dir),
+                shell_escape(&input_dir),
                 shell_escape(&output_dir),
                 pipeline_dir.as_ref().map(|d| format!(" -e HOST_PIPELINE_DIR='{}'", shell_escape(d))).unwrap_or_default(),
             );
@@ -1635,7 +1648,7 @@ impl AutoPipeServer {
 
         let cmd = format!(
             "docker run --rm --entrypoint snakemake {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
+            pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
         let result = match self.ssh_run(&cmd).await {
@@ -1665,13 +1678,17 @@ impl AutoPipeServer {
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
 
+        // Translate any Windows-style paths the user provided into WSL form so
+        // the SSH backend (which is always Linux) can find them.
+        let input_dir = windows_to_wsl(&params.input_dir);
+
         let pipeline_dir = self.find_pipeline_dir(&params.image_name).await;
         let pipeline_mount = match &pipeline_dir {
             Some(dir) => format!("-v '{}:/pipeline'", shell_escape(dir)),
             None => String::new(),
         };
 
-        let symlink_targets = self.resolve_symlink_targets(&params.input_dir).await;
+        let symlink_targets = self.resolve_symlink_targets(&input_dir).await;
         let symlink_mounts: String = symlink_targets.iter()
             .map(|t| format!(" -v '{}:{}:ro'", shell_escape(t), shell_escape(t)))
             .collect();
@@ -1680,7 +1697,7 @@ impl AutoPipeServer {
             let socket = self.resolve_docker_socket_mount().await;
             let mut host_mounts = format!(
                 " -v '{}:{}:ro' -v '{}:{}'",
-                shell_escape(&params.input_dir), shell_escape(&params.input_dir),
+                shell_escape(&input_dir), shell_escape(&input_dir),
                 shell_escape(&output_dir), shell_escape(&output_dir),
             );
             if let Some(ref dir) = pipeline_dir {
@@ -1691,7 +1708,7 @@ impl AutoPipeServer {
             }
             let env_vars = format!(
                 " -e HOST_INPUT_DIR='{}' -e HOST_OUTPUT_DIR='{}'{}",
-                shell_escape(&params.input_dir),
+                shell_escape(&input_dir),
                 shell_escape(&output_dir),
                 pipeline_dir.as_ref().map(|d| format!(" -e HOST_PIPELINE_DIR='{}'", shell_escape(d))).unwrap_or_default(),
             );
@@ -1708,7 +1725,7 @@ impl AutoPipeServer {
             "run_name": params.run_name,
             "image_name": params.image_name,
             "container_name": container_name,
-            "input_dir": params.input_dir,
+            "input_dir": input_dir,
             "started_at": chrono::Utc::now().to_rfc3339()
         }).to_string();
         let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
@@ -1716,7 +1733,7 @@ impl AutoPipeServer {
 
         let cmd = format!(
             "nohup docker run --entrypoint snakemake --name '{}' {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            shell_escape(&container_name), pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&params.input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
+            shell_escape(&container_name), pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -2075,6 +2092,8 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         Parameters(params): Parameters<DeletePipelineParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let mut results = Vec::new();
+        // Translate any Windows-style path supplied by the user.
+        let pipeline_dir = windows_to_wsl(&params.pipeline_dir);
 
         // 1. Stop and remove any running/stopped containers, and Docker image (if image_name provided)
         if let Some(ref image_name) = params.image_name {
@@ -2103,17 +2122,17 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         }
 
         // 3. Delete pipeline directory — try rm -rf first, fall back to Docker
-        let check_dir = format!("test -d '{}' && echo 'exists'", shell_escape(&params.pipeline_dir));
+        let check_dir = format!("test -d '{}' && echo 'exists'", shell_escape(&pipeline_dir));
         match self.ssh_run(&check_dir).await {
             Ok((output, 0)) if output.trim().contains("exists") => {
-                let rm_cmd = format!("rm -rf '{}'", shell_escape(&params.pipeline_dir));
+                let rm_cmd = format!("rm -rf '{}'", shell_escape(&pipeline_dir));
                 match self.ssh_run(&rm_cmd).await {
                     Ok((_, 0)) => {
-                        results.push(format!("Removed pipeline directory: {}", params.pipeline_dir));
+                        results.push(format!("Removed pipeline directory: {}", pipeline_dir));
                     }
                     _ => {
                         // Fallback: mount parent dir and delete subdirectory via Docker
-                        let path = std::path::Path::new(&params.pipeline_dir);
+                        let path = std::path::Path::new(&pipeline_dir);
                         let parent = path.parent()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_else(|| "/".to_string());
@@ -2128,7 +2147,7 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
                         match self.ssh_run(&docker_rm).await {
                             Ok((_, 0)) => results.push(format!(
                                 "Removed pipeline directory via Docker (root-owned files): {}",
-                                params.pipeline_dir
+                                pipeline_dir
                             )),
                             Ok((err, _)) => results.push(format!(
                                 "Failed to remove pipeline directory: {}", err.trim()
@@ -2138,7 +2157,7 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
                     }
                 }
             }
-            _ => results.push(format!("Pipeline directory not found: {}", params.pipeline_dir)),
+            _ => results.push(format!("Pipeline directory not found: {}", pipeline_dir)),
         }
 
         Ok(CallToolResult::success(vec![Content::text(results.join("\n"))]))
@@ -2213,11 +2232,12 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         &self,
         Parameters(params): Parameters<ListFilesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        match self.ssh_run(&format!("ls -la '{}'", shell_escape(&params.path))).await {
+        let path = windows_to_wsl(&params.path);
+        match self.ssh_run(&format!("ls -la '{}'", shell_escape(&path))).await {
             Ok((output, 0)) => Ok(CallToolResult::success(vec![Content::text(output)])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Cannot list '{}': {}",
-                params.path,
+                path,
                 output.trim()
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
@@ -2229,11 +2249,12 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         &self,
         Parameters(params): Parameters<ReadFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        match self.ssh_read_file(&params.path).await {
+        let path = windows_to_wsl(&params.path);
+        match self.ssh_read_file(&path).await {
             Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Cannot read '{}': {}",
-                params.path, e
+                path, e
             ))])),
         }
     }
@@ -2243,7 +2264,10 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         &self,
         Parameters(params): Parameters<DownloadResultsParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let remote_path = params.remote_path.clone();
+        // remote_path comes from the user / chat and may be a Windows-style
+        // path; translate before using it on the (Linux) SSH backend. local_dir
+        // is a real Windows path on the desktop side, so leave it untouched.
+        let remote_path = windows_to_wsl(&params.remote_path);
 
         // Resolve local directory: user-specified or OS default Downloads folder
         let local_dir = match &params.local_dir {
@@ -2341,20 +2365,21 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         &self,
         Parameters(params): Parameters<WriteFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        if let Some(parent) = std::path::Path::new(&params.path).parent() {
+        let path = windows_to_wsl(&params.path);
+        if let Some(parent) = std::path::Path::new(&path).parent() {
             let _ = self
                 .ssh_run(&format!("mkdir -p '{}'", shell_escape(&parent.to_string_lossy())))
                 .await;
         }
 
-        match self.ssh_write_file(&params.path, &params.content).await {
+        match self.ssh_write_file(&path, &params.content).await {
             Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "File written: {}",
-                params.path
+                path
             ))])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Cannot write '{}': {}",
-                params.path, e
+                path, e
             ))])),
         }
     }
@@ -2595,11 +2620,15 @@ are removed via Docker to handle permission issues. relative_path is relative to
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        // Translate Windows paths to WSL form. The path is used by many SSH
+        // commands and embedded in error messages below; binding it to a local
+        // variable keeps every downstream usage consistent.
+        let path = windows_to_wsl(&params.path);
         // Check if path is a directory or file
         let is_dir = match self
             .ssh_run(&format!(
                 "test -d '{}' && echo DIR || echo FILE",
-                shell_escape(&params.path)
+                shell_escape(&path)
             ))
             .await
         {
@@ -2612,7 +2641,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
             match self
                 .ssh_run(&format!(
                     "find '{}' -maxdepth 1 -type f ! -name '.*' ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
-                    shell_escape(&params.path)
+                    shell_escape(&path)
                 ))
                 .await
             {
@@ -2625,7 +2654,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 Ok((output, _)) => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Cannot list directory '{}': {}",
-                        params.path,
+                        path,
                         clean_content(&output).trim()
                     ))]));
                 }
@@ -2636,17 +2665,17 @@ are removed via Docker to handle permission issues. relative_path is relative to
             match self
                 .ssh_run(&format!(
                     "test -f '{}' && echo OK || echo NOT_FOUND",
-                    shell_escape(&params.path)
+                    shell_escape(&path)
                 ))
                 .await
             {
                 Ok((output, 0)) if clean_content(&output).trim() == "OK" => {
-                    vec![params.path.clone()]
+                    vec![path.clone()]
                 }
                 _ => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "File not found: {}",
-                        params.path
+                        path
                     ))]));
                 }
             }
@@ -2681,7 +2710,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
             let filter_msg = params.filter.as_deref().unwrap_or("any");
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "No {} files found in '{}'",
-                filter_msg, params.path
+                filter_msg, path
             ))]));
         }
 
@@ -2774,7 +2803,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
         if files.is_empty() && remote_files.is_empty() {
             let msg = if errors.is_empty() {
-                format!("No viewable files found in '{}'", params.path)
+                format!("No viewable files found in '{}'", path)
             } else {
                 format!("Failed to load files:\n{}", errors.join("\n"))
             };
@@ -2789,7 +2818,10 @@ are removed via Docker to handle permission issues. relative_path is relative to
         let reference = if user_declined_ref {
             None
         } else {
-            params.reference.clone()
+            // The reference may be a bare filename (e.g. "ref.fasta") or a
+            // full path. windows_to_wsl is a no-op when there is no drive
+            // letter prefix, so it is safe to apply unconditionally.
+            params.reference.as_deref().map(windows_to_wsl)
         };
 
         // Check if any file requires a plugin that is not installed
@@ -2842,7 +2874,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         remote_files.retain(|(name, _, _, _)| has_viewer(name) || is_index_file(name));
         if files.is_empty() && remote_files.is_empty() {
             let msg = if errors.is_empty() {
-                format!("No viewable files found in '{}'", params.path)
+                format!("No viewable files found in '{}'", path)
             } else {
                 format!("No viewable files found:\n{}", errors.join("\n"))
             };

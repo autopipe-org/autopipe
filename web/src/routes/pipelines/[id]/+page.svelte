@@ -182,10 +182,10 @@
 		<div>
 			<h2>{p.name}</h2>
 			<p class="detail-desc">{p.description}</p>
-			{#if data.basedOnUrl}
-				<p class="based-on">Based on: <a href={data.basedOnUrl} target="_blank" rel="noopener">{data.basedOnUrl.includes('workflowhub.eu') ? 'WorkflowHub' : 'External'} workflow</a></p>
-			{:else if data.basedOn}
+			{#if data.basedOn}
 				<p class="based-on">Based on: <a href="/pipelines/{data.basedOn.pipeline_id}">{data.basedOn.name} v{data.basedOn.version}</a> by {data.basedOn.author}</p>
+			{:else if data.basedOnUrl}
+				<p class="based-on">Based on: <a href={data.basedOnUrl} target="_blank" rel="noopener">{data.basedOnUrl.includes('workflowhub.eu') ? 'WorkflowHub' : 'External'} workflow</a></p>
 			{/if}
 		</div>
 		<div style="display:flex;gap:8px">

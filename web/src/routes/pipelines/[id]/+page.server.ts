@@ -2,6 +2,39 @@ import { error, redirect } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import { getPipeline, deletePipeline, getVersionChain } from '$lib/server/pipelines.js';
 import { fetchGithubTree, GithubNotFoundError } from '$lib/server/github.js';
+import { env } from '$env/dynamic/public';
+
+/**
+ * Look up a pipeline by id and return a compact basedOn descriptor with the
+ * latest version's pipeline_id (so the link points to the most recent version
+ * in the chain).
+ */
+async function resolveBasedOn(parentId: number) {
+	const parent = await getPipeline(parentId);
+	if (!parent) return null;
+	const chain = await getVersionChain(parentId);
+	const versions = chain.filter(v => v.name === parent.name);
+	const latest = versions.length > 0 ? versions[0] : null;
+	return {
+		pipeline_id: latest?.pipeline_id ?? parent.pipeline_id!,
+		name: parent.name,
+		version: parent.version,
+		author: parent.author
+	};
+}
+
+/**
+ * Try to extract a Hub pipeline id from a URL. Returns the numeric id when
+ * the URL points to this Hub's /pipelines/<id> path, otherwise null.
+ */
+function extractInternalPipelineId(url: string): number | null {
+	const own = (env.PUBLIC_HUB_URL || 'https://hub.autopipe.org').replace(/\/+$/, '');
+	if (!url.startsWith(own + '/pipelines/')) return null;
+	const m = url.match(/\/pipelines\/(\d+)(?:\/|$|\?)/);
+	if (!m) return null;
+	const id = parseInt(m[1], 10);
+	return Number.isNaN(id) ? null : id;
+}
 
 export const load: PageServerLoad = async ({ params }) => {
 	const id = parseInt(params.id);
@@ -32,25 +65,33 @@ export const load: PageServerLoad = async ({ params }) => {
 		throw error(502, 'Failed to fetch pipeline files from GitHub');
 	}
 
-	// basedOn info
+	// Resolve basedOn from forked_from when the parent author differs.
 	let basedOn: { pipeline_id: number; name: string; version: string; author: string } | null =
 		null;
 	if (pipeline.forked_from) {
 		const parent = await getPipeline(pipeline.forked_from);
 		if (parent && parent.author !== pipeline.author) {
-			const parentChain = await getVersionChain(pipeline.forked_from);
-			const parentVersions = parentChain.filter(v => v.name === parent.name);
-			const latestParent = parentVersions.length > 0 ? parentVersions[0] : null;
-			basedOn = {
-				pipeline_id: latestParent?.pipeline_id ?? parent.pipeline_id!,
-				name: parent.name,
-				version: parent.version,
-				author: parent.author
-			};
+			basedOn = await resolveBasedOn(pipeline.forked_from);
 		}
 	}
 
-	const basedOnUrl: string | null = pipeline.based_on_url ?? null;
+	// If basedOn is still null but based_on_url points to our own Hub, treat
+	// it as an internal lineage and link to the parent pipeline page. We do
+	// this regardless of author so users see the lineage they recorded via
+	// download_pipeline → publish_workflow.
+	let basedOnUrl: string | null = pipeline.based_on_url ?? null;
+	if (!basedOn && basedOnUrl) {
+		const internalId = extractInternalPipelineId(basedOnUrl);
+		if (internalId !== null && internalId !== pipeline.pipeline_id) {
+			const internal = await resolveBasedOn(internalId);
+			if (internal) {
+				basedOn = internal;
+				// Internal lineage is now represented by `basedOn` — clear the raw
+				// URL so the template doesn't render a duplicate "External" link.
+				basedOnUrl = null;
+			}
+		}
+	}
 
 	return { pipeline, fileTree, githubUrl, versionChain, basedOn, basedOnUrl };
 };
