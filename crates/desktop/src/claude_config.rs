@@ -20,8 +20,8 @@
 //! wants to register everywhere regardless.
 //!
 //! Other MCP-compatible clients (Claude Code, Cursor, VS Code, Continue.dev,
-//! ...) are not auto-registered. Users of those apps can paste the JSON
-//! snippet produced by `mcp_config_snippet` into their config manually.
+//! ...) are not auto-registered. Users of those apps must add AutoPipe to
+//! their MCP config manually using each client's required format.
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -390,19 +390,3 @@ pub fn status_all() -> Vec<(McpClient, bool)> {
         .collect()
 }
 
-/// JSON snippet for any other MCP-compatible client the user wants to
-/// register manually. Uses the most widely supported `type: "http"` form.
-pub fn mcp_config_snippet(url: &str, token: &str) -> String {
-    let snippet = json!({
-        "mcpServers": {
-            "autopipe": {
-                "type": "http",
-                "url": url,
-                "headers": {
-                    "Authorization": format!("Bearer {}", token)
-                }
-            }
-        }
-    });
-    serde_json::to_string_pretty(&snippet).unwrap_or_default()
-}

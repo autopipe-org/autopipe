@@ -56,8 +56,6 @@ pub struct AutoPipeApp {
     config: AppConfig,
     active_tab: Tab,
     ssh_password_input: String,
-    ssh_key_path_input: String,
-    ssh_auth_type: usize, // 0=Agent, 1=Key, 2=Password
     status_message: String,
     save_ok: bool,
     tab_errors: [bool; 3], // [Connection, SSH, GitHub]
@@ -118,10 +116,12 @@ impl AutoPipeApp {
 
         // Auto-install default plugins from registry on first launch
         auto_install_default_plugins(&config.registry_url, &config.full_plugins_dir());
-        let (ssh_auth_type, ssh_key_path_input, ssh_password_input) = match &config.ssh_auth {
-            SshAuth::Password { password } => (0, String::new(), password.clone()),
-            SshAuth::Key { key_path } => (1, key_path.clone(), String::new()),
-            SshAuth::Agent => (0, String::new(), String::new()), // fallback to Password
+        // Always use password auth in the UI. Existing configs that stored
+        // Key or Agent auth fall back to an empty password — the user can
+        // re-enter their password.
+        let ssh_password_input = match &config.ssh_auth {
+            SshAuth::Password { password } => password.clone(),
+            _ => String::new(),
         };
 
         // If token exists, try to resolve GitHub username
@@ -138,8 +138,6 @@ impl AutoPipeApp {
             config,
             active_tab: Tab::Setup,
             ssh_password_input,
-            ssh_key_path_input,
-            ssh_auth_type,
             status_message: String::new(),
             save_ok: false,
             tab_errors: [false; 3],
@@ -226,16 +224,8 @@ impl AutoPipeApp {
     }
 
     fn save_config(&mut self) {
-        self.config.ssh_auth = match self.ssh_auth_type {
-            0 => SshAuth::Password {
-                password: self.ssh_password_input.clone(),
-            },
-            1 => SshAuth::Key {
-                key_path: self.ssh_key_path_input.clone(),
-            },
-            _ => SshAuth::Password {
-                password: self.ssh_password_input.clone(),
-            },
+        self.config.ssh_auth = SshAuth::Password {
+            password: self.ssh_password_input.clone(),
         };
 
         match self.config.save() {
@@ -615,27 +605,10 @@ impl AutoPipeApp {
         });
 
         ui.add_space(5.0);
-        ui.label("Authentication:");
         ui.horizontal(|ui| {
-            ui.radio_value(&mut self.ssh_auth_type, 0, "Password");
-            ui.radio_value(&mut self.ssh_auth_type, 1, "Key File");
+            ui.label("Password:");
+            ui.add(egui::TextEdit::singleline(&mut self.ssh_password_input).password(true));
         });
-
-        match self.ssh_auth_type {
-            0 => {
-                ui.horizontal(|ui| {
-                    ui.label("Password:");
-                    ui.add(egui::TextEdit::singleline(&mut self.ssh_password_input).password(true));
-                });
-            }
-            1 => {
-                ui.horizontal(|ui| {
-                    ui.label("Key Path:");
-                    ui.text_edit_singleline(&mut self.ssh_key_path_input);
-                });
-            }
-            _ => {}
-        }
 
         ui.add_space(5.0);
         ui.horizontal(|ui| {
@@ -1136,18 +1109,6 @@ impl AutoPipeApp {
                     Err(e) => {
                         self.mcp_status_msg = format!("Failed to rotate token: {}", e);
                     }
-                }
-            }
-        });
-
-        // Copy snippet for other MCP clients ------------------------------
-        ui.horizontal(|ui| {
-            ui.label("  Other clients (Cursor, VS Code, Gemini CLI, Codex CLI, ...):");
-            if let Some(i) = &info {
-                if ui.button("Copy MCP config snippet").clicked() {
-                    let snippet = claude_config::mcp_config_snippet(&i.url, &i.token);
-                    ui.ctx().copy_text(snippet);
-                    self.mcp_status_msg = "MCP config snippet copied to clipboard.".into();
                 }
             }
         });
