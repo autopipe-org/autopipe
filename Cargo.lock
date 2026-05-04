@@ -469,6 +469,7 @@ dependencies = [
  "ssh2",
  "tokio",
  "tokio-util",
+ "toml 0.8.2",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
