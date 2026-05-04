@@ -408,26 +408,35 @@ impl eframe::App for AutoPipeApp {
                     match self.mcp_info() {
                         Some(info) => {
                             let results = claude_config::register_all(&info.url, &info.token);
-                            let mut ok_names: Vec<&str> = Vec::new();
-                            let mut any_err = false;
+                            let mut ok_names: Vec<String> = Vec::new();
+                            let mut errors: Vec<String> = Vec::new();
                             for (client, result) in &results {
                                 match result {
-                                    Ok(_) => ok_names.push(client.name()),
-                                    Err(_) => any_err = true,
+                                    Ok(_) => ok_names.push(client.name().to_string()),
+                                    Err(e) => errors.push(format!("{}: {}", client.name(), e)),
                                 }
                             }
                             if !ok_names.is_empty() {
                                 self.config.mcp_registered = true;
                                 let _ = self.config.save();
-                                self.status_message = format!(
-                                    "MCP registered in {}. Restart your AI app to load tools.",
-                                    ok_names.join(", ")
-                                );
+                                self.status_message = if errors.is_empty() {
+                                    format!(
+                                        "MCP registered in {}. Restart your AI app to load tools.",
+                                        ok_names.join(", ")
+                                    )
+                                } else {
+                                    format!(
+                                        "Registered: {}. Skipped: {}",
+                                        ok_names.join(", "),
+                                        errors.join(" | ")
+                                    )
+                                };
                                 self.should_minimize = true;
-                            }
-                            if any_err && ok_names.is_empty() {
+                            } else if !errors.is_empty() {
+                                self.status_message = format!("Failed: {}", errors.join(" | "));
+                            } else {
                                 self.status_message =
-                                    "Failed to register MCP in any client.".into();
+                                    "No MCP-compatible AI clients detected.".into();
                             }
                         }
                         None => {
@@ -999,21 +1008,33 @@ impl AutoPipeApp {
             match self.mcp_info() {
                 Some(info) => {
                     let results = claude_config::register_all(&info.url, &info.token);
-                    let mut ok_names: Vec<&str> = Vec::new();
+                    let mut ok_names: Vec<String> = Vec::new();
+                    let mut errors: Vec<String> = Vec::new();
                     for (client, result) in &results {
-                        if result.is_ok() {
-                            ok_names.push(client.name());
+                        match result {
+                            Ok(_) => ok_names.push(client.name().to_string()),
+                            Err(e) => errors.push(format!("{}: {}", client.name(), e)),
                         }
                     }
                     if !ok_names.is_empty() {
                         self.config.mcp_registered = true;
                         let _ = self.config.save();
-                        self.status_message = format!(
-                            "Registered in {}. Restart your AI app to load tools.",
-                            ok_names.join(", ")
-                        );
+                        self.status_message = if errors.is_empty() {
+                            format!(
+                                "Registered in {}. Restart your AI app to load tools.",
+                                ok_names.join(", ")
+                            )
+                        } else {
+                            format!(
+                                "Registered: {}. Skipped: {}",
+                                ok_names.join(", "),
+                                errors.join(" | ")
+                            )
+                        };
+                    } else if !errors.is_empty() {
+                        self.status_message = format!("Failed: {}", errors.join(" | "));
                     } else {
-                        self.status_message = "Failed to register in any client.".into();
+                        self.status_message = "No MCP-compatible AI clients detected.".into();
                     }
                 }
                 None => {

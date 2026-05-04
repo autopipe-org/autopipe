@@ -3,10 +3,15 @@
 //! Each client has its own config file location and entry format. We dispatch
 //! per-client. Currently auto-registered clients:
 //!
-//! - Claude Desktop (JSON, via `mcp-remote` stdio bridge — Claude Desktop's
-//!   JSON config does not natively accept `type: "http"`)
+//! - Claude Desktop (JSON, **stdio** — Claude Desktop's JSON config does
+//!   not accept HTTP/SSE entries with localhost URLs, so we register the
+//!   autopipe binary itself and let Claude Desktop spawn it as a child in
+//!   `--mcp-server` mode)
 //! - Gemini CLI (JSON, **`httpUrl` + headers** — note: not `url`)
-//! - Codex CLI (TOML, `url + bearer_token`)
+//! - Codex CLI (TOML, **stdio** — Codex CLI rejects raw `bearer_token` for
+//!   streamable_http, only accepting `bearer_token_env_var`. To avoid the
+//!   environment-variable setup burden, we use stdio with `command + args`
+//!   the same way as Claude Desktop)
 //!
 //! Detection: each client has an `is_installed()` heuristic that checks for
 //! a config-dir or config-file marker. `register_all` only registers in
@@ -20,6 +25,14 @@
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
+
+/// Absolute path of the currently-running autopipe binary. Used as the
+/// `command` for clients (notably Claude Desktop) whose JSON config only
+/// accepts stdio entries — those clients spawn this same binary in
+/// `--mcp-server` mode as a child process.
+fn autopipe_binary_path() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("autopipe"))
+}
 
 /// Supported MCP client applications for auto-registration.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -132,18 +145,18 @@ pub fn codex_cli_config_path() -> PathBuf {
 
 // ── Entry generators (per-client format) ─────────────────────────────────
 
-/// Claude Desktop — uses npx mcp-remote as a stdio→HTTP bridge because
-/// `claude_desktop_config.json` does not accept `type: "http"` natively.
-fn claude_desktop_entry(url: &str, token: &str) -> Value {
+/// Claude Desktop — stdio entry pointing at the autopipe binary itself,
+/// invoked in `--mcp-server` mode. No external dependency (Node.js, npx,
+/// mcp-remote) required. Claude Desktop spawns autopipe as a child
+/// process and talks to it over stdin/stdout.
+///
+/// `_url` and `_token` are unused for stdio; they remain in the signature
+/// so all client entry generators share the same shape.
+fn claude_desktop_entry(_url: &str, _token: &str) -> Value {
+    let exe = autopipe_binary_path();
     json!({
-        "command": "npx",
-        "args": [
-            "-y",
-            "mcp-remote",
-            url,
-            "--header",
-            format!("Authorization: Bearer {}", token)
-        ]
+        "command": exe.to_string_lossy(),
+        "args": ["--mcp-server"]
     })
 }
 
@@ -226,7 +239,12 @@ fn is_registered_json(file_path: &PathBuf) -> bool {
 
 // ── TOML-shape registration (Codex CLI) ──────────────────────────────────
 
-fn register_codex_toml(path: &PathBuf, url: &str, token: &str) -> std::io::Result<()> {
+/// Codex CLI uses TOML and supports stdio entries with `command` + `args`.
+/// We register the autopipe binary itself in `--mcp-server` mode, the same
+/// way Claude Desktop does it. This avoids Codex's `bearer_token` validation
+/// (raw token rejection) and the alternative `bearer_token_env_var` (which
+/// requires the user to maintain a shell environment variable).
+fn register_codex_toml(path: &PathBuf) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -249,9 +267,16 @@ fn register_codex_toml(path: &PathBuf, url: &str, token: &str) -> std::io::Resul
         )
     })?;
 
+    let exe = autopipe_binary_path();
     let mut autopipe = toml::Table::new();
-    autopipe.insert("url".into(), toml::Value::String(url.into()));
-    autopipe.insert("bearer_token".into(), toml::Value::String(token.into()));
+    autopipe.insert(
+        "command".into(),
+        toml::Value::String(exe.to_string_lossy().into_owned()),
+    );
+    autopipe.insert(
+        "args".into(),
+        toml::Value::Array(vec![toml::Value::String("--mcp-server".into())]),
+    );
 
     servers.insert("autopipe".into(), toml::Value::Table(autopipe));
 
@@ -297,7 +322,7 @@ pub fn register_mcp_server(client: McpClient, url: &str, token: &str) -> std::io
     match client {
         McpClient::ClaudeDesktop => register_json_at(&path, claude_desktop_entry(url, token)),
         McpClient::GeminiCli => register_json_at(&path, gemini_cli_entry(url, token)),
-        McpClient::CodexCli => register_codex_toml(&path, url, token),
+        McpClient::CodexCli => register_codex_toml(&path),
     }
 }
 

@@ -103,7 +103,17 @@ fn main() {
         ensure_console();
     }
 
-    if args.iter().any(|a| a == "--register") {
+    if args.iter().any(|a| a == "--mcp-server") {
+        // stdio MCP server mode — spawned by Claude Desktop (or any client
+        // whose JSON config only accepts `command + args` stdio entries).
+        // Logs to file because stderr is captured by the MCP transport.
+        init_file_logging();
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        if let Err(e) = rt.block_on(mcp::server::run_mcp_stdio_server()) {
+            eprintln!("MCP stdio server error: {}", e);
+            std::process::exit(1);
+        }
+    } else if args.iter().any(|a| a == "--register") {
         // Auto-register MCP server in all supported clients using the last
         // known URL + token. If the desktop app has never started, we use the
         // configured (default) port; the next GUI launch will update clients
@@ -183,7 +193,8 @@ fn main() {
             println!();
             println!("Usage:");
             println!("  desktop                 Launch the GUI/tray app (recommended)");
-            println!("  desktop --register      Register in Claude Desktop / Claude Code");
+            println!("  desktop --mcp-server    Run as stdio MCP server (spawned by clients like Claude Desktop)");
+            println!("  desktop --register      Register in supported AI clients");
             println!("  desktop --unregister    Unregister from supported clients");
             println!("  desktop --status        Show registration status and current URL");
             println!();

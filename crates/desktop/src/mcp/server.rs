@@ -4,7 +4,7 @@ use common::templates;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -3268,6 +3268,24 @@ impl ServerHandler for AutoPipeServer {
             ..Default::default()
         }
     }
+}
+
+// ── stdio transport ──────────────────────────────────────────────────────
+//
+// Used by clients whose JSON config only accepts stdio entries (notably
+// Claude Desktop). The client spawns the autopipe binary as a child
+// process and communicates over its stdin/stdout. Each spawn gets a fresh
+// AutoPipeServer that loads config and SSH state independently — it does
+// not share memory with the GUI tray app's HTTP server.
+
+/// Run the MCP server in stdio mode. Returns when the client closes the
+/// connection.
+pub async fn run_mcp_stdio_server() -> Result<(), Box<dyn std::error::Error>> {
+    let config = AppConfig::load();
+    let server = AutoPipeServer::new(config);
+    let service = server.serve(rmcp::transport::stdio()).await?;
+    service.waiting().await?;
+    Ok(())
 }
 
 // ── HTTP transport ───────────────────────────────────────────────────────
