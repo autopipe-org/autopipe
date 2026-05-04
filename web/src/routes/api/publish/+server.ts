@@ -130,20 +130,23 @@ export const POST: RequestHandler = async ({ request }) => {
 			typeof forked_from === 'number' ? forked_from : null;
 
 		if (resolvedForkedFrom !== null) {
-			// forked_from specified → check original author
+			// forked_from specified → record lineage to the parent pipeline.
+			// Use the name from ro-crate-metadata.json as-is. We do NOT overwrite
+			// it with the parent's name even when the author matches: the user's
+			// rename intent (different name in ro-crate) must be respected, and
+			// silently overwriting causes duplicate registrations under the
+			// wrong name.
 			const [parent] = await db
 				.select({ author: userPipelines.author, name: userPipelines.name })
 				.from(userPipelines)
 				.where(eq(userPipelines.pipelineId, resolvedForkedFrom))
 				.limit(1);
 
-			if (parent && parent.author === author) {
-				// Same author → version upgrade: use the original pipeline's name
-				name = parent.name;
-			} else {
+			if (parent && parent.author !== author) {
 				// Different author → fork: independent version chain starting at 1.0.0
 				version = '1.0.0';
 			}
+			// else: same author keeps whatever version the metadata declared.
 		} else {
 			// No forked_from → name deduplication if same name exists
 			const existing = await db
