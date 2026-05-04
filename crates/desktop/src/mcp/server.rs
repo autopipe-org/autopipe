@@ -732,6 +732,38 @@ impl AutoPipeServer {
         // Clean up .git directory
         let _ = self.ssh_run(&format!("rm -rf '{}/.git'", shell_escape(&dir))).await;
 
+        // Inject isBasedOn into ro-crate-metadata.json so that a later
+        // publish_workflow can automatically set forked_from = source pipeline_id.
+        // This records the lineage to the source Hub pipeline. Users who want
+        // to break the lineage can manually remove the isBasedOn field from
+        // ro-crate-metadata.json before publishing.
+        //
+        // Implemented in Rust + serde_json so we don't depend on python3, jq,
+        // or any other tool being installed on the user's host (e.g. macOS
+        // ships without python3 by default).
+        let meta_path = format!("{}/ro-crate-metadata.json", dir);
+        let hub_url = format!(
+            "{}/pipelines/{}",
+            self.config().registry_url.trim_end_matches('/'),
+            params.pipeline_id
+        );
+        if let Ok(meta_raw) = self.ssh_read_file(&meta_path).await {
+            let cleaned = clean_content(&meta_raw);
+            if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&cleaned) {
+                if let Some(graph) = data.get_mut("@graph").and_then(|g| g.as_array_mut()) {
+                    for node in graph.iter_mut() {
+                        if node.get("@id").and_then(|v| v.as_str()) == Some("./") {
+                            node["isBasedOn"] = serde_json::json!({ "@id": hub_url });
+                            break;
+                        }
+                    }
+                }
+                if let Ok(updated) = serde_json::to_string_pretty(&data) {
+                    let _ = self.ssh_write_file(&meta_path, &updated).await;
+                }
+            }
+        }
+
         let file_count = file_list.lines().count();
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Downloaded pipeline '{}' to {} (remote server)\nFiles ({}):\n{}",
@@ -1014,7 +1046,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (Korean): '이 파이프라인은 <원본 이름>(#<원본 id>) 파이프라인을 다운로드해서 수정한 것으로 보이는데, 맞나요? 맞으면 출처(forked_from)를 자동으로 기록합니다. 아니면 출처를 끊고 독립 파이프라인으로 등록합니다.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,

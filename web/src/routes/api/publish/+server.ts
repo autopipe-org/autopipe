@@ -125,9 +125,28 @@ export const POST: RequestHandler = async ({ request }) => {
 		let name = metadata.name as string;
 		let version = (metadata.version as string) || '1.0.0';
 
-		// forked_from: trust the value Claude sends (no auto-detection)
+		// Auto-derive forked_from from based_on_url when it points to our own
+		// Hub. download_pipeline injects an isBasedOn entry into the ro-crate
+		// pointing to the source Hub URL, so users get lineage tracking even
+		// when they rename or modify the pipeline before publishing.
+		let autoForkedFrom: number | null = null;
+		if (metadata.based_on_url && typeof metadata.based_on_url === 'string') {
+			const url = metadata.based_on_url as string;
+			const own = (process.env.PUBLIC_HUB_URL || 'https://hub.autopipe.org').replace(/\/+$/, '');
+			if (url.startsWith(own + '/pipelines/')) {
+				const m = url.match(/\/pipelines\/(\d+)(?:\/|$|\?)/);
+				if (m) {
+					const parsed = parseInt(m[1], 10);
+					if (!Number.isNaN(parsed)) autoForkedFrom = parsed;
+				}
+			}
+		}
+
+		// Explicit forked_from from caller wins over auto-detection. Pass
+		// forked_from = null explicitly to break the lineage suggested by
+		// based_on_url.
 		const resolvedForkedFrom: number | null =
-			typeof forked_from === 'number' ? forked_from : null;
+			typeof forked_from === 'number' ? forked_from : autoForkedFrom;
 
 		if (resolvedForkedFrom !== null) {
 			// forked_from specified → record lineage to the parent pipeline.
