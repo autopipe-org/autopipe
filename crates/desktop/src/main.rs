@@ -86,6 +86,14 @@ fn ensure_console() {
     }
 }
 
+/// Build the MCP URL using the last known actual port (preferred) or the
+/// configured preferred port. CLI commands rely on this when the GUI daemon
+/// is not running in the same process.
+fn cli_mcp_url(cfg: &config::AppConfig) -> String {
+    let port = cfg.mcp_actual_port.unwrap_or(cfg.mcp_port);
+    format!("http://127.0.0.1:{}/mcp", port)
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -95,23 +103,30 @@ fn main() {
         ensure_console();
     }
 
-    if args.iter().any(|a| a == "--mcp-server") {
-        // MCP server mode: log to file (stderr is used by MCP transport)
-        init_file_logging();
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        if let Err(e) = rt.block_on(mcp::server::run_mcp_server()) {
-            eprintln!("MCP server error: {}", e);
-            std::process::exit(1);
-        }
-    } else if args.iter().any(|a| a == "--register") {
-        // Auto-register MCP server in all supported clients
-        let config_path = config::AppConfig::config_path();
-        let results = claude_config::register_all(&config_path.to_string_lossy());
+    if args.iter().any(|a| a == "--register") {
+        // Auto-register MCP server in all supported clients using the last
+        // known URL + token. If the desktop app has never started, we use the
+        // configured (default) port; the next GUI launch will update clients
+        // automatically if it has to fall back to a different port.
+        let cfg = config::AppConfig::load();
+        let url = cli_mcp_url(&cfg);
+        let token = match config::load_or_create_mcp_token() {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("Failed to load MCP token: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let results = claude_config::register_all(&url, &token);
         let mut any_ok = false;
         for (client, result) in &results {
             match result {
                 Ok(_) => {
-                    println!("Registered in {}: {}", client.name(), client.config_path().display());
+                    println!(
+                        "Registered in {}: {}",
+                        client.name(),
+                        client.config_path().display()
+                    );
                     any_ok = true;
                 }
                 Err(e) => {
@@ -121,12 +136,12 @@ fn main() {
         }
         if any_ok {
             println!();
-            println!("Restart your AI app to load autopipe tools.");
+            println!("URL:   {}", url);
+            println!("Make sure the AutoPipe app is running, then restart your AI app.");
         } else {
             std::process::exit(1);
         }
     } else if args.iter().any(|a| a == "--unregister") {
-        // Unregister MCP server from all supported clients
         let results = claude_config::unregister_all();
         for (client, result) in &results {
             match result {
@@ -135,15 +150,24 @@ fn main() {
             }
         }
     } else if args.iter().any(|a| a == "--status") {
-        // Check registration status for all clients
+        let cfg = config::AppConfig::load();
         println!("MCP Registration Status:");
         for (client, registered) in claude_config::status_all() {
             let status = if registered { "registered" } else { "not registered" };
-            println!("  {}: {} ({})", client.name(), status, client.config_path().display());
+            println!(
+                "  {}: {} ({})",
+                client.name(),
+                status,
+                client.config_path().display()
+            );
         }
         println!();
-        let config = config::AppConfig::load();
-        println!("Registry URLs: {:?}", config.registry_urls);
+        println!("MCP URL:        {}", cli_mcp_url(&cfg));
+        println!("Configured port: {}", cfg.mcp_port);
+        if let Some(actual) = cfg.mcp_actual_port {
+            println!("Last bound port: {}", actual);
+        }
+        println!("Registry URLs:  {:?}", cfg.registry_urls);
     } else {
         #[cfg(feature = "gui")]
         {
@@ -155,14 +179,15 @@ fn main() {
             println!("AutoPipe Desktop");
             println!();
             println!("MCP server for bioinformatics pipeline management.");
-            println!("Compatible with Claude Desktop and any MCP-compatible app.");
+            println!("Compatible with any MCP client that supports Streamable HTTP.");
             println!();
             println!("Usage:");
-            println!("  desktop --mcp-server    Run as MCP server (stdio transport)");
-            println!("  desktop --register      Auto-register in Claude Desktop");
-            println!("  desktop --unregister    Unregister from all supported clients");
-            println!("  desktop --status        Check registration status");
+            println!("  desktop                 Launch the GUI/tray app (recommended)");
+            println!("  desktop --register      Register in Claude Desktop / Claude Code");
+            println!("  desktop --unregister    Unregister from supported clients");
+            println!("  desktop --status        Show registration status and current URL");
             println!();
+            println!("The MCP HTTP server runs while the GUI/tray app is open.");
             println!("GUI mode requires: cargo build --features gui");
             println!("(needs GTK development libraries on Linux)");
         }

@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Default port for the local MCP HTTP server.
+///
+/// Chosen in the IANA dynamic/private range to avoid collision with common
+/// development ports (3000/8000/8080/etc.) and well-known MCP ports (8765).
+pub const DEFAULT_MCP_PORT: u16 = 47823;
+
+/// Range of ports to try when the preferred port is occupied.
+/// After this range fails, fall back to OS-assigned port (bind to 0).
+pub const MCP_PORT_FALLBACK_RANGE: u16 = 20;
+
+/// Length of the MCP authentication token in bytes (before base64 encoding).
+pub const MCP_TOKEN_BYTES: usize = 32;
+
 /// SSH authentication method.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -51,6 +64,14 @@ pub struct AppConfig {
     /// Local directory for viewer plugins (default: platform-specific data dir).
     #[serde(default = "default_plugins_dir")]
     pub plugins_dir: String,
+    /// Preferred port for the local MCP HTTP server.
+    /// If occupied at startup, the server falls back to nearby ports.
+    #[serde(default = "default_mcp_port")]
+    pub mcp_port: u16,
+    /// Actual port the MCP server bound to last run. May differ from
+    /// `mcp_port` when the preferred port was occupied.
+    #[serde(default)]
+    pub mcp_actual_port: Option<u16>,
 }
 
 fn default_registry_url() -> String {
@@ -66,6 +87,10 @@ fn default_registry_urls() -> Vec<String> {
 
 fn default_github_repo() -> String {
     "autopipe-hub".into()
+}
+
+fn default_mcp_port() -> u16 {
+    DEFAULT_MCP_PORT
 }
 
 fn default_plugins_dir() -> String {
@@ -107,6 +132,8 @@ impl Default for AppConfig {
             github_repo: default_github_repo(),
             per_pipeline_repo: false,
             plugins_dir: default_plugins_dir(),
+            mcp_port: DEFAULT_MCP_PORT,
+            mcp_actual_port: None,
         }
     }
 }
@@ -182,4 +209,69 @@ impl AppConfig {
         })?;
         std::fs::write(&path, content)
     }
+}
+
+// ── MCP token management ─────────────────────────────────────────────────
+//
+// The MCP HTTP server requires a Bearer token. The token is generated on
+// first run, stored next to config.json (with restricted perms on Unix),
+// and reused thereafter. Rotating the token is an explicit user action
+// that triggers re-registration of all clients.
+
+/// Path to the MCP token file: ~/.config/autopipe-app/mcp_token
+pub fn mcp_token_path() -> PathBuf {
+    let dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("autopipe-app");
+    dir.join("mcp_token")
+}
+
+/// Generate a fresh random token (base64-encoded, URL-safe).
+fn generate_token() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+
+    let mut bytes = [0u8; MCP_TOKEN_BYTES];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Write the token to disk with restricted permissions (0600 on Unix).
+fn write_token_file(path: &PathBuf, token: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, token)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path)?.permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+
+    Ok(())
+}
+
+/// Load the MCP token from disk, generating and saving a new one if missing.
+pub fn load_or_create_mcp_token() -> std::io::Result<String> {
+    let path = mcp_token_path();
+    if path.exists() {
+        let token = std::fs::read_to_string(&path)?.trim().to_string();
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    let token = generate_token();
+    write_token_file(&path, &token)?;
+    Ok(token)
+}
+
+/// Force-rotate the MCP token. Returns the new token.
+/// Callers must re-register clients after rotation.
+pub fn regenerate_mcp_token() -> std::io::Result<String> {
+    let token = generate_token();
+    write_token_file(&mcp_token_path(), &token)?;
+    Ok(token)
 }

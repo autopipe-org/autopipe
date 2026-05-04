@@ -4,11 +4,13 @@ use common::templates;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
+use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::config::AppConfig;
+use std::net::SocketAddr;
+
+use crate::config::{AppConfig, DEFAULT_MCP_PORT, MCP_PORT_FALLBACK_RANGE};
 use crate::mcp::viewer;
 use crate::ssh;
 
@@ -1454,7 +1456,7 @@ impl AutoPipeServer {
 
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry.")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry. Multi-client note: do not start two builds for the same image_name from different AI clients at once.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
@@ -1621,7 +1623,7 @@ impl AutoPipeServer {
         result
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -1943,7 +1945,7 @@ impl AutoPipeServer {
 
     // ── Cleanup tools ────────────────────────────────────────────
 
-    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. Uses Docker to handle root-owned files when normal rm fails due to permissions. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool.")]
+    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. Uses Docker to handle root-owned files when normal rm fails due to permissions. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool. Multi-client note: do NOT call this on a run_name that another AI client may currently be executing — coordinate with the user first.")]
     async fn cleanup_failed(
         &self,
         Parameters(params): Parameters<CleanupFailedParams>,
@@ -3268,11 +3270,174 @@ impl ServerHandler for AutoPipeServer {
     }
 }
 
-/// Run the MCP server in stdio mode.
-pub async fn run_mcp_server() -> Result<(), Box<dyn std::error::Error>> {
+// ── HTTP transport ───────────────────────────────────────────────────────
+//
+// The MCP server is exposed over local HTTP (Streamable HTTP transport),
+// bound to 127.0.0.1 only. Clients (Claude Desktop, Claude Code, Cursor,
+// VS Code, Gemini CLI, Codex CLI, ...) connect over loopback.
+//
+// Security:
+//   - Bearer token check on every request (Authorization header)
+//   - Origin header must be loopback (127.0.0.1 / localhost) or absent
+//     (DNS-rebinding mitigation)
+//
+// Per-connection logging:
+//   - Each request is tagged with a connection UUID in tracing spans so logs
+//     from multiple AI clients can be separated by `grep conn=<uuid>`.
+
+/// Try to bind 127.0.0.1:`preferred`, falling back to nearby ports
+/// (`preferred`+1 .. `preferred`+`MCP_PORT_FALLBACK_RANGE`-1) if occupied.
+/// As a last resort, bind to OS-assigned port (0).
+///
+/// Returns the bound listener and the actual port number.
+pub async fn bind_with_fallback(
+    preferred: u16,
+) -> std::io::Result<(tokio::net::TcpListener, u16)> {
+    let preferred = if preferred == 0 { DEFAULT_MCP_PORT } else { preferred };
+
+    // Try preferred port first, then a small contiguous range.
+    for offset in 0..MCP_PORT_FALLBACK_RANGE {
+        let port = preferred.saturating_add(offset);
+        if port == 0 {
+            continue;
+        }
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                let actual = listener.local_addr()?.port();
+                return Ok((listener, actual));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Fallback: let the OS pick any free port.
+    let listener =
+        tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).await?;
+    let actual = listener.local_addr()?.port();
+    Ok((listener, actual))
+}
+
+/// Authentication and Origin-header middleware.
+///
+/// - 401 if `Authorization: Bearer <token>` is missing or doesn't match.
+/// - 403 if the `Origin` header is set to anything other than loopback.
+async fn auth_middleware(
+    axum::extract::State(token): axum::extract::State<std::sync::Arc<String>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let headers = req.headers();
+
+    // Origin check first — defends against DNS rebinding from local browsers.
+    if let Some(origin) = headers.get(axum::http::header::ORIGIN) {
+        let origin_str = origin.to_str().unwrap_or("");
+        let is_loopback = origin_str.is_empty()
+            || origin_str.starts_with("http://127.0.0.1")
+            || origin_str.starts_with("http://localhost")
+            || origin_str.starts_with("https://127.0.0.1")
+            || origin_str.starts_with("https://localhost");
+        if !is_loopback {
+            tracing::warn!(origin = origin_str, "rejected non-loopback Origin");
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::FORBIDDEN)
+                .body(axum::body::Body::from("Forbidden: non-loopback Origin"))
+                .expect("valid response");
+        }
+    }
+
+    // Bearer token check.
+    let auth_ok = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|presented| presented.trim() == token.as_str())
+        .unwrap_or(false);
+
+    if !auth_ok {
+        tracing::warn!("rejected request with missing or invalid Bearer token");
+        return axum::response::Response::builder()
+            .status(axum::http::StatusCode::UNAUTHORIZED)
+            .body(axum::body::Body::from("Unauthorized"))
+            .expect("valid response");
+    }
+
+    next.run(req).await
+}
+
+/// Logging middleware — assigns a per-request UUID and wraps the handler in
+/// a tracing span so all log lines from one request share the same `conn`
+/// tag. We can't easily extract `clientInfo.name` here without parsing the
+/// body, so the span carries the connection UUID; the `clientInfo.name` is
+/// logged when the `initialize` JSON-RPC message is processed by the server.
+async fn logging_middleware(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use tracing::Instrument;
+
+    let conn_id = uuid::Uuid::new_v4();
+    let conn_short = conn_id.simple().to_string();
+    let conn_short = &conn_short[..8];
+    let method = req.method().clone();
+    let uri = req.uri().path().to_string();
+
+    let span = tracing::info_span!("mcp_req", conn = %conn_short);
+    async move {
+        tracing::info!(method = %method, path = %uri, "request");
+        let resp = next.run(req).await;
+        tracing::info!(status = %resp.status(), "response");
+        resp
+    }
+    .instrument(span)
+    .await
+}
+
+/// Run the MCP server over Streamable HTTP on the given listener.
+///
+/// `token` is the Bearer token clients must present.
+/// `shutdown_token` cancels the server when the host app exits.
+pub async fn run_mcp_http_server(
+    listener: tokio::net::TcpListener,
+    token: String,
+    shutdown_token: tokio_util::sync::CancellationToken,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
     let config = AppConfig::load();
-    let server = AutoPipeServer::new(config);
-    let service = server.serve(rmcp::transport::stdio()).await?;
-    service.waiting().await?;
+    let mcp_service: StreamableHttpService<AutoPipeServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || Ok(AutoPipeServer::new(config.clone())),
+            std::sync::Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig {
+                stateful_mode: true,
+                cancellation_token: shutdown_token.child_token(),
+                ..Default::default()
+            },
+        );
+
+    let token_state = std::sync::Arc::new(token);
+
+    let router = axum::Router::new()
+        .nest_service("/mcp", mcp_service)
+        .route("/health", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn_with_state(
+            token_state,
+            auth_middleware,
+        ))
+        .layer(axum::middleware::from_fn(logging_middleware));
+
+    let local_addr = listener.local_addr()?;
+    tracing::info!(addr = %local_addr, "MCP HTTP server listening");
+
+    let shutdown = shutdown_token.clone();
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move { shutdown.cancelled_owned().await })
+        .await?;
+
+    tracing::info!("MCP HTTP server stopped");
     Ok(())
 }

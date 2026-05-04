@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use crate::claude_config;
-use crate::config::{AppConfig, SshAuth};
+use crate::config::{self, AppConfig, SshAuth};
+use crate::mcp::daemon::{McpDaemonHandle, McpServerInfo};
 
 #[derive(PartialEq)]
 enum Tab {
@@ -80,6 +81,10 @@ pub struct AutoPipeApp {
     plugin_is_update: bool,
     plugin_status: String,
     plugin_card_heights: std::collections::HashMap<usize, f32>,
+    // MCP daemon state
+    mcp_daemon: Option<McpDaemonHandle>,
+    mcp_port_input: String,
+    mcp_status_msg: String,
 }
 
 /// Info about an installed plugin, read from manifest.json.
@@ -122,6 +127,13 @@ impl AutoPipeApp {
         // If token exists, try to resolve GitHub username
         let github_username = None; // Will be resolved on GitHub tab open
 
+        // Start the MCP HTTP server in the background. It serves any client
+        // (Claude Desktop, Claude Code, Cursor, VS Code, Gemini CLI, Codex CLI)
+        // for as long as this app is running.
+        let mcp_port = config.mcp_port;
+        let mcp_daemon = Some(McpDaemonHandle::start(mcp_port));
+        let mcp_port_input = mcp_port.to_string();
+
         Self {
             config,
             active_tab: Tab::Setup,
@@ -149,6 +161,63 @@ impl AutoPipeApp {
             plugin_is_update: false,
             plugin_status: String::new(),
             plugin_card_heights: std::collections::HashMap::new(),
+            mcp_daemon,
+            mcp_port_input,
+            mcp_status_msg: String::new(),
+        }
+    }
+
+    /// Current MCP server snapshot if the daemon has finished binding.
+    fn mcp_info(&self) -> Option<McpServerInfo> {
+        self.mcp_daemon.as_ref().and_then(|d| d.info())
+    }
+
+    /// Restart the MCP daemon on a new port. Re-registers any clients that
+    /// are already registered so the URL change propagates automatically.
+    fn restart_mcp_on_port(&mut self, new_port: u16) {
+        // Stop the current daemon and wait for the port to be released.
+        if let Some(d) = self.mcp_daemon.take() {
+            d.shutdown();
+            drop(d);
+        }
+        self.config.mcp_port = new_port;
+        self.config.mcp_actual_port = None;
+        let _ = self.config.save();
+
+        let new_handle = McpDaemonHandle::start(new_port);
+
+        // Best-effort wait for the new daemon to bind so we can re-register
+        // immediately. Capped at ~2s to avoid freezing the UI.
+        for _ in 0..40 {
+            if new_handle.is_settled() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let info = new_handle.info();
+        self.mcp_daemon = Some(new_handle);
+
+        if let Some(info) = info {
+            // Re-register only the clients that already have an entry.
+            let results = claude_config::re_register_existing(&info.url, &info.token);
+            let updated: Vec<&str> = results
+                .iter()
+                .filter(|(_, r)| r.is_ok())
+                .map(|(c, _)| c.name())
+                .collect();
+            if updated.is_empty() {
+                self.mcp_status_msg =
+                    format!("MCP server now on port {}.", info.bound_port);
+            } else {
+                self.mcp_status_msg = format!(
+                    "MCP server now on port {}. Re-registered: {}. Restart those apps.",
+                    info.bound_port,
+                    updated.join(", ")
+                );
+            }
+        } else {
+            self.mcp_status_msg = "Failed to start MCP server on the new port.".into();
         }
     }
 
@@ -336,29 +405,35 @@ impl eframe::App for AutoPipeApp {
                     if !self.save_ok {
                         return;
                     }
-                    let config_path = AppConfig::config_path();
-                    let results = claude_config::register_all(
-                        &config_path.to_string_lossy(),
-                    );
-                    let mut ok_names: Vec<&str> = Vec::new();
-                    let mut any_err = false;
-                    for (client, result) in &results {
-                        match result {
-                            Ok(_) => ok_names.push(client.name()),
-                            Err(_) => any_err = true,
+                    match self.mcp_info() {
+                        Some(info) => {
+                            let results = claude_config::register_all(&info.url, &info.token);
+                            let mut ok_names: Vec<&str> = Vec::new();
+                            let mut any_err = false;
+                            for (client, result) in &results {
+                                match result {
+                                    Ok(_) => ok_names.push(client.name()),
+                                    Err(_) => any_err = true,
+                                }
+                            }
+                            if !ok_names.is_empty() {
+                                self.config.mcp_registered = true;
+                                let _ = self.config.save();
+                                self.status_message = format!(
+                                    "MCP registered in {}. Restart your AI app to load tools.",
+                                    ok_names.join(", ")
+                                );
+                                self.should_minimize = true;
+                            }
+                            if any_err && ok_names.is_empty() {
+                                self.status_message =
+                                    "Failed to register MCP in any client.".into();
+                            }
                         }
-                    }
-                    if !ok_names.is_empty() {
-                        self.config.mcp_registered = true;
-                        let _ = self.config.save();
-                        self.status_message = format!(
-                            "MCP registered in {}. Restart your AI app to load tools.",
-                            ok_names.join(", ")
-                        );
-                        self.should_minimize = true;
-                    }
-                    if any_err && ok_names.is_empty() {
-                        self.status_message = "Failed to register MCP in any client.".into();
+                        None => {
+                            self.status_message =
+                                "MCP server is starting — try again in a moment.".into();
+                        }
                     }
                 }
                 if self.save_ok && self.status_message.is_empty() {
@@ -921,25 +996,152 @@ impl AutoPipeApp {
             }
         } else if ui.button("Register MCP Server").clicked() {
             self.save_config();
-            let config_path = AppConfig::config_path();
-            let results = claude_config::register_all(&config_path.to_string_lossy());
-            let mut ok_names: Vec<&str> = Vec::new();
-            for (client, result) in &results {
-                if result.is_ok() {
-                    ok_names.push(client.name());
+            match self.mcp_info() {
+                Some(info) => {
+                    let results = claude_config::register_all(&info.url, &info.token);
+                    let mut ok_names: Vec<&str> = Vec::new();
+                    for (client, result) in &results {
+                        if result.is_ok() {
+                            ok_names.push(client.name());
+                        }
+                    }
+                    if !ok_names.is_empty() {
+                        self.config.mcp_registered = true;
+                        let _ = self.config.save();
+                        self.status_message = format!(
+                            "Registered in {}. Restart your AI app to load tools.",
+                            ok_names.join(", ")
+                        );
+                    } else {
+                        self.status_message = "Failed to register in any client.".into();
+                    }
+                }
+                None => {
+                    self.status_message =
+                        "MCP server is starting — try again in a moment.".into();
                 }
             }
-            if !ok_names.is_empty() {
-                self.config.mcp_registered = true;
-                let _ = self.config.save();
-                self.status_message = format!(
-                    "Registered in {}. Restart your AI app to load tools.",
-                    ok_names.join(", ")
-                );
-            } else {
-                self.status_message = "Failed to register in any client.".into();
-            }
         }
+
+        ui.add_space(15.0);
+        ui.separator();
+        ui.add_space(10.0);
+        self.draw_mcp_section(ui);
+    }
+
+    fn draw_mcp_section(&mut self, ui: &mut egui::Ui) {
+        ui.label("MCP Server:");
+        ui.add_space(5.0);
+
+        let info = self.mcp_info();
+        let error = self
+            .mcp_daemon
+            .as_ref()
+            .and_then(|d| d.error())
+            .map(|e| e.to_string());
+
+        // Status line ----------------------------------------------------
+        ui.horizontal(|ui| {
+            ui.label("  Status:");
+            match (&info, &error) {
+                (Some(i), _) => {
+                    let label = format!("Running on {}", i.url);
+                    ui.colored_label(egui::Color32::GREEN, label);
+                    if i.bound_port != i.configured_port {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 170, 0),
+                            format!("(fell back from configured {})", i.configured_port),
+                        );
+                    }
+                }
+                (None, Some(err)) => {
+                    ui.colored_label(egui::Color32::RED, "Failed");
+                    ui.label(err);
+                }
+                (None, None) => {
+                    ui.colored_label(egui::Color32::GRAY, "Starting...");
+                }
+            }
+        });
+
+        // Port input -----------------------------------------------------
+        ui.horizontal(|ui| {
+            ui.label("  Port:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.mcp_port_input)
+                    .desired_width(80.0),
+            );
+            if ui.button("Apply").clicked() {
+                match self.mcp_port_input.trim().parse::<u16>() {
+                    Ok(p) if p >= 1024 => {
+                        self.restart_mcp_on_port(p);
+                    }
+                    _ => {
+                        self.mcp_status_msg =
+                            "Port must be a number between 1024 and 65535.".into();
+                    }
+                }
+            }
+        });
+
+        // Token actions --------------------------------------------------
+        ui.horizontal(|ui| {
+            ui.label("  Token:");
+            ui.label("●●●●●●●●●●●●");
+            if let Some(i) = &info {
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(i.token.clone());
+                    self.mcp_status_msg = "Token copied to clipboard.".into();
+                }
+            }
+            if ui.button("Rotate & re-register").clicked() {
+                match config::regenerate_mcp_token() {
+                    Ok(new_token) => {
+                        if let Some(i) = self.mcp_info() {
+                            // The running server still uses the old token in
+                            // memory; restart so it picks up the new one.
+                            let port = i.configured_port;
+                            self.restart_mcp_on_port(port);
+                            // Re-registration with the new token happens inside
+                            // restart_mcp_on_port via re_register_existing.
+                            self.mcp_status_msg = format!(
+                                "Token rotated. New token: {}... — restart your AI apps.",
+                                &new_token[..8.min(new_token.len())]
+                            );
+                        } else {
+                            self.mcp_status_msg = "Token rotated. Restart the app.".into();
+                        }
+                    }
+                    Err(e) => {
+                        self.mcp_status_msg = format!("Failed to rotate token: {}", e);
+                    }
+                }
+            }
+        });
+
+        // Copy snippet for other MCP clients ------------------------------
+        ui.horizontal(|ui| {
+            ui.label("  Other clients (Cursor, VS Code, Gemini CLI, Codex CLI, ...):");
+            if let Some(i) = &info {
+                if ui.button("Copy MCP config snippet").clicked() {
+                    let snippet = claude_config::mcp_config_snippet(&i.url, &i.token);
+                    ui.ctx().copy_text(snippet);
+                    self.mcp_status_msg = "MCP config snippet copied to clipboard.".into();
+                }
+            }
+        });
+
+        if !self.mcp_status_msg.is_empty() {
+            ui.add_space(5.0);
+            ui.colored_label(egui::Color32::from_rgb(180, 180, 180), &self.mcp_status_msg);
+        }
+
+        ui.add_space(5.0);
+        ui.colored_label(
+            egui::Color32::from_rgb(160, 160, 160),
+            "Multi-client note: avoid running pipelines with the same run_name from \
+             multiple AI clients at once.",
+        );
     }
 
     fn draw_github_tab(&mut self, ui: &mut egui::Ui) {
