@@ -88,7 +88,10 @@
   <header class="topbar">
     <div class="brand">
       <div class="logo">AutoPipe</div>
-      <div class="tagline">Bioinformatics pipelines, in your AI chat.</div>
+      <div class="tagline">
+        Generate, execute, visualize, and share<br />
+        reproducible containerized pipelines with AI.
+      </div>
     </div>
     <button class="icon-btn" title="Advanced" onclick={() => (showAdvanced = true)}>
       <!-- sliders icon (advanced settings) -->
@@ -110,21 +113,18 @@
     <section class="intro">
       <h1>Setup</h1>
       <p class="lead">
-        Configure AutoPipe with the short steps below, then click
-        <strong>Save and Register</strong> at the bottom.
+        Configure AutoPipe with the short steps below.
       </p>
       <p class="lead">
-        Only the SSH step is required — you can skip GitHub and still find
-        and run public pipelines. If you're not sure how to configure
-        things, see the detailed guide at
+        GitHub connection is optional — without it, you can find, run, and
+        create pipelines, but you cannot upload or publish your own.
+      </p>
+      <p class="lead">
+        If you're not sure how to configure things, see the detailed
+        guide at
         <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
           autopipe.org/getting-started</a>.
       </p>
-      <div class="callout">
-        Keep AutoPipe in the tray while using it from your AI app —
-        AutoPipe needs to be running for your AI app to talk to it.
-        Use <strong>Move to tray</strong> below instead of quitting.
-      </div>
     </section>
 
     <section class="step">
@@ -133,13 +133,15 @@
         <h2>SSH server</h2>
         <span class="badge required">Required</span>
       </header>
-      <p class="step-desc">The machine that will run your analyses.</p>
+      <p class="step-desc">
+        The machine where AutoPipe runs your analyses. This can be the same
+        computer you're running this app on, or a separate Linux server.
+      </p>
 
       <div class="cmd-box">
         <p>
-          To verify your machine is ready and get the values to enter below,
-          run this command on that machine
-          (per-OS instructions:
+          To verify that machine is ready and get the values to enter below,
+          run this on it (per-OS instructions:
           <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
             autopipe.org/getting-started</a>):
         </p>
@@ -163,7 +165,7 @@
     <section class="step">
       <header class="step-head">
         <span class="num">2</span>
-        <h2>GitHub</h2>
+        <h2>GitHub connection</h2>
         <span class="badge optional">Optional</span>
       </header>
       <p class="step-desc">
@@ -172,6 +174,22 @@
       </p>
       <div class="github-row">
         <GitHubSection bind:username={githubUsername} {showToast} />
+      </div>
+    </section>
+
+    <section class="step">
+      <header class="step-head">
+        <span class="num">3</span>
+        <h2>Save and Register</h2>
+      </header>
+      <p class="step-desc">
+        When you're done with the steps above, click
+        <strong>Save and Register</strong> at the bottom to save your
+        settings and register AutoPipe with your AI app.
+      </p>
+      <div class="callout step-callout">
+        Keep AutoPipe running in the tray while you use it.
+        Use <strong>Move to tray</strong> instead of closing the window.
       </div>
     </section>
   </main>
@@ -385,6 +403,11 @@
 
   /* GitHub button row — slight indent under "2 GitHub" title */
   .github-row {
+    margin-left: 34px;
+  }
+
+  /* The callout inside the Step 3 card needs left indent matching others */
+  .step-callout {
     margin-left: 34px;
   }
 

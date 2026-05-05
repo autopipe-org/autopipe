@@ -138,6 +138,8 @@ fn run_gui() {
             commands::get_ssh_config,
             commands::save_ssh_config,
             commands::get_github_username,
+            commands::get_github_repo,
+            commands::set_github_repo,
             commands::clear_github_token,
             commands::start_github_login,
             commands::move_to_tray,

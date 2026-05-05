@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { open as openExternal } from '@tauri-apps/plugin-shell';
+  import { onMount } from 'svelte';
 
   let {
     username = $bindable(),
@@ -13,6 +14,14 @@
   let busy = $state(false);
   let userCode = $state('');
   let verificationUri = $state('');
+  let repo = $state('');
+  let repoSaving = $state(false);
+
+  onMount(async () => {
+    try {
+      repo = await invoke<string>('get_github_repo');
+    } catch {}
+  });
 
   async function startLogin() {
     busy = true;
@@ -44,6 +53,18 @@
     }
   }
 
+  async function saveRepo() {
+    repoSaving = true;
+    try {
+      await invoke('set_github_repo', { repo });
+      showToast('ok', 'Repository name saved.');
+    } catch (e) {
+      showToast('err', `${e}`);
+    } finally {
+      repoSaving = false;
+    }
+  }
+
   $effect(() => {
     if (username) {
       busy = false;
@@ -52,11 +73,6 @@
     }
   });
 
-  // Belt-and-suspenders polling: while in device-flow state, also ask the
-  // backend directly for the resolved username every few seconds. If the
-  // background `github-login-complete` event somehow doesn't reach us
-  // (race conditions in Tauri's async runtime, dropped task, etc.), this
-  // fallback still picks up a successful auth.
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   $effect(() => {
     if (userCode && !pollHandle) {
@@ -77,7 +93,6 @@
       clearInterval(pollHandle);
       pollHandle = null;
     }
-
     return () => {
       if (pollHandle) {
         clearInterval(pollHandle);
@@ -92,6 +107,26 @@
     <span class="check">✓</span>
     Connected as <strong>{username}</strong>
     <button class="link" onclick={disconnect}>Disconnect</button>
+  </div>
+
+  <div class="repo-block">
+    <label class="repo-label">Upload to repo</label>
+    <div class="repo-row">
+      <span class="repo-prefix">github.com/{username}/</span>
+      <input
+        class="repo-input"
+        bind:value={repo}
+        placeholder="autopipe-hub"
+      />
+      <span class="repo-suffix">/pipelines/&lt;name&gt;/</span>
+      <button class="ghost" disabled={repoSaving} onclick={saveRepo}>
+        {repoSaving ? 'Saving…' : 'Save'}
+      </button>
+    </div>
+    <p class="repo-hint">
+      Pipelines you upload will go to here. Change this if you want a
+      different repository name.
+    </p>
   </div>
 {:else if userCode}
   <div class="device-flow">
@@ -133,10 +168,7 @@
     font-size: 0.9rem;
     padding: 8px 0;
   }
-  .check {
-    color: var(--accent);
-    font-weight: 700;
-  }
+  .check { color: var(--accent); font-weight: 700; }
   .link {
     background: none;
     border: none;
@@ -148,6 +180,66 @@
   }
   .link:hover { color: var(--text); }
 
+  /* ── Repo input row ────────────────────────────── */
+  .repo-block {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .repo-label {
+    display: block;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .repo-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 0.85rem;
+  }
+  .repo-prefix, .repo-suffix {
+    color: var(--text-muted);
+  }
+  .repo-input {
+    padding: 6px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    font-size: 0.85rem;
+    font-family: inherit;
+    color: var(--text);
+    background: var(--bg-card);
+    min-width: 160px;
+  }
+  .repo-input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-light);
+  }
+  .ghost {
+    padding: 6px 12px;
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  .ghost:hover { background: var(--accent-light); }
+  .ghost:disabled { opacity: 0.6; cursor: not-allowed; }
+  .repo-hint {
+    margin: 8px 0 0;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  /* ── Device flow ──────────────────────────────── */
   .device-flow p {
     margin: 0 0 8px;
     color: var(--text-muted);

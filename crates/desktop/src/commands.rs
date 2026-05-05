@@ -240,6 +240,22 @@ pub async fn get_github_username() -> Option<String> {
 }
 
 #[tauri::command]
+pub fn get_github_repo() -> String {
+    AppConfig::load().github_repo
+}
+
+#[tauri::command]
+pub fn set_github_repo(repo: String) -> Result<(), String> {
+    let trimmed = repo.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Repository name cannot be empty.".into());
+    }
+    let mut cfg = AppConfig::load();
+    cfg.github_repo = trimmed;
+    cfg.save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn clear_github_token() -> Result<(), String> {
     let mut cfg = AppConfig::load();
     cfg.github_token = None;
