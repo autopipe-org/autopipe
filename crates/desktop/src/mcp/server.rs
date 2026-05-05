@@ -55,7 +55,9 @@ struct CheckBuildParams {
 struct DryRunParams {
     /// Docker image name
     image_name: String,
-    /// Remote input data directory (mounted as read-only in Docker)
+    /// Input data directory the remote server can reach (mounted read-only in Docker).
+    /// Windows-style paths like `C:\Users\me\data` are accepted and auto-translated to WSL form;
+    /// pass through whatever the user gave you.
     input_dir: String,
     /// Remote output directory (optional, defaults to configured output directory)
     output_dir: Option<String>,
@@ -72,7 +74,9 @@ struct ExecuteParams {
     image_name: String,
     /// Run name (used for log file and container naming)
     run_name: String,
-    /// Remote input data directory (mounted as read-only in Docker)
+    /// Input data directory the remote server can reach (mounted read-only in Docker).
+    /// Windows-style paths like `C:\Users\me\data` are accepted and auto-translated to WSL form;
+    /// pass through whatever the user gave you.
     input_dir: String,
     /// Number of CPU cores (default: 8)
     cores: Option<u32>,
@@ -108,9 +112,10 @@ struct CleanupFailedParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct CreateSymlinkParams {
-    /// Source path on the remote server (the existing file/directory to link to)
+    /// Existing file/directory the link should point to. Windows-style paths
+    /// (e.g. `C:\data\foo`) are accepted and auto-translated to WSL form.
     source: String,
-    /// Target symlink path to create on the remote server
+    /// Symlink path to create. Same path-translation rules as `source`.
     target: String,
 }
 
@@ -122,9 +127,12 @@ struct RemoveSymlinkParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PrepareInputParams {
-    /// URL to download (http/https/ftp) OR absolute path on the remote server to symlink.
-    /// If it starts with http://, https://, or ftp://, the file is downloaded via Docker (wget/curl).
-    /// Otherwise, a symlink is created pointing to the given path.
+    /// URL to download (http/https/ftp) OR an absolute filesystem path that the remote server
+    /// can reach. Windows-style paths (e.g. `C:\Users\me\data\input.fastq`) are accepted and
+    /// translated to WSL form (`/mnt/c/Users/me/data/input.fastq`) automatically — pass them
+    /// through as-is, do not ask the user to convert. If it starts with http://, https://, or
+    /// ftp://, the file is downloaded via Docker (wget/curl). Otherwise, a symlink is created
+    /// pointing to the given path.
     source: String,
     /// Subdirectory within pipelines_input to place the file (e.g. "run-001"). Optional.
     #[serde(default)]
@@ -3317,6 +3325,14 @@ impl ServerHandler for AutoPipeServer {
                  Use create_symlink instead of cp for data files.\n\
                  Pipeline outputs are stored under the configured output directory.\n\
                  Use list_files and read_file to view results from the output path.\n\n\
+                 PATH HANDLING (IMPORTANT for Windows users):\n\
+                 If the user provides a Windows-style path (e.g. C:\\Users\\me\\data\\input.fastq \
+                 or C:/Users/me/data), pass it through to AutoPipe AS-IS. Do NOT ask the user to \
+                 convert it to a remote/WSL path or to upload the file manually. AutoPipe \
+                 automatically rewrites Windows paths to their WSL equivalent (C:\\Users\\me → \
+                 /mnt/c/Users/me) before running any SSH command, which works whenever the SSH \
+                 server is the user's local WSL distribution. Only ask for a different path if \
+                 AutoPipe returns an explicit error that the translated path does not exist.\n\n\
                  PIPELINE CREATION (IMPORTANT):\n\
                  When the user wants to create a pipeline, NEVER write code directly.\n\
                  ALWAYS follow this workflow:\n\
