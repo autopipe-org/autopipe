@@ -51,6 +51,40 @@
       verificationUri = '';
     }
   });
+
+  // Belt-and-suspenders polling: while in device-flow state, also ask the
+  // backend directly for the resolved username every few seconds. If the
+  // background `github-login-complete` event somehow doesn't reach us
+  // (race conditions in Tauri's async runtime, dropped task, etc.), this
+  // fallback still picks up a successful auth.
+  let pollHandle: ReturnType<typeof setInterval> | null = null;
+  $effect(() => {
+    if (userCode && !pollHandle) {
+      pollHandle = setInterval(async () => {
+        try {
+          const u = await invoke<string | null>('get_github_username');
+          if (u) {
+            username = u;
+            showToast('ok', `GitHub connected as ${u}`);
+            if (pollHandle) {
+              clearInterval(pollHandle);
+              pollHandle = null;
+            }
+          }
+        } catch {}
+      }, 3000);
+    } else if (!userCode && pollHandle) {
+      clearInterval(pollHandle);
+      pollHandle = null;
+    }
+
+    return () => {
+      if (pollHandle) {
+        clearInterval(pollHandle);
+        pollHandle = null;
+      }
+    };
+  });
 </script>
 
 {#if username}
