@@ -171,6 +171,31 @@ pub fn registration_status() -> Vec<(String, bool)> {
         .collect()
 }
 
+// ── Window / tray commands ───────────────────────────────────────────────
+
+#[tauri::command]
+pub fn move_to_tray(window: tauri::Window) -> Result<(), String> {
+    window.hide().map_err(|e| e.to_string())
+}
+
+// ── Pipeline registry commands ───────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_registry_url() -> String {
+    AppConfig::load().registry_url
+}
+
+#[tauri::command]
+pub fn set_registry_url(url: String) -> Result<(), String> {
+    let mut cfg = AppConfig::load();
+    cfg.registry_url = url.clone();
+    // Mirror into the registry list so search/list endpoints see it too.
+    if !cfg.registry_urls.contains(&url) {
+        cfg.registry_urls.insert(0, url);
+    }
+    cfg.save().map_err(|e| e.to_string())
+}
+
 // ── SSH config commands ──────────────────────────────────────────────────
 
 #[tauri::command]

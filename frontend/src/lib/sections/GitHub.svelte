@@ -7,7 +7,7 @@
     showToast,
   }: {
     username: string | null;
-    showToast: (kind: 'ok' | 'err', text: string) => void;
+    showToast: (kind: 'ok' | 'err' | 'info', text: string) => void;
   } = $props();
 
   let busy = $state(false);
@@ -23,7 +23,6 @@
       }>('start_github_login');
       userCode = flow.user_code;
       verificationUri = flow.verification_uri;
-      // Try to open the verification URL in the browser
       try {
         await openExternal(flow.verification_uri);
       } catch {}
@@ -45,8 +44,6 @@
     }
   }
 
-  // When parent receives github-login-complete, username updates and we
-  // can clear the in-progress state.
   $effect(() => {
     if (username) {
       busy = false;
@@ -57,19 +54,19 @@
 </script>
 
 {#if username}
-  <div class="status connected">
+  <div class="connected">
+    <span class="check">✓</span>
     Connected as <strong>{username}</strong>
     <button class="link" onclick={disconnect}>Disconnect</button>
   </div>
 {:else if userCode}
   <div class="device-flow">
     <p>
-      Open this URL and enter the code:
-    </p>
-    <p class="url">
+      Open
       <a href="#" onclick={(e) => { e.preventDefault(); openExternal(verificationUri); }}>
         {verificationUri}
       </a>
+      and enter:
     </p>
     <pre class="code">{userCode}</pre>
     <p class="waiting">Waiting for you to authorize…</p>
@@ -82,65 +79,65 @@
 
 <style>
   .connect {
-    background: #24292e;
+    background: var(--accent);
     color: #fff;
-    border: none;
-    padding: 10px 18px;
+    border: 1px solid var(--accent);
+    padding: 8px 18px;
     border-radius: 6px;
-    font-size: 0.9rem;
-    font-weight: 500;
+    font-size: 0.88rem;
+    font-weight: 600;
     cursor: pointer;
   }
-  .connect:hover {
-    background: #1a1e22;
-  }
-  .connect:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-  .status {
+  .connect:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .connect:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .connected {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 14px;
-    border-radius: 6px;
-    background: #d1fae5;
-    color: #065f46;
+    gap: 8px;
+    color: var(--text);
     font-size: 0.9rem;
+    padding: 8px 0;
+  }
+  .check {
+    color: var(--accent);
+    font-weight: 700;
   }
   .link {
     background: none;
     border: none;
-    color: inherit;
+    color: var(--text-muted);
     text-decoration: underline;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     margin-left: auto;
   }
+  .link:hover { color: var(--text); }
+
   .device-flow p {
-    margin: 0 0 10px;
-    color: #4b5563;
-    font-size: 0.9rem;
+    margin: 0 0 8px;
+    color: var(--text-muted);
+    font-size: 0.88rem;
   }
-  .url a {
-    color: #0f4c5c;
+  .device-flow a {
+    color: var(--accent);
     text-decoration: underline;
     cursor: pointer;
     font-family: 'SF Mono', monospace;
   }
   .code {
     display: inline-block;
-    padding: 12px 20px;
-    background: #1a2332;
+    padding: 10px 18px;
+    background: #0f172a;
     color: #fff;
-    font-size: 1.4rem;
+    font-size: 1.3rem;
     font-family: 'SF Mono', monospace;
     letter-spacing: 0.12em;
-    border-radius: 8px;
-    margin: 6px 0 10px;
+    border-radius: 6px;
+    margin: 4px 0 8px;
   }
   .waiting {
-    color: #9ca3af !important;
+    color: var(--text-faint) !important;
     font-style: italic;
   }
 </style>

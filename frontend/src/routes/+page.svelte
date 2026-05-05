@@ -5,7 +5,7 @@
   import { onMount } from 'svelte';
   import SshSection from '$lib/sections/Ssh.svelte';
   import GitHubSection from '$lib/sections/GitHub.svelte';
-  import StatusSection from '$lib/sections/Status.svelte';
+  import AdvancedPanel from '$lib/sections/AdvancedPanel.svelte';
 
   type SshConfig = {
     host: string;
@@ -26,13 +26,17 @@
   let githubUsername = $state<string | null>(null);
   let busy = $state(false);
   let toast = $state<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
-  let mcpExpanded = $state(false);
+  let showAdvanced = $state(false);
 
   function showToast(kind: 'ok' | 'err' | 'info', text: string) {
     toast = { kind, text };
     setTimeout(() => {
       if (toast?.text === text) toast = null;
     }, 6000);
+  }
+
+  function openDocs() {
+    openExternal('https://autopipe.org/getting-started').catch(() => {});
   }
 
   onMount(async () => {
@@ -47,26 +51,32 @@
   async function saveAndRegister() {
     busy = true;
     try {
-      // Validate SSH (only required field)
       if (!sshConfig.host.trim() || !sshConfig.user.trim()) {
         showToast('err', 'SSH host and user are required.');
         busy = false;
         return;
       }
       await invoke('save_ssh_config', { config: sshConfig });
-      const clients = await invoke<string[]>('register_mcp');
+      await invoke<string[]>('register_mcp');
       const ghMsg = githubUsername
         ? ''
-        : ' GitHub not connected — you can run public pipelines but cannot upload your own.';
-      if (clients.length > 0) {
-        showToast('ok', `Saved. Registered in ${clients.join(', ')}.${ghMsg} Restart your AI app.`);
-      } else {
-        showToast('info', `Saved.${ghMsg} Install Claude Desktop or Codex CLI to use AutoPipe.`);
-      }
+        : ' GitHub is not connected — you can run public pipelines but cannot upload your own.';
+      showToast(
+        'ok',
+        `Saved.${ghMsg} Restart your AI app, then click Move to tray to keep AutoPipe running.`
+      );
     } catch (e) {
       showToast('err', `Failed: ${e}`);
     } finally {
       busy = false;
+    }
+  }
+
+  async function moveToTray() {
+    try {
+      await invoke('move_to_tray');
+    } catch (e) {
+      showToast('err', `Failed: ${e}`);
     }
   }
 </script>
@@ -74,83 +84,85 @@
 <div class="page">
   <header class="topbar">
     <div class="brand">
-      <img src="/logo.svg" alt="" class="logo-img" onerror={(e) => (e.currentTarget.style.display = 'none')} />
-      <div>
-        <div class="logo">AutoPipe</div>
-        <div class="tagline">Bioinformatics pipelines, in your AI chat.</div>
-      </div>
+      <div class="logo">AutoPipe</div>
+      <div class="tagline">Bioinformatics pipelines, in your AI chat.</div>
     </div>
+    <button class="icon-btn" title="Advanced settings" onclick={() => (showAdvanced = true)}>
+      <!-- gear icon -->
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    </button>
   </header>
 
   <main class="content">
     <section class="intro">
       <h1>Setup</h1>
       <p class="lead">
-        Configure AutoPipe in three short steps below, then click
-        <strong>Save and Register</strong>.
+        Configure AutoPipe with the short steps below, then click
+        <strong>Save and Register</strong> at the bottom.
       </p>
-      <p class="note">
-        Only the <strong>SSH</strong> step is required. You can skip
-        <strong>GitHub</strong> and still find and run public pipelines —
-        connect later if you want to publish your own.
-        Full guide:
-        <a href="#" onclick={(e) => { e.preventDefault(); openExternal('https://autopipe.org/getting-started'); }}>
-          autopipe.org/getting-started
-        </a>.
+      <p class="lead">
+        Only the SSH step is required — you can skip GitHub and still find
+        and run public pipelines. If you're not sure how to configure
+        things, see the detailed guide at
+        <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
+          autopipe.org/getting-started</a>.
       </p>
-    </section>
-
-    <section class="step">
-      <header class="step-header">
-        <div class="step-title">
-          <span class="step-num">1</span>
-          <h2>SSH server</h2>
-          <span class="badge required">Required</span>
-        </div>
-        <p class="step-desc">Where AutoPipe will run your analyses.</p>
-      </header>
-      <div class="step-body">
-        <SshSection bind:config={sshConfig} />
+      <div class="callout">
+        Keep AutoPipe in the tray while using it from your AI app —
+        AutoPipe needs to be running for your AI app to talk to it.
+        Use <strong>Move to tray</strong> below instead of quitting.
       </div>
     </section>
 
     <section class="step">
-      <header class="step-header">
-        <div class="step-title">
-          <span class="step-num">2</span>
-          <h2>GitHub</h2>
-          <span class="badge optional">Optional</span>
-        </div>
-        <p class="step-desc">
-          Only needed to upload or publish your own pipelines.
-        </p>
+      <header class="step-head">
+        <span class="num">1</span>
+        <h2>SSH server</h2>
+        <span class="badge required">Required</span>
       </header>
-      <div class="step-body">
+      <p class="step-desc">The machine that will run your analyses.</p>
+
+      <div class="cmd-box">
+        <p>
+          To verify your machine is ready and get the values to enter below,
+          run this command on that machine
+          (per-OS instructions:
+          <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
+            autopipe.org/getting-started</a>):
+        </p>
+        <div class="cmd-row">
+          <code>curl -fsSL https://download.autopipe.org/setup.sh | bash</code>
+          <button
+            class="ghost small"
+            onclick={() => {
+              navigator.clipboard.writeText(
+                'curl -fsSL https://download.autopipe.org/setup.sh | bash'
+              );
+              showToast('ok', 'Command copied.');
+            }}
+          >Copy</button>
+        </div>
+      </div>
+
+      <SshSection bind:config={sshConfig} />
+    </section>
+
+    <section class="step">
+      <header class="step-head">
+        <span class="num">2</span>
+        <h2>GitHub</h2>
+        <span class="badge optional">Optional</span>
+      </header>
+      <p class="step-desc">
+        Only needed to upload or publish your own pipelines. Skip if you
+        only want to run pipelines from AutoPipeHub.
+      </p>
+      <div class="github-row">
         <GitHubSection bind:username={githubUsername} {showToast} />
       </div>
-    </section>
-
-    <section class="step">
-      <button
-        class="step-header collapsible"
-        onclick={() => (mcpExpanded = !mcpExpanded)}
-        aria-expanded={mcpExpanded}
-      >
-        <div class="step-title">
-          <span class="step-num">3</span>
-          <h2>MCP server details</h2>
-          <span class="badge auto">Auto</span>
-        </div>
-        <p class="step-desc">
-          URL and token for AI app connection. Most users don't need this.
-          <span class="chevron" class:open={mcpExpanded}>▸</span>
-        </p>
-      </button>
-      {#if mcpExpanded}
-        <div class="step-body">
-          <StatusSection {showToast} />
-        </div>
-      {/if}
     </section>
   </main>
 
@@ -158,274 +170,290 @@
     <div class="actionbar-inner">
       {#if toast}
         <div class="toast" class:ok={toast.kind === 'ok'} class:err={toast.kind === 'err'} class:info={toast.kind === 'info'}>
-          {toast.text}
+          {#if toast.kind === 'ok'}✓{:else if toast.kind === 'err'}✗{:else}ⓘ{/if}
+          <span>{toast.text}</span>
         </div>
+      {:else}
+        <p class="actionbar-hint">
+          Keep AutoPipe in the tray to let your AI app use it.
+        </p>
       {/if}
-      <button class="primary" disabled={busy} onclick={saveAndRegister}>
+      <button class="btn-outline" onclick={moveToTray}>Move to tray</button>
+      <button class="btn-primary" disabled={busy} onclick={saveAndRegister}>
         {busy ? 'Saving…' : 'Save and Register'}
       </button>
     </div>
   </footer>
+
+  {#if showAdvanced}
+    <AdvancedPanel onclose={() => (showAdvanced = false)} {showToast} />
+  {/if}
 </div>
 
 <style>
   .page {
     min-height: 100vh;
-    background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
     display: flex;
     flex-direction: column;
   }
 
-  /* Top bar */
+  /* ── Top bar ──────────────────────────────────────── */
   .topbar {
-    background: linear-gradient(135deg, #0f4c5c 0%, #1a6373 100%);
-    color: #fff;
-    padding: 18px 32px;
-    box-shadow: 0 2px 6px rgba(15, 76, 92, 0.2);
-  }
-  .brand {
+    background: var(--bg-card);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 32px;
     display: flex;
     align-items: center;
-    gap: 12px;
-    max-width: 820px;
-    margin: 0 auto;
+    justify-content: space-between;
+    max-width: 100%;
   }
-  .logo-img {
-    width: 40px;
-    height: 40px;
-    border-radius: 8px;
-  }
-  .logo {
-    font-size: 1.35rem;
+  .brand .logo {
+    font-size: 1.3rem;
     font-weight: 700;
-    letter-spacing: 0.01em;
+    color: var(--accent);
     line-height: 1.2;
+    letter-spacing: -0.01em;
   }
-  .tagline {
-    font-size: 0.8rem;
-    opacity: 0.78;
-    line-height: 1.2;
+  .brand .tagline {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.3;
     margin-top: 2px;
   }
+  .icon-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+  }
+  .icon-btn:hover {
+    background: var(--bg-soft);
+    color: var(--accent);
+    border-color: var(--accent);
+  }
 
-  /* Main content */
+  /* ── Content ──────────────────────────────────────── */
   .content {
     flex: 1;
     width: 100%;
-    max-width: 820px;
+    max-width: 800px;
     margin: 0 auto;
-    padding: 36px 32px 120px;
-    box-sizing: border-box;
+    padding: 28px 32px 130px;
   }
-
-  /* Intro */
   .intro {
-    margin-bottom: 28px;
+    margin-bottom: 22px;
   }
   .intro h1 {
     margin: 0 0 12px;
-    font-size: 1.7rem;
+    font-size: 1.6rem;
     font-weight: 700;
-    color: #0f172a;
+    color: var(--text);
     letter-spacing: -0.02em;
   }
   .lead {
-    margin: 0 0 12px;
-    font-size: 1rem;
-    color: #334155;
+    margin: 0 0 10px;
+    font-size: 0.95rem;
+    color: var(--text);
     line-height: 1.55;
   }
-  .note {
-    margin: 0;
+  .lead a {
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .callout {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-light);
+    color: var(--text);
     font-size: 0.88rem;
-    color: #64748b;
-    line-height: 1.6;
-    padding: 12px 16px;
-    background: #fff;
-    border-left: 3px solid #0f4c5c;
+    line-height: 1.5;
     border-radius: 4px;
   }
-  .note a {
-    color: #0f4c5c;
-    text-decoration: underline;
-  }
 
-  /* Step cards */
+  /* ── Step cards ──────────────────────────────────── */
   .step {
-    background: #fff;
-    border-radius: 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 22px 22px;
     margin-bottom: 16px;
-    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
-    overflow: hidden;
-    transition: box-shadow 0.2s;
   }
-  .step:hover {
-    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.05);
-  }
-  .step-header {
-    padding: 18px 24px 14px;
-    border-bottom: 1px solid #f1f5f9;
-    width: 100%;
-    text-align: left;
-    background: none;
-    border-left: none;
-    border-right: none;
-    border-top: none;
-    cursor: default;
-    box-sizing: border-box;
-  }
-  .step-header.collapsible {
-    cursor: pointer;
-    border-bottom: none;
-  }
-  .step-header.collapsible:hover {
-    background: #f8fafc;
-  }
-  .step-title {
+  .step-head {
     display: flex;
     align-items: center;
     gap: 10px;
     margin-bottom: 4px;
   }
-  .step-num {
-    width: 26px;
-    height: 26px;
+  .num {
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
-    background: #0f4c5c;
-    color: #fff;
-    font-size: 0.8rem;
+    border: 1.5px solid var(--accent);
+    color: var(--accent);
+    font-size: 0.78rem;
     font-weight: 700;
     display: inline-flex;
     align-items: center;
     justify-content: center;
   }
-  .step-title h2 {
+  .step-head h2 {
     margin: 0;
-    font-size: 1.05rem;
+    font-size: 1rem;
     font-weight: 600;
-    color: #0f172a;
+    color: var(--text);
     flex: 1;
   }
   .step-desc {
-    margin: 0 0 0 36px;
+    margin: 0 0 14px 34px;
     font-size: 0.85rem;
-    color: #64748b;
+    color: var(--text-muted);
     line-height: 1.5;
   }
-
-  /* Badges */
   .badge {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     font-weight: 600;
-    padding: 3px 9px;
-    border-radius: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+    background: transparent;
+    border: 1px solid;
   }
   .badge.required {
-    background: #fef3c7;
-    color: #92400e;
+    color: var(--accent);
+    border-color: var(--accent);
   }
   .badge.optional {
-    background: #e0e7ff;
-    color: #3730a3;
-  }
-  .badge.auto {
-    background: #dbeafe;
-    color: #1e40af;
+    color: var(--text-faint);
+    border-color: var(--border-strong);
   }
 
-  /* Chevron for collapsible */
-  .chevron {
-    display: inline-block;
-    margin-left: 6px;
-    transition: transform 0.2s;
-    color: #94a3b8;
+  /* ── Command callout (inside SSH step) ─────────────── */
+  .cmd-box {
+    margin: 0 0 16px 34px;
+    padding: 12px 14px;
+    border-left: 3px solid var(--accent);
+    background: var(--bg-soft);
+    border-radius: 4px;
   }
-  .chevron.open {
-    transform: rotate(90deg);
+  .cmd-box p {
+    margin: 0 0 8px;
+    font-size: 0.83rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .cmd-box a {
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .cmd-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: #0f172a;
+    color: #e2e8f0;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-family: 'SF Mono', Menlo, monospace;
+    font-size: 0.8rem;
+  }
+  .cmd-row code {
+    flex: 1;
+    overflow-x: auto;
+    white-space: nowrap;
   }
 
-  .step-body {
-    padding: 18px 24px 22px;
+  /* GitHub button row — slight indent under "2 GitHub" title */
+  .github-row {
+    margin-left: 34px;
   }
 
-  /* Sticky action bar */
+  /* ── Sticky action bar ───────────────────────────── */
   .actionbar {
     position: fixed;
     bottom: 0;
     left: 0;
     right: 0;
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(8px);
-    border-top: 1px solid #e2e8f0;
+    background: var(--bg-card);
+    border-top: 1px solid var(--border);
     padding: 14px 32px;
-    box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.06);
     z-index: 20;
   }
   .actionbar-inner {
-    max-width: 820px;
+    max-width: 800px;
     margin: 0 auto;
     display: flex;
     align-items: center;
-    gap: 14px;
-    justify-content: flex-end;
+    gap: 12px;
   }
-  .primary {
-    background: linear-gradient(135deg, #0f4c5c 0%, #1a6373 100%);
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    padding: 11px 26px;
-    font-size: 0.95rem;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: 0 2px 6px rgba(15, 76, 92, 0.25);
-    transition: transform 0.05s, box-shadow 0.15s;
+  .actionbar-hint {
+    flex: 1;
+    margin: 0;
+    font-size: 0.83rem;
+    color: var(--text-muted);
   }
-  .primary:hover {
-    box-shadow: 0 4px 12px rgba(15, 76, 92, 0.3);
-  }
-  .primary:active {
-    transform: translateY(1px);
-  }
-  .primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-    box-shadow: none;
-  }
-
   .toast {
     flex: 1;
-    padding: 9px 14px;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 8px 12px;
+    border: 1px solid var(--border-strong);
+    background: var(--bg-card);
     border-radius: 6px;
     font-size: 0.85rem;
-    line-height: 1.4;
-    animation: slideIn 0.2s ease-out;
+    line-height: 1.45;
+    color: var(--text);
   }
-  .toast.ok {
-    background: #d1fae5;
-    color: #065f46;
-    border: 1px solid #6ee7b7;
+  .toast.ok { border-color: var(--accent); color: var(--accent); }
+  .toast.err { border-color: var(--danger); color: var(--danger); }
+  .toast.info { border-color: var(--border-strong); color: var(--text-muted); }
+  .toast > span { flex: 1; color: var(--text); }
+
+  /* ── Buttons ─────────────────────────────────────── */
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 9px 22px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
   }
-  .toast.err {
-    background: #fee2e2;
-    color: #991b1b;
-    border: 1px solid #fca5a5;
+  .btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-outline {
+    background: transparent;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 9px 18px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
   }
-  .toast.info {
-    background: #dbeafe;
-    color: #1e40af;
-    border: 1px solid #93c5fd;
+  .btn-outline:hover { background: var(--accent-light); }
+
+  .ghost.small {
+    background: transparent;
+    color: #cbd5e1;
+    border: 1px solid #475569;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    cursor: pointer;
   }
-  @keyframes slideIn {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
+  .ghost.small:hover { background: #1e293b; color: #fff; }
 </style>

@@ -79,17 +79,13 @@ fn main() {
             commands::get_github_username,
             commands::clear_github_token,
             commands::start_github_login,
+            commands::move_to_tray,
+            commands::get_registry_url,
+            commands::set_registry_url,
         ])
-        .on_window_event(|window, event| {
-            // Hide the window instead of quitting on close — keep the MCP
-            // server running so registered AI apps stay connected. The user
-            // can bring the window back via the tray icon (left-click) or
-            // the tray menu's "Show AutoPipe".
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
-            }
-        })
+        // Window close (X button) now quits the app. Use the explicit
+        // "Move to tray" button in the UI (or the tray menu) when you
+        // want to keep AutoPipe running in the background.
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
 }
