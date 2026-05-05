@@ -116,10 +116,6 @@
         Configure AutoPipe with the short steps below.
       </p>
       <p class="lead">
-        GitHub connection is optional — without it, you can find, run, and
-        create pipelines, but you cannot upload or publish your own.
-      </p>
-      <p class="lead">
         If you're not sure how to configure things, see the detailed
         guide at
         <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>

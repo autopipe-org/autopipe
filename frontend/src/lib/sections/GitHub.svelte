@@ -110,7 +110,10 @@
   </div>
 
   <div class="repo-block">
-    <label class="repo-label">Upload to repo</label>
+    <p class="repo-hint">
+      Pipelines you upload will go to here. Change this if you want a
+      different repository name.
+    </p>
     <div class="repo-row">
       <span class="repo-prefix">github.com/{username}/</span>
       <input
@@ -118,15 +121,10 @@
         bind:value={repo}
         placeholder="autopipe-hub"
       />
-      <span class="repo-suffix">/pipelines/&lt;name&gt;/</span>
       <button class="ghost" disabled={repoSaving} onclick={saveRepo}>
         {repoSaving ? 'Saving…' : 'Save'}
       </button>
     </div>
-    <p class="repo-hint">
-      Pipelines you upload will go to here. Change this if you want a
-      different repository name.
-    </p>
   </div>
 {:else if userCode}
   <div class="device-flow">
@@ -233,7 +231,7 @@
   .ghost:hover { background: var(--accent-light); }
   .ghost:disabled { opacity: 0.6; cursor: not-allowed; }
   .repo-hint {
-    margin: 8px 0 0;
+    margin: 0 0 8px;
     font-size: 0.8rem;
     color: var(--text-muted);
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
