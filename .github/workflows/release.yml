@@ -50,14 +50,19 @@ jobs:
           key: ${{ matrix.artifact }}
       - name: Build CLI binary
         shell: bash
-        # `portable` feature pulls in vendored OpenSSL so cross-compiles
-        # (e.g., aarch64 → x86_64 Mac) don't need a target-matched system
-        # libssl. Adds ~30s to native builds — worth it for portability.
+        # Vendored OpenSSL (`--features portable`) is only needed for the
+        # Intel Mac cross-compile, where the ARM runner's brew openssl is
+        # the wrong architecture. Native builds use the system libssl on
+        # Linux/Mac or the runner-provided OpenSSL on Windows.
         run: |
+          FLAGS=""
+          if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
+            FLAGS="--features portable"
+          fi
           if [ -n "${{ matrix.target }}" ]; then
-            cargo build --release --target ${{ matrix.target }} --features portable -p autopipe --bin autopipe
+            cargo build --release --target ${{ matrix.target }} $FLAGS -p autopipe --bin autopipe
           else
-            cargo build --release --features portable -p autopipe --bin autopipe
+            cargo build --release $FLAGS -p autopipe --bin autopipe
           fi
       - name: Rename binary (Unix)
         if: matrix.ext == ''
@@ -89,8 +94,10 @@ jobs:
             target: aarch64-apple-darwin
           # Intel Mac DMG is cross-compiled from the ARM runner; the
           # dedicated macos-13 runner has effectively no capacity.
+          # `--features portable` pulls in vendored OpenSSL so the cross
+          # build doesn't try to link against ARM brew libssl.
           - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
+            args: "--target x86_64-apple-darwin --features portable"
             target: x86_64-apple-darwin
           - platform: ubuntu-24.04
             args: ""

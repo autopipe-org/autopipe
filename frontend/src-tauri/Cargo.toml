@@ -15,7 +15,7 @@ path = "src/main.rs"
 # the binary; we rename here so we can `use autopipe_desktop::commands` in
 # main.rs. The `tauri-ui` feature pulls in the Tauri runtime so commands.rs
 # compiles.
-autopipe_desktop = { package = "autopipe", path = "../../crates/desktop", features = ["tauri-ui", "portable"] }
+autopipe_desktop = { package = "autopipe", path = "../../crates/desktop", features = ["tauri-ui"] }
 
 # Pin tauri to the same minor version as the npm @tauri-apps/api so the
 # tauri-action build doesn't fail with a "version mismatched Tauri
@@ -34,3 +34,6 @@ tauri-build = "2"
 # Default Tauri build feature (custom protocol on production builds).
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Forwards to autopipe_desktop/portable so cross-compile builds (e.g. Intel
+# Mac from an ARM runner) can vendor OpenSSL via tauri-action `args`.
+portable = ["autopipe_desktop/portable"]
