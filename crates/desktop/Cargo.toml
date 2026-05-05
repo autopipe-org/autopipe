@@ -51,12 +51,11 @@ eframe = { version = "0.31", optional = true }
 tray-icon = { version = "0.19", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 
-# Tauri-based UI dependencies (optional). Versions are pinned exactly so
-# they line up with frontend/src-tauri/Cargo.toml — Cargo can otherwise
-# resolve mismatched patches that break tauri-runtime-wry's trait impls.
-tauri = { version = "=2.1.1", features = ["tray-icon"], optional = true }
-tauri-plugin-shell = { version = "=2.0.2", optional = true }
-tauri-plugin-dialog = { version = "=2.0.4", optional = true }
+# Tauri-based UI dependencies (optional). Use the latest 2.x line; Cargo
+# resolves a mutually compatible set when Cargo.lock is generated fresh.
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
