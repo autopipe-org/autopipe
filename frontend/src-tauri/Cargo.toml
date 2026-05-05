@@ -15,7 +15,7 @@ path = "src/main.rs"
 # the binary; we rename here so we can `use autopipe_desktop::commands` in
 # main.rs. The `tauri-ui` feature pulls in the Tauri runtime so commands.rs
 # compiles.
-autopipe_desktop = { package = "autopipe", path = "../../crates/desktop", features = ["tauri-ui"] }
+autopipe_desktop = { package = "autopipe", path = "../../crates/desktop", features = ["tauri-ui", "portable"] }
 
 # Pin tauri to the same minor version as the npm @tauri-apps/api so the
 # tauri-action build doesn't fail with a "version mismatched Tauri

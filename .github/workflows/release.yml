@@ -50,11 +50,14 @@ jobs:
           key: ${{ matrix.artifact }}
       - name: Build CLI binary
         shell: bash
+        # `portable` feature pulls in vendored OpenSSL so cross-compiles
+        # (e.g., aarch64 → x86_64 Mac) don't need a target-matched system
+        # libssl. Adds ~30s to native builds — worth it for portability.
         run: |
           if [ -n "${{ matrix.target }}" ]; then
-            cargo build --release --target ${{ matrix.target }} -p autopipe --bin autopipe
+            cargo build --release --target ${{ matrix.target }} --features portable -p autopipe --bin autopipe
           else
-            cargo build --release -p autopipe --bin autopipe
+            cargo build --release --features portable -p autopipe --bin autopipe
           fi
       - name: Rename binary (Unix)
         if: matrix.ext == ''
