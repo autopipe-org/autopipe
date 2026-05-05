@@ -2170,26 +2170,29 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         &self,
         Parameters(params): Parameters<CreateSymlinkParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        match self.ssh_run(&format!("test -e '{}' && echo 'exists'", shell_escape(&params.source))).await {
+        let source = windows_to_wsl(&params.source);
+        let target = windows_to_wsl(&params.target);
+
+        match self.ssh_run(&format!("test -e '{}' && echo 'exists'", shell_escape(&source))).await {
             Ok((output, 0)) if output.trim().contains("exists") => {}
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Source path '{}' does not exist on remote server",
-                    params.source
+                    source
                 ))]));
             }
         }
 
-        if let Some(parent) = std::path::Path::new(&params.target).parent() {
+        if let Some(parent) = std::path::Path::new(&target).parent() {
             let _ = self
                 .ssh_run(&format!("mkdir -p '{}'", shell_escape(&parent.to_string_lossy())))
                 .await;
         }
 
-        match self.ssh_run(&format!("ln -sf '{}' '{}'", shell_escape(&params.source), shell_escape(&params.target))).await {
+        match self.ssh_run(&format!("ln -sf '{}' '{}'", shell_escape(&source), shell_escape(&target))).await {
             Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Symlink created: {} -> {}",
-                params.target, params.source
+                target, source
             ))])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed to create symlink: {}",
@@ -2204,20 +2207,21 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         &self,
         Parameters(params): Parameters<RemoveSymlinkParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let symlink_path = windows_to_wsl(&params.symlink_path);
         let cmd = format!(
             "test -L '{}' && rm '{}' && echo 'removed' || echo 'not_a_symlink'",
-            shell_escape(&params.symlink_path), shell_escape(&params.symlink_path)
+            shell_escape(&symlink_path), shell_escape(&symlink_path)
         );
         match self.ssh_run(&cmd).await {
             Ok((output, 0)) if output.trim().contains("removed") => {
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Symlink '{}' removed",
-                    params.symlink_path
+                    symlink_path
                 ))]))
             }
             Ok((_, 0)) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "'{}' is not a symlink or does not exist",
-                params.symlink_path
+                symlink_path
             ))])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
                 "Failed: {}",
@@ -2466,35 +2470,39 @@ If this tool fails, fall back to create_symlink using the dest_dir shown in the 
                 Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
             }
         } else {
-            let link_name = std::path::Path::new(&params.source)
+            // The source for the symlink branch is a remote-server filesystem
+            // path. Translate Windows-style inputs (e.g. C:\data\foo) into
+            // their WSL equivalents before invoking SSH commands.
+            let source = windows_to_wsl(&params.source);
+            let link_name = std::path::Path::new(&source)
                 .file_name()
                 .map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_else(|| "input".to_string());
             let link_path = format!("{}/{}", dest_dir.trim_end_matches('/'), link_name);
 
             // Symlink: verify source exists (with hard timeout)
-            match self.ssh_run_timed(&format!("test -e '{}' && echo 'exists'", shell_escape(&params.source)), 60).await {
+            match self.ssh_run_timed(&format!("test -e '{}' && echo 'exists'", shell_escape(&source)), 60).await {
                 Ok((output, 0)) if output.trim().contains("exists") => {}
                 _ => {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "Source path '{}' does not exist on the remote server.\nFallback: use create_symlink with source='{}' target='{}'",
-                        params.source, params.source, link_path
+                        source, source, link_path
                     ))]));
                 }
             }
 
-            match self.ssh_run_timed(&format!("ln -sf '{}' '{}'", shell_escape(&params.source), shell_escape(&link_path)), 60).await {
+            match self.ssh_run_timed(&format!("ln -sf '{}' '{}'", shell_escape(&source), shell_escape(&link_path)), 60).await {
                 Ok((_, 0)) => Ok(CallToolResult::success(vec![Content::text(format!(
                     "Linked: {} -> {}\nUse as input_dir: {}",
-                    link_path, params.source, dest_dir
+                    link_path, source, dest_dir
                 ))])),
                 Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to create symlink: {}\nFallback: use create_symlink with source='{}' target='{}'",
-                    output.trim(), params.source, link_path
+                    output.trim(), source, link_path
                 ))])),
                 Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
                     "{}\nFallback: use create_symlink with source='{}' target='{}'",
-                    e, params.source, link_path
+                    e, source, link_path
                 ))])),
             }
         }
