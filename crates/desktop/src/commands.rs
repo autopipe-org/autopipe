@@ -341,7 +341,11 @@ pub fn init_state(app: &AppHandle) {
     let cfg = AppConfig::load();
     let daemon = McpDaemonHandle::start(cfg.mcp_port);
     let state: State<AppState> = app.state();
-    if let Ok(mut guard) = state.mcp.lock() {
+    // Bind the lock result to a named variable first; using it directly
+    // inside `if let` creates a temporary that the compiler thinks
+    // outlives `state`.
+    let lock_result = state.mcp.lock();
+    if let Ok(mut guard) = lock_result {
         *guard = Some(daemon);
     }
 }
