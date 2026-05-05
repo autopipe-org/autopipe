@@ -2,6 +2,10 @@
 // MCP server mode still works because Claude Desktop connects via pipes, not console.
 #![cfg_attr(all(target_os = "windows", feature = "gui"), windows_subsystem = "windows")]
 
+// These mod declarations make the binary self-contained. The same .rs
+// files are also re-exported via `lib.rs` so that the Tauri binary in
+// frontend/src-tauri/ can re-use them as a library without duplicating
+// any business logic.
 #[cfg(feature = "gui")]
 mod app;
 mod claude_config;
@@ -179,6 +183,10 @@ fn main() {
         }
         println!("Registry URLs:  {:?}", cfg.registry_urls);
     } else {
+        // The original `autopipe` binary keeps its legacy egui UI behind the
+        // `gui` feature. The new Svelte/Tauri UI lives in a separate Cargo
+        // project at frontend/src-tauri/ — run it with `npm run tauri dev`
+        // from the frontend/ directory.
         #[cfg(feature = "gui")]
         {
             init_file_logging();
@@ -192,15 +200,13 @@ fn main() {
             println!("Compatible with any MCP client that supports Streamable HTTP.");
             println!();
             println!("Usage:");
-            println!("  desktop                 Launch the GUI/tray app (recommended)");
-            println!("  desktop --mcp-server    Run as stdio MCP server (spawned by clients like Claude Desktop)");
-            println!("  desktop --register      Register in supported AI clients");
-            println!("  desktop --unregister    Unregister from supported clients");
-            println!("  desktop --status        Show registration status and current URL");
+            println!("  autopipe                Launch the legacy egui GUI (needs --features gui)");
+            println!("  autopipe --mcp-server   Run as stdio MCP server");
+            println!("  autopipe --register     Register in supported AI clients");
+            println!("  autopipe --unregister   Unregister from supported clients");
+            println!("  autopipe --status       Show registration status and current URL");
             println!();
-            println!("The MCP HTTP server runs while the GUI/tray app is open.");
-            println!("GUI mode requires: cargo build --features gui");
-            println!("(needs GTK development libraries on Linux)");
+            println!("New Svelte UI: cd frontend && npm run tauri dev");
         }
     }
 }

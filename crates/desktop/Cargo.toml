@@ -3,9 +3,24 @@ name = "autopipe"
 version.workspace = true
 edition.workspace = true
 
+# Expose the desktop crate as both a library (so the Tauri binary in
+# frontend/src-tauri can re-use commands.rs etc.) and the original CLI/GUI
+# binary used for `cargo build -p autopipe`.
+[lib]
+name = "autopipe_desktop"
+path = "src/lib.rs"
+
+[[bin]]
+name = "autopipe"
+path = "src/main.rs"
+
 [features]
 default = []
 gui = ["eframe", "tray-icon", "image", "gtk"]
+# New web-based UI via Tauri 2 + Svelte. Replaces `gui` long-term.
+# When enabled here it adds the Tauri runtime as a dependency so commands.rs
+# compiles; the actual `tauri::Builder` lives in frontend/src-tauri.
+tauri-ui = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog"]
 portable = ["dep:openssl"]
 
 [dependencies]
@@ -35,6 +50,11 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 eframe = { version = "0.31", optional = true }
 tray-icon = { version = "0.19", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+# Tauri-based UI dependencies (optional)
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", optional = true }
