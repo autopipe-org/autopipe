@@ -300,14 +300,21 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceFlowDto, String>
         .to_string();
     let interval = device_body["interval"].as_u64().unwrap_or(5);
 
-    // 2. Poll for token in the background; emit event when done.
+    // 2. Poll for token in the background; emit an event when done.
+    // Use Tauri's async runtime so the task is bound to the app lifetime
+    // (a bare `tokio::spawn` can be dropped when the calling command
+    // returns, depending on how the runtime is structured).
+    // Surface errors via `github-login-error` instead of silently
+    // continuing — silent loops were leaving the UI stuck on "Waiting
+    // for you to authorize..." even after a successful browser auth.
     let app_handle = app.clone();
     let base_owned = base.to_string();
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let client = reqwest::Client::new();
         let poll_url = format!("{}/api/auth/device/poll", base_owned);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+
             let resp = match client
                 .post(&poll_url)
                 .json(&serde_json::json!({ "device_code": device_code }))
@@ -315,16 +322,43 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceFlowDto, String>
                 .await
             {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => {
+                    let _ = app_handle.emit::<String>(
+                        "github-login-error",
+                        format!("Network error while polling: {}", e),
+                    );
+                    break;
+                }
             };
+
+            let status = resp.status();
             let text = match resp.text().await {
                 Ok(t) => t,
-                Err(_) => continue,
+                Err(e) => {
+                    let _ = app_handle.emit::<String>(
+                        "github-login-error",
+                        format!("Failed to read poll response: {}", e),
+                    );
+                    break;
+                }
             };
+
             let body: serde_json::Value = match serde_json::from_str(&text) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    let _ = app_handle.emit::<String>(
+                        "github-login-error",
+                        format!(
+                            "Invalid JSON from poll endpoint (status {}): {} — body: {}",
+                            status,
+                            e,
+                            &text[..text.len().min(200)]
+                        ),
+                    );
+                    break;
+                }
             };
+
             if let Some(token) = body["access_token"].as_str() {
                 let mut cfg = AppConfig::load();
                 cfg.github_token = Some(token.to_string());
@@ -333,10 +367,28 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceFlowDto, String>
                 let _ = app_handle.emit("github-login-complete", username);
                 break;
             }
-            if let Some(err) = body["error"].as_str() {
-                if err != "authorization_pending" && err != "slow_down" {
+
+            let err = body["error"].as_str().unwrap_or("");
+            match err {
+                "authorization_pending" | "slow_down" => continue,
+                "expired_token" => {
+                    let _ = app_handle.emit::<String>(
+                        "github-login-error",
+                        "Device code expired. Please try again.".into(),
+                    );
+                    break;
+                }
+                "" => {
+                    // No access_token and no error key — unexpected shape.
+                    let _ = app_handle.emit::<String>(
+                        "github-login-error",
+                        format!("Unexpected poll response: {}", &text[..text.len().min(200)]),
+                    );
+                    break;
+                }
+                other => {
                     let _ = app_handle
-                        .emit::<Option<String>>("github-login-error", Some(err.to_string()));
+                        .emit::<String>("github-login-error", format!("Poll error: {}", other));
                     break;
                 }
             }
