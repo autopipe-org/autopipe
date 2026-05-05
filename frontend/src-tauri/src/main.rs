@@ -3,7 +3,6 @@
 
 use autopipe_desktop::commands;
 use tauri::{
-    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
@@ -24,12 +23,14 @@ fn main() {
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
-            // Use the default window icon for the tray. The app must have
-            // at least one icon configured in tauri.conf.json's bundle.icon.
+            // Use the default window icon for the tray. tauri.conf.json must
+            // declare at least one icon under bundle.icon for this to be
+            // populated; we panic with a clear message otherwise so the
+            // misconfiguration is obvious during development.
             let icon = app
                 .default_window_icon()
                 .cloned()
-                .unwrap_or_else(|| Image::from_bytes(include_bytes!("../icons/icon.png")).unwrap());
+                .expect("no default window icon — add one to tauri.conf.json bundle.icon");
 
             let _tray = TrayIconBuilder::with_id("autopipe-tray")
                 .icon(icon)
