@@ -21,9 +21,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--mcp-server") {
-        // Stdio MCP server mode (spawned by Claude Desktop / Codex / Gemini)
+        // Stdio MCP server mode (spawned by Claude Desktop / Codex)
         let rt = tokio::runtime::Runtime::new().expect("failed to create runtime");
-        if let Err(e) = rt.block_on(mcp::server::run_mcp_server()) {
+        if let Err(e) = rt.block_on(mcp::server::run_mcp_stdio_server()) {
             eprintln!("MCP server error: {}", e);
             std::process::exit(1);
         }
