@@ -27,6 +27,7 @@
   let busy = $state(false);
   let toast = $state<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
   let showAdvanced = $state(false);
+  let showVerify = $state(false);
 
   function showToast(kind: 'ok' | 'err' | 'info', text: string) {
     toast = { kind, text };
@@ -87,10 +88,12 @@
 <div class="page">
   <header class="topbar">
     <div class="brand">
-      <div class="logo">AutoPipe</div>
-      <div class="tagline">
-        Generate, execute, visualize, and share<br />
-        reproducible containerized pipelines with AI.
+      <img src="/logo.png" alt="" class="brand-logo" />
+      <div class="brand-text">
+        <div class="logo">AutoPipe</div>
+        <div class="tagline">
+          Generate, execute, visualize, and share reproducible containerized pipelines with AI.
+        </div>
       </div>
     </div>
     <button class="icon-btn" title="Advanced" onclick={() => (showAdvanced = true)}>
@@ -134,26 +137,35 @@
         computer you're running this app on, or a separate Linux server.
       </p>
 
-      <div class="cmd-box">
-        <p>
-          To verify that machine is ready and get the values to enter below,
-          run this on it (per-OS instructions:
-          <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
-            autopipe.org/getting-started</a>):
-        </p>
-        <div class="cmd-row">
-          <code>curl -fsSL https://download.autopipe.org/setup.sh | bash</code>
-          <button
-            class="ghost small"
-            onclick={() => {
-              navigator.clipboard.writeText(
-                'curl -fsSL https://download.autopipe.org/setup.sh | bash'
-              );
-              showToast('ok', 'Command copied.');
-            }}
-          >Copy</button>
+      <button
+        class="verify-toggle"
+        onclick={() => (showVerify = !showVerify)}
+        aria-expanded={showVerify}
+      >
+        <span class="chevron" class:open={showVerify}>▸</span>
+        To verify that machine is ready and get the values to enter below
+      </button>
+      {#if showVerify}
+        <div class="cmd-box">
+          <p>
+            Run this on the analysis machine (per-OS instructions:
+            <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
+              autopipe.org/getting-started</a>):
+          </p>
+          <div class="cmd-row">
+            <code>curl -fsSL https://download.autopipe.org/setup.sh | bash</code>
+            <button
+              class="ghost small"
+              onclick={() => {
+                navigator.clipboard.writeText(
+                  'curl -fsSL https://download.autopipe.org/setup.sh | bash'
+                );
+                showToast('ok', 'Command copied.');
+              }}
+            >Copy</button>
+          </div>
         </div>
-      </div>
+      {/if}
 
       <SshSection bind:config={sshConfig} />
     </section>
@@ -231,6 +243,23 @@
     justify-content: space-between;
     max-width: 100%;
   }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-logo {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    object-fit: cover;
+    flex-shrink: 0;
+  }
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
   .brand .logo {
     font-size: 1.3rem;
     font-weight: 700;
@@ -243,6 +272,9 @@
     color: var(--text-muted);
     line-height: 1.3;
     margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .icon-btn {
     width: 36px;
@@ -361,7 +393,36 @@
     border-color: var(--border-strong);
   }
 
-  /* ── Command callout (inside SSH step) ─────────────── */
+  /* ── Verify toggle + command callout (inside SSH step) ─ */
+  .verify-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 12px 34px;
+    padding: 6px 10px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: 0.83rem;
+    cursor: pointer;
+    text-align: left;
+    width: calc(100% - 34px);
+    font-family: inherit;
+  }
+  .verify-toggle:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-light);
+  }
+  .chevron {
+    display: inline-block;
+    transition: transform 0.15s;
+    color: var(--text-faint);
+    font-size: 0.7rem;
+  }
+  .chevron.open { transform: rotate(90deg); color: var(--accent); }
+
   .cmd-box {
     margin: 0 0 16px 34px;
     padding: 12px 14px;
@@ -431,23 +492,24 @@
     font-size: 0.83rem;
     color: var(--text-muted);
   }
+  /* Toast in the sticky bar — visually identical to .actionbar-hint
+     (same size, same muted color, no border) so it doesn't fight for
+     attention. The leading icon hints at the kind without color noise. */
   .toast {
     flex: 1;
     display: flex;
-    gap: 8px;
+    gap: 6px;
     align-items: flex-start;
-    padding: 8px 12px;
-    border: 1px solid var(--border-strong);
-    background: var(--bg-card);
-    border-radius: 6px;
-    font-size: 0.85rem;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-size: 0.83rem;
     line-height: 1.45;
-    color: var(--text);
+    color: var(--text-muted);
   }
-  .toast.ok { border-color: var(--accent); color: var(--accent); }
-  .toast.err { border-color: var(--danger); color: var(--danger); }
-  .toast.info { border-color: var(--border-strong); color: var(--text-muted); }
-  .toast > span { flex: 1; color: var(--text); }
+  .toast.err { color: var(--danger); }
+  .toast > span { flex: 1; }
 
   /* ── Buttons ─────────────────────────────────────── */
   .btn-primary {

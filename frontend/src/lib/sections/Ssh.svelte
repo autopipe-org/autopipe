@@ -17,7 +17,12 @@
   </label>
   <label>
     <span>Port</span>
-    <input type="number" bind:value={config.port} />
+    <input
+      type="text"
+      inputmode="numeric"
+      pattern="[0-9]*"
+      bind:value={config.port}
+    />
   </label>
   <label>
     <span>User</span>

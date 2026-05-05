@@ -194,8 +194,8 @@
     padding: 18px 22px 22px;
     overflow-y: auto;
   }
-  .block { margin-bottom: 24px; }
-  .block:last-child { margin-bottom: 0; }
+  .block { margin-bottom: 24px; padding-bottom: 24px; border-bottom: 1px solid var(--border); }
+  .block:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
   .block h3 {
     margin: 0 0 6px;
     font-size: 0.95rem;
