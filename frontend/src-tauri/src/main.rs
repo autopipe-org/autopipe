@@ -2,6 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use autopipe_desktop::commands;
+use tauri::{
+    image::Image,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+};
 
 fn main() {
     tauri::Builder::default()
@@ -10,8 +16,54 @@ fn main() {
         .manage(commands::AppState::default())
         .setup(|app| {
             // Start the MCP daemon as soon as the app is ready so the
-            // Status tab can immediately show the URL/token.
+            // Status section can immediately show the URL/token.
             commands::init_state(&app.handle());
+
+            // Build the system tray with a Show / Quit menu.
+            let show_item = MenuItem::with_id(app, "show", "Show AutoPipe", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            // Use the default window icon for the tray. The app must have
+            // at least one icon configured in tauri.conf.json's bundle.icon.
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .unwrap_or_else(|| Image::from_bytes(include_bytes!("../icons/icon.png")).unwrap());
+
+            let _tray = TrayIconBuilder::with_id("autopipe-tray")
+                .icon(icon)
+                .tooltip("AutoPipe")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                // Left-click the tray icon to bring the window back.
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -29,8 +81,9 @@ fn main() {
         ])
         .on_window_event(|window, event| {
             // Hide the window instead of quitting on close — keep the MCP
-            // server running so registered AI apps stay connected. (When the
-            // tray icon lands in Phase 3 the user can re-open from there.)
+            // server running so registered AI apps stay connected. The user
+            // can bring the window back via the tray icon (left-click) or
+            // the tray menu's "Show AutoPipe".
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();

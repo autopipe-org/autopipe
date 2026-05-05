@@ -62,17 +62,15 @@ Outputs:
 
 ## Migration roadmap
 
-- [x] **Phase 1**: Frontend skeleton — Svelte UI for all 4 tabs
-- [x] **Phase 2**: `commands.rs` in `crates/desktop` exposing Rust functions to JS
-  (register_mcp, unregister_mcp, get_mcp_status, set_mcp_port, rotate_mcp_token,
-  get_ssh_config, save_ssh_config, start_github_login, get_github_username,
-  clear_github_token)
-- [x] **Phase 4** (early): `main.rs` branches to `run_tauri()` when `tauri-ui`
-  feature is enabled; CLI modes (`--mcp-server`, `--register`, etc.) untouched
-- [ ] **Phase 3**: Tray icon via Tauri 2 tray API (port from `tray.rs`)
+- [x] **Phase 1**: Frontend skeleton — Svelte UI scaffolded
+- [x] **Phase 2**: `commands.rs` exposing 11 Rust functions to JS
+- [x] **Phase 3**: Tray icon (left-click brings window back, right-click for menu)
+- [x] **Phase 4** (partial): autopipe-tauri binary with close-to-hide
+- [x] **Phase 7** (initial): single-page layout with Required/Optional badges,
+  collapsible advanced section, sticky save bar, gradient action button
 - [ ] **Phase 5**: Remove `crates/desktop/src/app.rs` and the `gui` Cargo feature
 - [ ] **Phase 6**: Update GitHub Actions release workflow to use `cargo tauri build`
-- [ ] **Phase 7**: Polish design (Tailwind / shadcn-svelte / dark mode)
+- [ ] **Phase 7** (more): Tailwind, dark mode, refined typography
 
 ## Building (current state)
 
