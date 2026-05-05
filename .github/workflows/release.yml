@@ -119,6 +119,11 @@ jobs:
         with:
           workspaces: ". -> target"
           key: ${{ matrix.platform }}-${{ matrix.target }}
+          # Skip cache save on Windows: the post-build tar+zstd step
+          # silently fails on the large Tauri target dir and marks the
+          # entire job as failed (which then blocks attach-cli). Cache
+          # restore still works from earlier non-Windows saves.
+          save-if: ${{ runner.os != 'Windows' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -154,9 +159,13 @@ jobs:
           args: ${{ matrix.args }}
 
   # Attach the CLI artifacts to the GitHub release that tauri-action
-  # already created (or will create).
+  # already created (or will create). Run as long as build-cli succeeded,
+  # even if a build-tauri job reported failure — the GitHub Release is
+  # created by the first successful tauri-action and CLI binaries are
+  # independent products that should still be published.
   attach-cli:
     needs: [build-cli, build-tauri]
+    if: always() && needs.build-cli.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
