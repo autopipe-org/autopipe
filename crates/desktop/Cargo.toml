@@ -3,9 +3,14 @@ name = "autopipe"
 version.workspace = true
 edition.workspace = true
 
-# Expose the desktop crate as both a library (so the Tauri binary in
-# frontend/src-tauri can re-use commands.rs etc.) and the original CLI/GUI
-# binary used for `cargo build -p autopipe`.
+# This crate is published as both a library and a CLI binary:
+#   - `autopipe_desktop` library: re-exports modules so the new Tauri
+#     binary at frontend/src-tauri/ can re-use everything (config, MCP
+#     server, SSH, claude_config, command handlers, etc.) without
+#     duplication.
+#   - `autopipe` binary: the CLI entry point used by AI clients
+#     (Claude Desktop, Codex CLI) that spawn `autopipe --mcp-server`
+#     and by users running `autopipe --register`/`--status`.
 [lib]
 name = "autopipe_desktop"
 path = "src/lib.rs"
@@ -16,10 +21,9 @@ path = "src/main.rs"
 
 [features]
 default = []
-gui = ["eframe", "tray-icon", "image", "gtk"]
-# New web-based UI via Tauri 2 + Svelte. Replaces `gui` long-term.
-# When enabled here it adds the Tauri runtime as a dependency so commands.rs
-# compiles; the actual `tauri::Builder` lives in frontend/src-tauri.
+# Pulls in the Tauri runtime + plugins so commands.rs compiles. The
+# actual `tauri::Builder` lives in frontend/src-tauri/, which depends
+# on this library with the feature enabled.
 tauri-ui = ["dep:tauri", "dep:tauri-plugin-shell", "dep:tauri-plugin-dialog"]
 portable = ["dep:openssl"]
 
@@ -46,19 +50,11 @@ tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 
-# GUI dependencies (optional, requires GTK on Linux)
-eframe = { version = "0.31", optional = true }
-tray-icon = { version = "0.19", optional = true }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
-
 # Tauri-based UI dependencies (optional). Use the latest 2.x line; Cargo
 # resolves a mutually compatible set when Cargo.lock is generated fresh.
 tauri = { version = "2", features = ["tray-icon"], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"

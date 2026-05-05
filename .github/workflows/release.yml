@@ -11,272 +11,113 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --release --features gui,portable
-
-      - name: Create NSIS installer script
-        shell: pwsh
-        run: |
-          $version = "${{ github.ref_name }}".TrimStart("v")
-          @"
-          !include "MUI2.nsh"
-
-          !define MUI_ICON "crates\desktop\assets\app.ico"
-          !define MUI_UNICON "crates\desktop\assets\app.ico"
-
-          Name "AutoPipe"
-          OutFile "AutoPipe-Setup-${{ github.ref_name }}.exe"
-          InstallDir "`$PROGRAMFILES\AutoPipe"
-          RequestExecutionLevel admin
-
-          !insertmacro MUI_PAGE_DIRECTORY
-          !insertmacro MUI_PAGE_INSTFILES
-          !insertmacro MUI_LANGUAGE "English"
-
-          Section "Install"
-            SetOutPath "`$INSTDIR"
-            File "target\release\autopipe.exe"
-            File "crates\desktop\assets\app.ico"
-
-            CreateDirectory "`$SMPROGRAMS\AutoPipe"
-            CreateShortcut "`$SMPROGRAMS\AutoPipe\AutoPipe.lnk" "`$INSTDIR\autopipe.exe" "" "`$INSTDIR\app.ico"
-            CreateShortcut "`$DESKTOP\AutoPipe.lnk" "`$INSTDIR\autopipe.exe" "" "`$INSTDIR\app.ico"
-
-            WriteUninstaller "`$INSTDIR\uninstall.exe"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\AutoPipe" "DisplayName" "AutoPipe"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\AutoPipe" "UninstallString" "`$INSTDIR\uninstall.exe"
-            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\AutoPipe" "DisplayVersion" "$version"
-          SectionEnd
-
-          Section "Uninstall"
-            Delete "`$INSTDIR\autopipe.exe"
-            Delete "`$INSTDIR\app.ico"
-            Delete "`$INSTDIR\uninstall.exe"
-            RMDir "`$INSTDIR"
-            Delete "`$SMPROGRAMS\AutoPipe\AutoPipe.lnk"
-            Delete "`$DESKTOP\AutoPipe.lnk"
-            RMDir "`$SMPROGRAMS\AutoPipe"
-            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\AutoPipe"
-          SectionEnd
-          "@ | Out-File -Encoding UTF8 installer.nsi
-
-      - name: Install NSIS
-        run: choco install nsis -y --force
-
-      - name: Build NSIS installer
-        shell: pwsh
-        run: |
-          $env:PATH += ";${env:ProgramFiles(x86)}\NSIS;${env:ProgramFiles}\NSIS"
-          makensis installer.nsi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: |
-            target/release/autopipe.exe
-            AutoPipe-Setup-${{ github.ref_name }}.exe
-
-  build-macos:
-    runs-on: macos-latest
+  # The CLI binary (used by AI clients that spawn `autopipe --mcp-server`
+  # over stdio) is built once on Linux + Mac + Windows so users on each
+  # platform can download a portable executable.
+  build-cli:
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
-            arch: arm64
-          - target: x86_64-apple-darwin
-            arch: x64
+          - os: ubuntu-22.04
+            artifact: autopipe-linux-x64
+            ext: ""
+          - os: macos-latest
+            artifact: autopipe-macos-arm64
+            ext: ""
+          - os: windows-latest
+            artifact: autopipe.exe
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - name: Build CLI binary
+        run: cargo build --release -p autopipe --bin autopipe
+      - name: Rename binary (Unix)
+        if: matrix.ext == ''
+        run: cp target/release/autopipe ${{ matrix.artifact }}
+      - name: Rename binary (Windows)
+        if: matrix.ext == '.exe'
+        shell: pwsh
+        run: Copy-Item target/release/autopipe.exe ${{ matrix.artifact }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  # GUI app (Tauri + Svelte) bundled per-platform via tauri-action.
+  # Produces: .exe (Windows), .dmg (macOS), .deb + .AppImage (Linux).
+  build-tauri:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: ""
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          targets: ${{ matrix.target }}
+          workspaces: ". -> target"
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
         with:
-          key: ${{ matrix.target }}
+          node-version: 20
 
-      - name: Build
-        run: cargo build --release --features gui,portable --target ${{ matrix.target }}
-
-      - name: Create macOS .app bundle
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-          APP="AutoPipe.app"
-
-          # Create .app bundle structure
-          mkdir -p "$APP/Contents/MacOS"
-          mkdir -p "$APP/Contents/Resources"
-          cp target/${{ matrix.target }}/release/autopipe "$APP/Contents/MacOS/autopipe"
-          chmod +x "$APP/Contents/MacOS/autopipe"
-
-          # Generate .icns icon from logo.png
-          mkdir -p AppIcon.iconset
-          sips -z 16 16     web/static/logo.png --out AppIcon.iconset/icon_16x16.png
-          sips -z 32 32     web/static/logo.png --out AppIcon.iconset/icon_16x16@2x.png
-          sips -z 32 32     web/static/logo.png --out AppIcon.iconset/icon_32x32.png
-          sips -z 64 64     web/static/logo.png --out AppIcon.iconset/icon_32x32@2x.png
-          sips -z 128 128   web/static/logo.png --out AppIcon.iconset/icon_128x128.png
-          sips -z 256 256   web/static/logo.png --out AppIcon.iconset/icon_128x128@2x.png
-          sips -z 256 256   web/static/logo.png --out AppIcon.iconset/icon_256x256.png
-          sips -z 512 512   web/static/logo.png --out AppIcon.iconset/icon_256x256@2x.png
-          sips -z 512 512   web/static/logo.png --out AppIcon.iconset/icon_512x512.png
-          sips -z 1024 1024 web/static/logo.png --out AppIcon.iconset/icon_512x512@2x.png
-          iconutil -c icns AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
-
-          # Create Info.plist
-          cat > "$APP/Contents/Info.plist" << PLIST
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key>
-            <string>AutoPipe</string>
-            <key>CFBundleDisplayName</key>
-            <string>AutoPipe</string>
-            <key>CFBundleIdentifier</key>
-            <string>org.autopipe.desktop</string>
-            <key>CFBundleVersion</key>
-            <string>${VERSION}</string>
-            <key>CFBundleShortVersionString</key>
-            <string>${VERSION}</string>
-            <key>CFBundleExecutable</key>
-            <string>autopipe</string>
-            <key>CFBundleIconFile</key>
-            <string>AppIcon</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>NSHighResolutionCapable</key>
-            <true/>
-            <key>LSMinimumSystemVersion</key>
-            <string>11.0</string>
-          </dict>
-          </plist>
-          PLIST
-
-      - name: Create DMG
-        run: |
-          DMG_NAME="AutoPipe-${{ github.ref_name }}-macos-${{ matrix.arch }}.dmg"
-          mkdir -p dmg-content
-          ditto AutoPipe.app dmg-content/AutoPipe.app
-          ln -s /Applications dmg-content/Applications
-          sync
-          sleep 5
-          # Retry hdiutil up to 3 times (macOS indexing can lock files)
-          for i in 1 2 3; do
-            hdiutil create -volname "AutoPipe" -srcfolder dmg-content \
-              -ov -format UDZO "$DMG_NAME" && break
-            echo "hdiutil attempt $i failed, retrying in 5s..."
-            sleep 5
-          done
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-${{ matrix.arch }}
-          path: AutoPipe-${{ github.ref_name }}-macos-${{ matrix.arch }}.dmg
-
-  build-linux:
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libssl-dev libxdo-dev
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            patchelf
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm install
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          key: linux-22.04
+          projectPath: frontend
+          tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: false
+          args: ${{ matrix.args }}
 
-      - name: Build
-        run: cargo build --release --features gui,portable
-
-      - name: Rename binary
-        run: cp target/release/autopipe autopipe-${{ github.ref_name }}-linux-x64
-
-      - name: Create .deb package
-        run: |
-          VERSION="${{ github.ref_name }}"
-          VERSION="${VERSION#v}"
-
-          mkdir -p pkg/DEBIAN
-          mkdir -p pkg/usr/bin
-          mkdir -p pkg/usr/share/applications
-          mkdir -p pkg/usr/share/icons/hicolor/256x256/apps
-
-          cp target/release/autopipe pkg/usr/bin/
-          chmod +x pkg/usr/bin/autopipe
-          cp web/static/logo.png pkg/usr/share/icons/hicolor/256x256/apps/autopipe.png
-
-          cat > pkg/DEBIAN/control << EOF
-          Package: autopipe
-          Version: ${VERSION}
-          Architecture: amd64
-          Maintainer: AutoPipe Team <contact@autopipe.org>
-          Description: Bioinformatics pipeline management tool
-           MCP server for bioinformatics pipeline management.
-           Compatible with Claude Desktop and any MCP-compatible app.
-          Depends: libgtk-3-0, libssl3, libxdo3
-          EOF
-
-          cat > pkg/usr/share/applications/autopipe.desktop << EOF
-          [Desktop Entry]
-          Name=AutoPipe
-          Exec=/usr/bin/autopipe
-          Icon=autopipe
-          Type=Application
-          Categories=Science;Education;
-          Comment=Bioinformatics pipeline management tool
-          EOF
-
-          dpkg-deb --build pkg autopipe_${VERSION}_amd64.deb
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: |
-            autopipe-${{ github.ref_name }}-linux-x64
-            autopipe_*_amd64.deb
-
-  release:
-    needs: [build-windows, build-macos, build-linux]
+  # Attach the CLI artifacts to the GitHub release that tauri-action
+  # already created (or will create).
+  attach-cli:
+    needs: [build-cli, build-tauri]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
-
-      - name: Create Release
+      - name: Attach CLI binaries to release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
           files: |
+            autopipe-linux-x64
+            autopipe-macos-arm64
             autopipe.exe
-            AutoPipe-Setup-*.exe
-            AutoPipe-*-macos-arm64.dmg
-            AutoPipe-*-macos-x64.dmg
-            autopipe-*-linux-x64
-            autopipe_*_amd64.deb
