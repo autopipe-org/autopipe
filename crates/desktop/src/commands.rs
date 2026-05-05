@@ -256,33 +256,60 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceFlowDto, String>
     let client = reqwest::Client::new();
     let base = registry_url.trim_end_matches('/');
 
-    // 1. Request a device code from the registry's GitHub proxy
-    let device_resp = client
-        .post(format!("{}/api/github/device", base))
+    // 1. Request a device code from AutoPipeHub's auth proxy.
+    // (The endpoint paths and JSON shape match the original egui flow in
+    // app.rs::run_device_flow. Reading the response as text first gives a
+    // clearer error message than reqwest's "error decoding response body".)
+    let device_url = format!("{}/api/auth/device", base);
+    let resp = client
+        .post(&device_url)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
-    let device_body: serde_json::Value = device_resp.json().await.map_err(|e| e.to_string())?;
-    let device_code = device_body["device_code"].as_str()
-        .ok_or("missing device_code")?
+        .map_err(|e| format!("Request to {} failed: {}", device_url, e))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+    let device_body: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "Invalid JSON from {} (status {}): {} — body: {}",
+            device_url,
+            status,
+            e,
+            &text[..text.len().min(200)]
+        )
+    })?;
+
+    let device_code = device_body["device_code"]
+        .as_str()
+        .ok_or_else(|| {
+            device_body["error"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "Missing device_code in response".to_string())
+        })?
         .to_string();
-    let user_code = device_body["user_code"].as_str()
-        .ok_or("missing user_code")?
+    let user_code = device_body["user_code"]
+        .as_str()
+        .ok_or("Missing user_code")?
         .to_string();
-    let verification_uri = device_body["verification_uri"].as_str()
-        .ok_or("missing verification_uri")?
+    let verification_uri = device_body["verification_uri"]
+        .as_str()
+        .unwrap_or("https://github.com/login/device")
         .to_string();
     let interval = device_body["interval"].as_u64().unwrap_or(5);
 
-    // 2. Poll for token in the background; emit event when done
+    // 2. Poll for token in the background; emit event when done.
     let app_handle = app.clone();
     let base_owned = base.to_string();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
+        let poll_url = format!("{}/api/auth/device/poll", base_owned);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
             let resp = match client
-                .post(format!("{}/api/github/poll", base_owned))
+                .post(&poll_url)
                 .json(&serde_json::json!({ "device_code": device_code }))
                 .send()
                 .await
@@ -290,23 +317,26 @@ pub async fn start_github_login(app: AppHandle) -> Result<DeviceFlowDto, String>
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let body: serde_json::Value = match resp.json().await {
+            let text = match resp.text().await {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let body: serde_json::Value = match serde_json::from_str(&text) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
             if let Some(token) = body["access_token"].as_str() {
-                // Save token to config
                 let mut cfg = AppConfig::load();
                 cfg.github_token = Some(token.to_string());
                 let _ = cfg.save();
-                // Resolve username and notify frontend
                 let username = fetch_github_username(token).await.ok();
                 let _ = app_handle.emit("github-login-complete", username);
                 break;
             }
             if let Some(err) = body["error"].as_str() {
                 if err != "authorization_pending" && err != "slow_down" {
-                    let _ = app_handle.emit::<Option<String>>("github-login-error", Some(err.to_string()));
+                    let _ = app_handle
+                        .emit::<Option<String>>("github-login-error", Some(err.to_string()));
                     break;
                 }
             }

@@ -2,13 +2,74 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use autopipe_desktop::commands;
+use autopipe_desktop::{claude_config, config, mcp};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
 
+fn cli_mcp_url(cfg: &config::AppConfig) -> String {
+    let port = cfg.mcp_actual_port.unwrap_or(cfg.mcp_port);
+    format!("http://127.0.0.1:{}/mcp", port)
+}
+
 fn main() {
+    // Handle CLI modes BEFORE constructing the Tauri builder. Claude Desktop
+    // and friends spawn this binary with `--mcp-server` (and other CLI
+    // commands), and they expect a stdio MCP server — not a GUI window.
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--mcp-server") {
+        // Stdio MCP server mode (spawned by Claude Desktop / Codex / Gemini)
+        let rt = tokio::runtime::Runtime::new().expect("failed to create runtime");
+        if let Err(e) = rt.block_on(mcp::server::run_mcp_server()) {
+            eprintln!("MCP server error: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if args.iter().any(|a| a == "--register") {
+        let cfg = config::AppConfig::load();
+        let url = cli_mcp_url(&cfg);
+        let token = config::load_or_create_mcp_token().unwrap_or_default();
+        let results = claude_config::register_all(&url, &token);
+        for (client, result) in &results {
+            match result {
+                Ok(_) => println!("Registered in {}", client.name()),
+                Err(e) => eprintln!("Failed to register in {}: {}", client.name(), e),
+            }
+        }
+        return;
+    }
+
+    if args.iter().any(|a| a == "--unregister") {
+        for (client, result) in claude_config::unregister_all() {
+            match result {
+                Ok(_) => println!("Unregistered from {}", client.name()),
+                Err(e) => eprintln!("Failed to unregister from {}: {}", client.name(), e),
+            }
+        }
+        return;
+    }
+
+    if args.iter().any(|a| a == "--status") {
+        let cfg = config::AppConfig::load();
+        println!("MCP URL:        {}", cli_mcp_url(&cfg));
+        println!("Configured port: {}", cfg.mcp_port);
+        for (client, registered) in claude_config::status_all() {
+            let status = if registered { "registered" } else { "not registered" };
+            println!("  {}: {}", client.name(), status);
+        }
+        return;
+    }
+
+    // No CLI arg → launch the GUI/tray app.
+    run_gui();
+}
+
+fn run_gui() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
