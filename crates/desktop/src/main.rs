@@ -1,5 +1,5 @@
 // CLI entry point for the legacy `autopipe` binary. The GUI now lives in
-// frontend/src-tauri/ as the `autopipe-tauri` binary, which depends on the
+// frontend/src-tauri/ as the `autopipe` binary (Tauri shell), which depends on the
 // same modules via the `autopipe_desktop` library crate. This binary keeps
 // the historical CLI flags (`--mcp-server`, `--register`, `--unregister`,
 // `--status`) working so existing scripts and MCP client registrations

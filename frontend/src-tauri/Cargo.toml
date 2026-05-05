@@ -4,8 +4,12 @@ version = "0.1.0"
 edition = "2021"
 description = "AutoPipe desktop GUI (Tauri + Svelte)"
 
+# Binary name controls the installed .exe filename (e.g. shown in
+# Program Files, Task Manager, taskbar tooltip). Keep this aligned with
+# the legacy `autopipe` CLI so users see a single "autopipe" process
+# rather than the implementation detail "autopipe-tauri".
 [[bin]]
-name = "autopipe-tauri"
+name = "autopipe"
 path = "src/main.rs"
 
 [dependencies]
