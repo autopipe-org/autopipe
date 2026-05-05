@@ -21,28 +21,50 @@ jobs:
         include:
           - os: ubuntu-24.04
             artifact: autopipe-linux-x64
+            target: ""
             ext: ""
           - os: macos-latest
             artifact: autopipe-macos-arm64
+            target: aarch64-apple-darwin
             ext: ""
-          - os: macos-13
+          # Intel Mac is cross-compiled from the ARM runner. The dedicated
+          # `macos-13` Intel runner has effectively zero capacity since
+          # GitHub deprecated it, so jobs there hang indefinitely.
+          - os: macos-latest
             artifact: autopipe-macos-x64
+            target: x86_64-apple-darwin
             ext: ""
           - os: windows-latest
             artifact: autopipe.exe
+            target: ""
             ext: ".exe"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          key: ${{ matrix.artifact }}
       - name: Build CLI binary
-        run: cargo build --release -p autopipe --bin autopipe
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cargo build --release --target ${{ matrix.target }} -p autopipe --bin autopipe
+          else
+            cargo build --release -p autopipe --bin autopipe
+          fi
       - name: Rename binary (Unix)
         if: matrix.ext == ''
-        run: cp target/release/autopipe ${{ matrix.artifact }}
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cp target/${{ matrix.target }}/release/autopipe ${{ matrix.artifact }}
+          else
+            cp target/release/autopipe ${{ matrix.artifact }}
+          fi
       - name: Rename binary (Windows)
         if: matrix.ext == '.exe'
         shell: pwsh
@@ -61,12 +83,18 @@ jobs:
         include:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
-          - platform: macos-13
+            target: aarch64-apple-darwin
+          # Intel Mac DMG is cross-compiled from the ARM runner; the
+          # dedicated macos-13 runner has effectively no capacity.
+          - platform: macos-latest
             args: "--target x86_64-apple-darwin"
+            target: x86_64-apple-darwin
           - platform: ubuntu-24.04
             args: ""
+            target: ""
           - platform: windows-latest
             args: ""
+            target: ""
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
@@ -75,11 +103,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || (matrix.platform == 'macos-13' && 'x86_64-apple-darwin' || '') }}
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
+          key: ${{ matrix.platform }}-${{ matrix.target }}
 
       - uses: actions/setup-node@v4
         with:
