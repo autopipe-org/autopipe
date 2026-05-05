@@ -143,7 +143,8 @@
         aria-expanded={showVerify}
       >
         <span class="chevron" class:open={showVerify}>▸</span>
-        To verify that machine is ready and get the values to enter below
+        To install everything AutoPipe needs on that machine, or if you're
+        not sure what values to enter below, click here.
       </button>
       {#if showVerify}
         <div class="cmd-box">
@@ -251,8 +252,10 @@
   .brand-logo {
     width: 40px;
     height: 40px;
+    object-fit: contain;
+    background: #ffffff;
     border-radius: 8px;
-    object-fit: cover;
+    padding: 4px;
     flex-shrink: 0;
   }
   .brand-text {
