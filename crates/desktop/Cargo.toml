@@ -50,9 +50,10 @@ tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 openssl = { version = "0.10", features = ["vendored"], optional = true }
 
-# Tauri-based UI dependencies (optional). Use the latest 2.x line; Cargo
-# resolves a mutually compatible set when Cargo.lock is generated fresh.
-tauri = { version = "2", features = ["tray-icon"], optional = true }
+# Tauri-based UI dependencies (optional). Pin tauri to the same minor
+# version as the npm @tauri-apps/api so tauri-action's package check
+# passes; bump both at the same time when upgrading.
+tauri = { version = "2.11", features = ["tray-icon"], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
 

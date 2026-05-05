@@ -17,10 +17,10 @@ path = "src/main.rs"
 # compiles.
 autopipe_desktop = { package = "autopipe", path = "../../crates/desktop", features = ["tauri-ui"] }
 
-# Use the latest Tauri 2.x line. Cargo will resolve all tauri-* crates
-# to mutually compatible patch versions when Cargo.lock is regenerated
-# from scratch (rm Cargo.lock && cargo build).
-tauri = { version = "2", features = ["tray-icon"] }
+# Pin tauri to the same minor version as the npm @tauri-apps/api so the
+# tauri-action build doesn't fail with a "version mismatched Tauri
+# packages" error. Bump both at the same time when upgrading.
+tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
