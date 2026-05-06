@@ -945,7 +945,7 @@ impl AutoPipeServer {
                 .header("User-Agent", "autopipe-desktop")
                 .json(&serde_json::json!({
                     "name": repo_name,
-                    "description": "AutoPipe bioinformatics pipelines and plugins",
+                    "description": "AutoPipe pipelines",
                     "auto_init": true
                 }))
                 .send()
