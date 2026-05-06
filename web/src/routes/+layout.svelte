@@ -49,15 +49,14 @@
 {#if splashVisible}
 	<div class="splash" class:splash-fade={splashFading}>
 		<div class="splash-inner">
-			<div class="splash-icon">
-				<span class="dot"></span><span class="line"></span><span class="dot"></span><span
-					class="line"
-				></span><span class="dot"></span>
+			<div class="splash-logo">
+				<img src="/logo.png" alt="Autopipe Hub" />
 			</div>
 			<div class="splash-title">Autopipe Hub</div>
-			<div class="splash-sub"></div>
-			<div class="splash-bar"><div class="splash-bar-fill"></div></div>
-			<div class="splash-loading">Loading...</div>
+			<div class="splash-sub">Loading pipelines...</div>
+			<div class="splash-spinner" aria-hidden="true">
+				<span></span><span></span><span></span>
+			</div>
 		</div>
 	</div>
 {/if}

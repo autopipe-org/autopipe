@@ -113,19 +113,70 @@ main { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
 .code-loading { display: flex; align-items: center; justify-content: center; height: 200px; color: #9ca3af; font-size: 14px; }
 
 /* Splash screen */
-.splash { position: fixed; inset: 0; background: #fff; z-index: 1000; display: flex; align-items: center; justify-content: center; transition: opacity 0.5s; }
+.splash {
+  position: fixed; inset: 0; z-index: 1000;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(15, 76, 92, 0.07), transparent 55%),
+    radial-gradient(circle at 80% 100%, rgba(15, 76, 92, 0.05), transparent 60%),
+    #fff;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity 0.5s ease;
+}
 .splash-fade { opacity: 0; }
-.splash-inner { text-align: center; }
-.splash-icon { display: flex; align-items: center; justify-content: center; gap: 0; margin-bottom: 24px; }
-.splash-icon .dot { width: 10px; height: 10px; background: #0f4c5c; border-radius: 50%; }
-.splash-icon .line { width: 32px; height: 2px; background: #d1d5db; }
-.splash-title { font-family: 'Inter', -apple-system, sans-serif; font-size: 2.5rem; font-weight: 700; color: #1a2332; letter-spacing: -0.02em; margin-bottom: 8px; }
-.splash-sub { font-size: 14px; color: #9ca3af; margin-bottom: 40px; }
-.splash-bar { width: 200px; height: 3px; background: #e5e7eb; border-radius: 2px; margin: 0 auto 20px; overflow: hidden; }
-.splash-bar-fill { width: 0; height: 100%; background: #0f4c5c; border-radius: 2px; animation: splash-progress 1.5s ease-out forwards; }
-@keyframes splash-progress { 0% { width: 0; } 100% { width: 100%; } }
-.splash-loading { font-size: 13px; color: #d1d5db; }
+.splash-inner {
+  text-align: center;
+  animation: splash-rise 0.6s ease-out;
+}
+@keyframes splash-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.splash-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 72px; height: 72px;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 12px 32px rgba(15, 76, 92, 0.12), 0 2px 6px rgba(15, 23, 42, 0.04);
+  margin-bottom: 24px;
+}
+.splash-logo img { width: 44px; height: 44px; object-fit: contain; }
+.splash-title {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 2.25rem; font-weight: 700;
+  color: #0f4c5c;
+  letter-spacing: -0.02em;
+  margin-bottom: 10px;
+}
+.splash-sub {
+  font-size: 0.95rem; color: #6b7280;
+  max-width: 420px; margin: 0 auto 40px;
+  line-height: 1.5;
+}
+.splash-spinner {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px;
+}
+.splash-spinner span {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: #0f4c5c;
+  opacity: 0.3;
+  animation: splash-bounce 1.2s ease-in-out infinite;
+}
+.splash-spinner span:nth-child(2) { animation-delay: 0.15s; }
+.splash-spinner span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes splash-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.85); }
+  40%           { opacity: 1;   transform: scale(1.05); }
+}
 .app-hidden { display: none; }
+
+@media (max-width: 600px) {
+  .splash-title { font-size: 1.85rem; }
+  .splash-sub { font-size: 0.88rem; padding: 0 24px; }
+  .splash-logo { width: 64px; height: 64px; }
+  .splash-logo img { width: 38px; height: 38px; }
+}
 
 /* 2-column detail layout */
 .detail-layout { display: flex; gap: 32px; }
