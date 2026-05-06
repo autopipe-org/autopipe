@@ -217,14 +217,20 @@ Every pipeline is a directory with 5 required files:
 
 ## License Selection (ASK USER before generating ro-crate-metadata.json)
 Before writing the metadata file, ask the user which open-source license to apply.
-Present the four common options first and clearly recommend MIT for users who
-are unsure or unfamiliar with software licensing:
-  1. MIT  ← default, recommended if you are not sure. Permissive and simplest.
+You MUST present ALL FIVE options below — do not collapse, omit, or summarise any
+of them. Option 5 is REQUIRED so users with a non-listed license still know what to
+do; never drop it because you assume the user will pick one of the first four.
+
+Render the choices exactly like this (translate the prose into the user's chat
+language but keep the SPDX identifiers and the URL verbatim):
+
+  1. MIT — recommended default. The most permissive and widely-used license; pick
+     this if you are unsure or unfamiliar with software licensing.
   2. BSD-3-Clause — permissive, similar to MIT with a no-endorsement clause.
   3. Apache-2.0 — permissive with an explicit patent grant.
   4. GPL-3.0 — copyleft; downstream forks must also be GPL-licensed.
-  5. Other — direct the user to https://opensource.org/licenses to look up
-     the SPDX identifier for the license they want and tell you what to use.
+  5. Other — look up the SPDX identifier of your preferred license at
+     https://opensource.org/licenses and tell me which one to use.
 
 If the user is unsure or asks for guidance, suggest MIT explicitly and explain
 that it is the most permissive and widely-used license for open scientific
