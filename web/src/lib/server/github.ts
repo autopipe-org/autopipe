@@ -89,16 +89,28 @@ export async function fetchGithubTree(githubUrl: string, ref = 'main'): Promise<
 	return tree;
 }
 
-/** Fetch a single file's content from GitHub. */
+/** Fetch a single file's content from GitHub.
+ *
+ * The 5-minute file cache is fine for read-only browsing (pipeline detail
+ * pages, file viewer) but is wrong for the publish path — the user often
+ * fixes a flagged file and republishes within seconds, and a stale cache
+ * hit would re-detect the issue against the old content. Pass
+ * `forceFresh = true` from publish/validation paths to bypass the lookup
+ * (the fetched content is still written back into the cache so other
+ * read paths benefit from it).
+ */
 export async function fetchGithubFile(
 	githubUrl: string,
 	filePath: string,
-	ref?: string
+	ref?: string,
+	forceFresh = false
 ): Promise<string> {
 	const cacheKey = `${githubUrl}/${filePath}@${ref || 'latest'}`;
-	const cached = fileCache.get(cacheKey);
-	if (cached && Date.now() - cached.ts < CACHE_TTL) {
-		return cached.content;
+	if (!forceFresh) {
+		const cached = fileCache.get(cacheKey);
+		if (cached && Date.now() - cached.ts < CACHE_TTL) {
+			return cached.content;
+		}
 	}
 
 	const { owner, repo, path } = parseGithubUrl(githubUrl);

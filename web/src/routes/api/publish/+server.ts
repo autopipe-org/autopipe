@@ -45,13 +45,15 @@ export const POST: RequestHandler = async ({ request }) => {
 		const githubUser = await userResp.json();
 		const author = githubUser.login as string;
 
-		// 2. Fetch required files from GitHub for validation
+		// 2. Fetch required files from GitHub for validation. Bypass the
+		// 5-minute file cache so a re-publish that follows a fix-and-push
+		// loop sees the fresh content instead of last attempt's snapshot.
 		let snakefile: string, dockerfile: string, metadata_json: string;
 		try {
 			[snakefile, dockerfile, metadata_json] = await Promise.all([
-				fetchGithubFile(github_url, 'Snakefile'),
-				fetchGithubFile(github_url, 'Dockerfile'),
-				fetchGithubFile(github_url, 'ro-crate-metadata.json')
+				fetchGithubFile(github_url, 'Snakefile', undefined, true),
+				fetchGithubFile(github_url, 'Dockerfile', undefined, true),
+				fetchGithubFile(github_url, 'ro-crate-metadata.json', undefined, true)
 			]);
 		} catch {
 			return json({ error: 'Failed to fetch files from GitHub repository' }, { status: 400 });
