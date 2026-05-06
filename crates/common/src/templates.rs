@@ -95,7 +95,7 @@ pub const RO_CRATE_METADATA_TEMPLATE: &str = r##"{
       "name": "pipeline-name",
       "description": "One paragraph description of what this pipeline does.",
       "version": "1.0.0",
-      "license": {"@id": "https://spdx.org/licenses/MIT"},
+      "license": {"@id": "https://spdx.org/licenses/<SPDX_ID — ask the user before filling this in; recommend MIT if they are unsure>"},
       "programmingLanguage": {"@id": "#snakemake"},
       "creator": [{"@id": "#author"}],
       "dateCreated": "",
@@ -214,6 +214,30 @@ Every pipeline is a directory with 5 required files:
 ## Pipeline Naming
 - Before generating ro-crate-metadata.json, ask the user what name they want for their pipeline.
 - This name will be displayed on the AutoPipe registry when published.
+
+## License Selection (ASK USER before generating ro-crate-metadata.json)
+Before writing the metadata file, ask the user which open-source license to apply.
+Present the four common options first and clearly recommend MIT for users who
+are unsure or unfamiliar with software licensing:
+  1. MIT  ← default, recommended if you are not sure. Permissive and simplest.
+  2. BSD-3-Clause — permissive, similar to MIT with a no-endorsement clause.
+  3. Apache-2.0 — permissive with an explicit patent grant.
+  4. GPL-3.0 — copyleft; downstream forks must also be GPL-licensed.
+  5. Other — direct the user to https://opensource.org/licenses to look up
+     the SPDX identifier for the license they want and tell you what to use.
+
+If the user is unsure or asks for guidance, suggest MIT explicitly and explain
+that it is the most permissive and widely-used license for open scientific
+pipelines. Only proceed when the user has explicitly confirmed a choice.
+
+Use the chosen SPDX identifier in the metadata's `license` field:
+  "license": {"@id": "https://spdx.org/licenses/<SPDX_ID>"}
+
+Examples:
+  https://spdx.org/licenses/MIT
+  https://spdx.org/licenses/BSD-3-Clause
+  https://spdx.org/licenses/Apache-2.0
+  https://spdx.org/licenses/GPL-3.0
 
 ## ro-crate-metadata.json (RO-Crate Format)
 - Must follow RO-Crate 1.1 specification (JSON-LD)

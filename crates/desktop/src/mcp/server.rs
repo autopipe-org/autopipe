@@ -1562,9 +1562,12 @@ impl AutoPipeServer {
                                 if m.name.is_empty() {
                                     errors.push("ro-crate-metadata.json: 'name' is empty".into());
                                 }
-                                if m.tools.is_empty() {
-                                    errors.push("ro-crate-metadata.json: 'tools' is empty".into());
-                                }
+                                // `tools` is intentionally not enforced here.
+                                // Pipelines that don't call any bioinformatics
+                                // tool (e.g. trivial format conversions, test
+                                // fixtures) are still legitimate; the template
+                                // guide tells the LLM to populate the field
+                                // when real tools are used.
                             }
                             Err(e) => {
                                 errors.push(format!("ro-crate-metadata.json: invalid - {}", e))
