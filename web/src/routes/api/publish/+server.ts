@@ -1,6 +1,12 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { validateSecurity, hasErrors, sanitizeErrorMessage } from '$lib/server/security.js';
+import {
+	validateSecurity,
+	hasErrors,
+	sanitizeErrorMessage,
+	normalizeAiWarnings
+} from '$lib/server/security.js';
+import { explainPattern } from '$lib/server/security-explanations.js';
 import { fetchGithubFile } from '$lib/server/github.js';
 import { db, schema } from '$lib/server/db.js';
 import { eq, sql } from 'drizzle-orm';
@@ -11,7 +17,11 @@ const { userPipelines } = schema;
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
-		const { github_url, github_token, forked_from } = body;
+		const { github_url, github_token, forked_from, ai_warnings } = body;
+		// AI-detected suspicious patterns the publisher already approved
+		// in the MCP client. Stored alongside the pipeline so downloaders
+		// can review the same list before fetching files.
+		const approvedWarnings = normalizeAiWarnings(ai_warnings);
 
 		if (!github_url || !github_token) {
 			return json({ error: 'github_url and github_token are required' }, { status: 400 });
@@ -115,10 +125,23 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'ro-crate-metadata.json must contain a "name" field' }, { status: 400 });
 		}
 
-		// 5. Security validation
+		// 5. Hard-layer security validation — only critical patterns on the
+		// Snakefile/Dockerfile. Soft (warning-level) review is delegated to
+		// the MCP client's AI, whose results arrive via `ai_warnings`.
 		const issues = validateSecurity(snakefile, dockerfile);
 		if (hasErrors(issues)) {
-			return json({ error: 'Security validation failed', issues }, { status: 422 });
+			const enriched = issues.map((i) => {
+				const ex = explainPattern(i.pattern_id);
+				return { ...i, short: ex.short, detail: ex.detail };
+			});
+			return json(
+				{
+					error: 'Security validation failed',
+					issues: enriched,
+					hint: 'Each issue lists the file, line, pattern explanation, and reason. Fix the code and republish.'
+				},
+				{ status: 422 }
+			);
 		}
 
 		// 6. Always INSERT a new record (version tracking)
@@ -210,7 +233,8 @@ export const POST: RequestHandler = async ({ request }) => {
 				version,
 				verified: false,
 				forkedFrom: resolvedForkedFrom,
-				basedOnUrl: (metadata.based_on_url as string) || null
+				basedOnUrl: (metadata.based_on_url as string) || null,
+				securityWarnings: approvedWarnings
 			})
 			.returning({ pipelineId: userPipelines.pipelineId });
 
@@ -224,10 +248,12 @@ export const POST: RequestHandler = async ({ request }) => {
 				.where(eq(userPipelines.pipelineId, pipelineId));
 		}
 
-		const response: Record<string, unknown> = { pipeline_id: pipelineId, name, author };
-		if (issues.length > 0) {
-			response.warnings = issues;
-		}
+		const response: Record<string, unknown> = {
+			pipeline_id: pipelineId,
+			name,
+			author,
+			security_warnings: approvedWarnings
+		};
 
 		return json(response, { status: 200 });
 	} catch (e: unknown) {

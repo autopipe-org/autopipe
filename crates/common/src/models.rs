@@ -1,5 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+/// One AI-detected suspicious pattern that the publisher explicitly approved
+/// before publishing. The MCP `download_pipeline` tool reads these from the
+/// registry response and shows them to the downloader before fetching files.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PipelineSecurityWarning {
+    pub file: String,
+    pub line: u32,
+    pub code_snippet: String,
+    pub concern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+}
+
 /// A bioinformatics pipeline stored in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pipeline {
@@ -18,6 +31,10 @@ pub struct Pipeline {
     pub verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<i32>,
+    /// Suspicious patterns the publisher acknowledged. May be missing from
+    /// older registry responses — default to an empty list in that case.
+    #[serde(default)]
+    pub security_warnings: Vec<PipelineSecurityWarning>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

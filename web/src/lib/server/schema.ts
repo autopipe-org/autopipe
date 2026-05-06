@@ -27,6 +27,11 @@ export const userPipelines = pgTable(
 		verified: boolean('verified').default(false),
 		forkedFrom: integer('forked_from'),
 		basedOnUrl: varchar('based_on_url', { length: 500 }),
+		// AI-detected suspicious patterns the publisher explicitly approved.
+		// Each entry: { file, line, code_snippet, concern, category? }.
+		// Shown to downloaders so they can decide whether to accept the same
+		// risks. Empty array means no warnings were surfaced at publish.
+		securityWarnings: jsonb('security_warnings').default([]),
 		createdAt: timestamp('created_at').defaultNow(),
 		updatedAt: timestamp('updated_at').defaultNow()
 	},

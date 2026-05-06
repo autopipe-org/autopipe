@@ -29,6 +29,13 @@ struct DownloadParams {
     pipeline_id: i32,
     /// Remote directory path (optional, defaults to configured pipelines directory)
     output_dir: Option<String>,
+    /// Set to true ONLY after the user has reviewed every entry in the
+    /// pipeline's `security_warnings` (returned by the registry) and
+    /// explicitly confirmed each one is safe. Required to be true whenever
+    /// the pipeline has any warnings — the tool refuses to download
+    /// otherwise. For pipelines with no warnings, this can be omitted.
+    #[serde(default)]
+    user_reviewed_warnings: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -221,12 +228,40 @@ struct UploadWorkflowParams {
     repo_name: Option<String>,
 }
 
+/// One AI-detected suspicious code pattern that the user explicitly marked as
+/// safe before publish. Shown verbatim to anyone downloading the pipeline so
+/// they can decide whether to accept the same risk. The MCP client builds
+/// these from its own code review of the uploaded files.
+#[derive(Debug, serde::Serialize, Deserialize, JsonSchema)]
+struct AiWarning {
+    /// Path of the file inside the pipeline directory (e.g. "scripts/preprocess.py").
+    file: String,
+    /// 1-based line number where the suspicious snippet starts.
+    line: u32,
+    /// The exact line of code that raised the concern. Keep it short — one or two lines.
+    code_snippet: String,
+    /// Plain-English explanation of what could go wrong. Shown to the downloader.
+    concern: String,
+    /// Optional grouping label (e.g. "permissions", "network", "obfuscation").
+    #[serde(default)]
+    category: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PublishWorkflowParams {
     /// GitHub URL of the uploaded workflow (from upload_workflow result)
     github_url: String,
     /// Set to an existing pipeline_id to link this as a related/derived version. Same-name pipelines are auto-linked. Use this for cross-name forks (e.g., a similar pipeline with a different name).
     forked_from: Option<i32>,
+    /// AI-detected suspicious patterns the user has already marked as safe.
+    /// Required (can be an empty list) — the LLM MUST review every code file
+    /// in the pipeline (Snakefile, Dockerfile, scripts/*, config.yaml, etc.),
+    /// surface anything risky to the user with a plain-English concern, and
+    /// only call publish_workflow after the user explicitly approves each item.
+    /// The list is stored on the pipeline record and shown verbatim to anyone
+    /// who later downloads the pipeline so they can review the same risks.
+    #[serde(default)]
+    ai_warnings: Option<Vec<AiWarning>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -613,12 +648,14 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Download a pipeline by ID from the registry and save it to the remote SSH server. Fetches pipeline files from its GitHub repository. If output_dir is omitted, saves to the configured pipelines directory.")]
+    #[tool(description = "Download a pipeline by ID from the registry and save it to the remote SSH server. Fetches pipeline files from its GitHub repository. If output_dir is omitted, saves to the configured pipelines directory.\n\n\
+                          MANDATORY — SECURITY REVIEW BEFORE DOWNLOAD: When the registry response includes a non-empty `security_warnings` array, you MUST present every entry to the user IN THEIR LANGUAGE before the actual download proceeds. For each entry show: (1) the file and line number, (2) the offending code snippet, (3) the `concern` text (this is the publisher-approved explanation of what the code does and why it could be risky). Then ask the user, per pipeline (not per item): 'Mark all of this code as safe and continue downloading?' (or the equivalent in the user's language). Only when the user explicitly confirms should you call download_pipeline again with user_reviewed_warnings=true. If the user declines, do not download. This confirmation is REQUIRED EVERY TIME, even for the same pipeline downloaded again later — never skip the review just because you remember a previous approval.\n\
+                          When `security_warnings` is empty, no review prompt is needed and you can call download_pipeline directly.")]
     async fn download_pipeline(
         &self,
         Parameters(params): Parameters<DownloadParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // 1. Get pipeline metadata from registry (includes github_url)
+        // 1. Get pipeline metadata from registry (includes github_url + security_warnings)
         let pipeline = match self.registry.get_pipeline(params.pipeline_id).await {
             Ok(p) => p,
             Err(e) => {
@@ -628,6 +665,34 @@ impl AutoPipeServer {
                 ))]));
             }
         };
+
+        // 2. Gate download on the user reviewing AI-detected warnings.
+        // The MCP description above tells the LLM to surface the warnings
+        // and ask the user; we enforce that contract here so a buggy or
+        // adversarial client can't silently bypass the review.
+        if !pipeline.security_warnings.is_empty()
+            && !params.user_reviewed_warnings.unwrap_or(false)
+        {
+            let mut listing = String::new();
+            for (idx, w) in pipeline.security_warnings.iter().enumerate() {
+                listing.push_str(&format!(
+                    "\n{}. {} (line {})\n   Code: {}\n   Concern: {}\n",
+                    idx + 1,
+                    w.file,
+                    w.line,
+                    w.code_snippet.trim(),
+                    w.concern.trim(),
+                ));
+            }
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "This pipeline contains {} suspicious code pattern(s) that the publisher acknowledged. \
+                 Show each item to the user in their language and ask whether to mark all of them as safe and proceed:{}\n\
+                 If the user agrees, call download_pipeline again with user_reviewed_warnings=true.\n\
+                 If the user declines, stop and do not download.",
+                pipeline.security_warnings.len(),
+                listing
+            ))]));
+        }
 
         // 2. Parse GitHub URL
         let (owner, repo, _branch, path) = match parse_github_url(&pipeline.github_url) {
@@ -1061,7 +1126,14 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (Korean): '이 파이프라인은 <원본 이름>(#<원본 id>) 파이프라인을 다운로드해서 수정한 것으로 보이는데, 맞나요? 맞으면 출처(forked_from)를 자동으로 기록합니다. 아니면 출처를 끊고 독립 파이프라인으로 등록합니다.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (Korean): '이 파이프라인은 <원본 이름>(#<원본 id>) 파이프라인을 다운로드해서 수정한 것으로 보이는데, 맞나요? 맞으면 출처(forked_from)를 자동으로 기록합니다. 아니면 출처를 끊고 독립 파이프라인으로 등록합니다.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.\n\n\
+                          MANDATORY — AI CODE REVIEW BEFORE PUBLISH: BEFORE calling this tool you MUST review every code file in the pipeline directory (Snakefile, Dockerfile, config.yaml, scripts/*, requirements.txt, and any other file you wrote). Use read_file (or fetch each file from GitHub at the github_url) to read them. For each file, identify suspicious patterns such as: overly permissive permissions (chmod 777, SUID/SGID), credentials or tokens hard-coded in source, unexpected outbound network calls, obfuscated or base64-decoded execution, mounting host paths beyond the workspace, --network host or --privileged docker flags, executing remotely fetched scripts without verification, deleting files outside the pipeline workspace, etc. Use your judgement — there is no fixed list, the goal is to find anything that could harm a downloader who runs this pipeline.\n\
+                          For every concern you find, present it to the user in their own language with: (1) the file path and line number, (2) the offending code snippet, (3) a plain-English explanation of what could go wrong. Then ask: 'Mark this code as safe and continue with publish?' (or the equivalent in the user's language). Wait for an explicit answer per item.\n\
+                          - If the user marks ALL items as safe → call publish_workflow with ai_warnings set to the full list of approved items (each item: {file, line, code_snippet, concern, [category]}). The registry stores them and shows the same list to anyone who downloads the pipeline.\n\
+                          - If the user marks SOME items as unsafe → offer to refactor those specific files. After the user agrees, edit the affected files (write_file on the SSH server), call upload_workflow again to push the changes, then re-run this AI review from scratch on the new code, and finally call publish_workflow when the user is satisfied.\n\
+                          - If the user cancels → do not call publish_workflow at all.\n\
+                          When you find no suspicious patterns at all, still call publish_workflow with ai_warnings=[] (empty list) so the registry knows a review happened and the pipeline is clean.\n\
+                          IMPORTANT: ai_warnings must reflect what the user actually approved in this conversation — never copy/paste from a prior pipeline or invent items the user did not see.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -1365,13 +1437,21 @@ impl AutoPipeServer {
             }
         }
 
-        // Call registry publish endpoint FIRST, then create tag only on success
+        // Call registry publish endpoint FIRST, then create tag only on success.
+        // `ai_warnings` carries the LLM's code review results that the user has
+        // already approved; the registry stores them so downloaders see the
+        // same list of suspicious patterns at fetch time.
+        let ai_warnings_json = match &params.ai_warnings {
+            Some(list) => serde_json::to_value(list).unwrap_or(serde_json::json!([])),
+            None => serde_json::json!([]),
+        };
         let resp = client
             .post(format!("{}/api/publish", base))
             .json(&serde_json::json!({
                 "github_url": params.github_url,
                 "github_token": token,
                 "forked_from": resolved_forked_from,
+                "ai_warnings": ai_warnings_json,
             }))
             .send()
             .await
@@ -1415,17 +1495,20 @@ impl AutoPipeServer {
                 name, version, web_url, pipeline_id
             ))]))
         } else if status.as_u16() == 422 {
+            // Hard-layer security check rejected the publish. Each issue
+            // ships with `short` (one-line label) and `detail` (why it's a
+            // risk) so the user can decide what to fix without re-asking.
             let issues = body["issues"]
                 .as_array()
                 .map(|arr| {
                     arr.iter()
                         .map(|i| {
                             format!(
-                                "- [{}] {} (line {}, {})",
-                                i["severity"].as_str().unwrap_or("?"),
-                                i["message"].as_str().unwrap_or(""),
+                                "- {} (line {} in {})\n    Why: {}",
+                                i["short"].as_str().unwrap_or_else(|| i["message"].as_str().unwrap_or("Security issue")),
                                 i["line"].as_u64().unwrap_or(0),
-                                i["file"].as_str().unwrap_or("")
+                                i["file"].as_str().unwrap_or(""),
+                                i["detail"].as_str().unwrap_or_else(|| i["message"].as_str().unwrap_or(""))
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1434,7 +1517,8 @@ impl AutoPipeServer {
                 .unwrap_or_else(|| body["error"].as_str().unwrap_or("Unknown error").to_string());
 
             Ok(CallToolResult::error(vec![Content::text(format!(
-                "Security validation failed. Please fix the following issues:\n{}",
+                "Security validation blocked publish. The following critical patterns were found in Snakefile/Dockerfile and must be removed before retrying:\n{}\n\n\
+                 Explain each item to the user, ask whether to refactor, then edit the files (write_file), re-run upload_workflow, and call publish_workflow again.",
                 issues
             ))]))
         } else {

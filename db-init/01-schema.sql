@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS user_pipelines (
     verified       BOOLEAN DEFAULT FALSE,
     forked_from    INTEGER,
     based_on_url   VARCHAR(500),
+    -- AI-detected suspicious patterns the publisher explicitly approved.
+    -- Each entry: { file, line, code_snippet, concern, category? }.
+    -- Shown to downloaders so they can decide whether to accept the same risks.
+    security_warnings JSONB DEFAULT '[]'::jsonb,
     created_at     TIMESTAMP DEFAULT now(),
     updated_at     TIMESTAMP DEFAULT now()
 );

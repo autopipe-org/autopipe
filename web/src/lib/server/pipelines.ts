@@ -1,5 +1,6 @@
 import { db, schema } from './db.js';
 import { eq, ilike, or, sql } from 'drizzle-orm';
+import type { AiSecurityWarning } from './security.js';
 
 const { userPipelines } = schema;
 
@@ -17,6 +18,10 @@ export interface PipelineSummary {
 	verified: boolean;
 	forked_from: number | null;
 	based_on_url: string | null;
+	// Number of AI-detected suspicious patterns the publisher approved.
+	// Lets list/search consumers show a small indicator without pulling
+	// the full warning payload.
+	security_warning_count: number;
 	created_at: string | null;
 }
 
@@ -35,8 +40,15 @@ export interface Pipeline {
 	verified: boolean;
 	forked_from?: number | null;
 	based_on_url?: string | null;
+	// AI-detected suspicious patterns approved by the publisher.
+	// MCP clients show this list to downloaders before fetching files.
+	security_warnings: AiSecurityWarning[];
 	created_at?: string | null;
 	updated_at?: string | null;
+}
+
+function readWarnings(value: unknown): AiSecurityWarning[] {
+	return Array.isArray(value) ? (value as AiSecurityWarning[]) : [];
 }
 
 function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
@@ -54,6 +66,7 @@ function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
 		based_on_url: r.basedOnUrl ?? null,
+		security_warning_count: readWarnings(r.securityWarnings).length,
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -74,6 +87,7 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
 		based_on_url: r.basedOnUrl ?? null,
+		security_warnings: readWarnings(r.securityWarnings),
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};

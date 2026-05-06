@@ -27,6 +27,9 @@ export const userPipelines = pgTable(
 		verified: boolean('verified').default(false),
 		forkedFrom: integer('forked_from'),
 		basedOnUrl: varchar('based_on_url', { length: 500 }),
+		// AI-detected suspicious patterns the publisher explicitly approved.
+		// Mirrors web/src/lib/server/schema.ts.
+		securityWarnings: jsonb('security_warnings').default([]),
 		createdAt: timestamp('created_at').defaultNow(),
 		updatedAt: timestamp('updated_at').defaultNow()
 	},
