@@ -268,12 +268,6 @@ struct PublishWorkflowParams {
     ai_warnings: Option<Vec<AiWarning>>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-struct InstallPluginParams {
-    /// Plugin name to install from the registry
-    plugin_name: String,
-}
-
 // ── Server ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -354,7 +348,7 @@ fn extract_absolute_path(value: &str) -> Option<String> {
 ///   https://github.com/{owner}/{repo}/tree/{branch}/{path}
 ///   https://github.com/{owner}/{repo}
 /// Parse a GitHub URL into (owner, repo, branch_or_tag, subpath).
-fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String)> {
+pub(crate) fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String)> {
     let url = url.trim().trim_end_matches('/');
     let url = url.strip_prefix("https://github.com/")
         .or_else(|| url.strip_prefix("http://github.com/"))?;
@@ -2725,7 +2719,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. The viewer handles ALL file types: images, PDF, text, genomics (BAM/BED/GFF), HDF5 (h5ad), VCF, BCF. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
+    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -3194,215 +3188,6 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 plugins_dir, e
             ))])),
         }
-    }
-
-    #[tool(description = "Install a viewer plugin from the AutoPipe registry. Downloads the plugin files from GitHub and saves them to the local plugins directory. WARNING: Plugins run JavaScript in the browser — only install plugins from authors you trust.")]
-    async fn install_plugin(
-        &self,
-        Parameters(params): Parameters<InstallPluginParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let config = self.config();
-        let base = config.registry_url.trim_end_matches('/');
-        let client = reqwest::Client::new();
-
-        // 1. Search registry for the plugin
-        let encoded_name: String = params.plugin_name.chars().map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
-            }
-        }).collect();
-        let search_resp = client
-            .get(format!(
-                "{}/api/plugins/search?q={}",
-                base, encoded_name
-            ))
-            .send()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        let plugins: Vec<serde_json::Value> = search_resp
-            .json()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        // Find exact name match
-        let plugin = plugins.iter().find(|p| {
-            p["name"].as_str().map(|n| n == params.plugin_name).unwrap_or(false)
-        });
-
-        let plugin = match plugin {
-            Some(p) => p.clone(),
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Plugin '{}' not found in the registry.",
-                    params.plugin_name
-                ))]));
-            }
-        };
-
-        let github_url = match plugin["github_url"].as_str() {
-            Some(u) => u.to_string(),
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(
-                    "Plugin has no GitHub URL in the registry.",
-                )]));
-            }
-        };
-
-        let author = plugin["author"].as_str().unwrap_or("unknown");
-
-        // 2. Parse GitHub URL to get owner/repo/path
-        let (gh_owner, gh_repo, gh_branch, gh_path) = match parse_github_url(&github_url) {
-            Some(parsed) => parsed,
-            None => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid GitHub URL: {}", github_url
-                ))]));
-            }
-        };
-
-        // 3. Download manifest.json from GitHub
-        let branch = gh_branch.as_deref().unwrap_or("main");
-        let manifest_url = if gh_path.is_empty() {
-            format!(
-                "https://raw.githubusercontent.com/{}/{}/{}/manifest.json",
-                gh_owner, gh_repo, branch
-            )
-        } else {
-            format!(
-                "https://raw.githubusercontent.com/{}/{}/{}/{}/manifest.json",
-                gh_owner, gh_repo, branch, gh_path
-            )
-        };
-
-        let manifest_resp = client
-            .get(&manifest_url)
-            .send()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if !manifest_resp.status().is_success() {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to download manifest.json from GitHub: HTTP {}",
-                manifest_resp.status()
-            ))]));
-        }
-
-        let manifest_text = manifest_resp
-            .text()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        let manifest: serde_json::Value = match serde_json::from_str(&manifest_text) {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Invalid manifest.json: {}", e
-                ))]));
-            }
-        };
-
-        let plugin_name = manifest["name"]
-            .as_str()
-            .unwrap_or(&params.plugin_name)
-            .to_string();
-        let entry = manifest["entry"].as_str().unwrap_or("index.js");
-        let style = manifest["style"].as_str();
-
-        // 4. Create local plugin directory
-        let plugins_dir = config.full_plugins_dir();
-        let plugin_dir = std::path::Path::new(&plugins_dir).join(&plugin_name);
-        if let Err(e) = std::fs::create_dir_all(&plugin_dir) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to create plugin directory: {}", e
-            ))]));
-        }
-
-        // 5. Save manifest.json
-        if let Err(e) = std::fs::write(plugin_dir.join("manifest.json"), &manifest_text) {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to write manifest.json: {}", e
-            ))]));
-        }
-
-        // 6. Download and save entry file (index.js)
-        let entry_url = if gh_path.is_empty() {
-            format!(
-                "https://raw.githubusercontent.com/{}/{}/{}/{}",
-                gh_owner, gh_repo, branch, entry
-            )
-        } else {
-            format!(
-                "https://raw.githubusercontent.com/{}/{}/{}/{}/{}",
-                gh_owner, gh_repo, branch, gh_path, entry
-            )
-        };
-
-        let entry_resp = client
-            .get(&entry_url)
-            .send()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        if entry_resp.status().is_success() {
-            let entry_data = entry_resp
-                .bytes()
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-            if let Err(e) = std::fs::write(plugin_dir.join(entry), &entry_data) {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to write {}: {}", entry, e
-                ))]));
-            }
-        } else {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to download {} from GitHub: HTTP {}",
-                entry, entry_resp.status()
-            ))]));
-        }
-
-        // 7. Download style file if specified
-        if let Some(style_file) = style {
-            let style_url = if gh_path.is_empty() {
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/{}",
-                    gh_owner, gh_repo, branch, style_file
-                )
-            } else {
-                format!(
-                    "https://raw.githubusercontent.com/{}/{}/{}/{}/{}",
-                    gh_owner, gh_repo, branch, gh_path, style_file
-                )
-            };
-
-            if let Ok(resp) = client.get(&style_url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(data) = resp.bytes().await {
-                        let _ = std::fs::write(plugin_dir.join(style_file), &data);
-                    }
-                }
-            }
-        }
-
-        let version = manifest["version"].as_str().unwrap_or("?");
-        let extensions: Vec<&str> = manifest["extensions"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
-            .unwrap_or_default();
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Successfully installed plugin '{}' v{} by {}\n\
-             Extensions: {}\n\
-             Location: {}\n\n\
-             The plugin will be active next time you use show_results.",
-            plugin_name,
-            version,
-            author,
-            extensions.join(", "),
-            plugin_dir.display()
-        ))]))
     }
 }
 

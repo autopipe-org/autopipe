@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::claude_config;
 use crate::config::{self, AppConfig, SshAuth};
 use crate::mcp::daemon::{McpDaemonHandle, McpServerInfo};
+use crate::plugins;
 
 // ── Shared application state ─────────────────────────────────────────────
 
@@ -151,25 +152,33 @@ pub fn register_mcp(state: State<'_, AppState>) -> Result<Vec<String>, String> {
         .collect())
 }
 
-#[tauri::command]
-pub fn unregister_mcp() -> Result<(), String> {
-    let results = claude_config::unregister_all();
-    for (client, result) in results {
-        if let Err(e) = result {
-            // Log but don't abort — best-effort across clients
-            eprintln!("Failed to unregister {}: {}", client.name(), e);
-        }
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn registration_status() -> Vec<(String, bool)> {
-    claude_config::status_all()
-        .into_iter()
-        .map(|(c, b)| (c.name().to_string(), b))
-        .collect()
-}
+// NOTE: `unregister_mcp` and `registration_status` were exposed as Tauri
+// commands for the old egui Status tab (Unregister button + per-client
+// status indicators). The single-page Tauri+Svelte UI no longer surfaces
+// them — `unregister` is still reachable via the `--unregister` CLI flag
+// (handled in main.rs through `claude_config::unregister_all()` directly),
+// and `--status` covers the registration indicator. Keep the bodies
+// commented out so they're easy to revive if a Status panel comes back.
+//
+// #[tauri::command]
+// pub fn unregister_mcp() -> Result<(), String> {
+//     let results = claude_config::unregister_all();
+//     for (client, result) in results {
+//         if let Err(e) = result {
+//             // Log but don't abort — best-effort across clients
+//             eprintln!("Failed to unregister {}: {}", client.name(), e);
+//         }
+//     }
+//     Ok(())
+// }
+//
+// #[tauri::command]
+// pub fn registration_status() -> Vec<(String, bool)> {
+//     claude_config::status_all()
+//         .into_iter()
+//         .map(|(c, b)| (c.name().to_string(), b))
+//         .collect()
+// }
 
 // ── Window / tray commands ───────────────────────────────────────────────
 
@@ -438,6 +447,41 @@ async fn fetch_github_username(token: &str) -> Result<String, String> {
         .ok_or_else(|| "No login field".to_string())
 }
 
+// ── Plugin management commands ───────────────────────────────────────────
+
+#[tauri::command]
+pub fn list_installed_plugins() -> Vec<plugins::InstalledPlugin> {
+    let cfg = AppConfig::load();
+    let dir = std::path::PathBuf::from(cfg.full_plugins_dir());
+    plugins::list_installed(&dir)
+}
+
+#[tauri::command]
+pub async fn list_registry_plugins() -> Result<Vec<plugins::RegistryPlugin>, String> {
+    let cfg = AppConfig::load();
+    plugins::list_registry(&cfg.registry_url).await
+}
+
+#[tauri::command]
+pub async fn install_plugin(plugin_name: String) -> Result<plugins::InstallResult, String> {
+    let cfg = AppConfig::load();
+    let dir = std::path::PathBuf::from(cfg.full_plugins_dir());
+    plugins::install_one(&plugin_name, &cfg.registry_url, &dir).await
+}
+
+#[tauri::command]
+pub fn uninstall_plugin(plugin_name: String) -> Result<(), String> {
+    let cfg = AppConfig::load();
+    let dir = std::path::PathBuf::from(cfg.full_plugins_dir());
+    plugins::uninstall_one(&plugin_name, &dir)
+}
+
+/// Update is a re-install — same flow, replaces files in place.
+#[tauri::command]
+pub async fn update_plugin(plugin_name: String) -> Result<plugins::InstallResult, String> {
+    install_plugin(plugin_name).await
+}
+
 // ── Tauri builder helper ─────────────────────────────────────────────────
 
 /// Convenience: register all commands with the Tauri builder.
@@ -448,13 +492,18 @@ pub fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wr
         set_mcp_port,
         rotate_mcp_token,
         register_mcp,
-        unregister_mcp,
-        registration_status,
+        // unregister_mcp,        // commented: no UI caller (see fn comment)
+        // registration_status,   // commented: no UI caller (see fn comment)
         get_ssh_config,
         save_ssh_config,
         get_github_username,
         clear_github_token,
         start_github_login,
+        list_installed_plugins,
+        list_registry_plugins,
+        install_plugin,
+        uninstall_plugin,
+        update_plugin,
     ])
 }
 

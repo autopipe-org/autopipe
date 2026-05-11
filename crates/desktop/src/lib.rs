@@ -14,4 +14,5 @@ pub mod claude_config;
 pub mod commands;
 pub mod config;
 pub mod mcp;
+pub mod plugins;
 pub mod ssh;

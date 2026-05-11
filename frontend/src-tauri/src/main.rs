@@ -2,7 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use autopipe_desktop::commands;
-use autopipe_desktop::{claude_config, config, mcp};
+use autopipe_desktop::{claude_config, config, mcp, plugins};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -79,6 +79,16 @@ fn run_gui() {
             // Status section can immediately show the URL/token.
             commands::init_state(&app.handle());
 
+            // Auto-install any missing default viewer plugins from the
+            // registry. Best-effort: failures (offline, registry down)
+            // are logged and otherwise ignored so app startup is never
+            // blocked by this.
+            tauri::async_runtime::spawn(async {
+                let cfg = config::AppConfig::load();
+                let dir = std::path::PathBuf::from(cfg.full_plugins_dir());
+                plugins::auto_install_defaults(&cfg.registry_url, &dir).await;
+            });
+
             // Build the system tray with a Show / Quit menu.
             let show_item = MenuItem::with_id(app, "show", "Show AutoPipe", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -133,8 +143,8 @@ fn run_gui() {
             commands::set_mcp_port,
             commands::rotate_mcp_token,
             commands::register_mcp,
-            commands::unregister_mcp,
-            commands::registration_status,
+            // commands::unregister_mcp,        // commented: no Svelte caller (was used by old egui Status tab)
+            // commands::registration_status,   // commented: no Svelte caller (was used by old egui Status tab)
             commands::get_ssh_config,
             commands::save_ssh_config,
             commands::get_github_username,
@@ -145,6 +155,11 @@ fn run_gui() {
             commands::move_to_tray,
             commands::get_registry_url,
             commands::set_registry_url,
+            commands::list_installed_plugins,
+            commands::list_registry_plugins,
+            commands::install_plugin,
+            commands::uninstall_plugin,
+            commands::update_plugin,
         ])
         // Window close (X button) now quits the app. Use the explicit
         // "Move to tray" button in the UI (or the tray menu) when you

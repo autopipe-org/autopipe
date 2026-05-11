@@ -6,6 +6,7 @@
   import SshSection from '$lib/sections/Ssh.svelte';
   import GitHubSection from '$lib/sections/GitHub.svelte';
   import AdvancedPanel from '$lib/sections/AdvancedPanel.svelte';
+  import PluginsPanel from '$lib/sections/PluginsPanel.svelte';
 
   type SshConfig = {
     host: string;
@@ -27,6 +28,7 @@
   let busy = $state(false);
   let toast = $state<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
   let showAdvanced = $state(false);
+  let showPlugins = $state(false);
   let showVerify = $state(false);
 
   function showToast(kind: 'ok' | 'err' | 'info', text: string) {
@@ -96,20 +98,31 @@
         </div>
       </div>
     </div>
-    <button class="icon-btn" title="Advanced" onclick={() => (showAdvanced = true)}>
-      <!-- sliders icon (advanced settings) -->
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="4" y1="21" x2="4" y2="14" />
-        <line x1="4" y1="10" x2="4" y2="3" />
-        <line x1="12" y1="21" x2="12" y2="12" />
-        <line x1="12" y1="8" x2="12" y2="3" />
-        <line x1="20" y1="21" x2="20" y2="16" />
-        <line x1="20" y1="12" x2="20" y2="3" />
-        <line x1="1" y1="14" x2="7" y2="14" />
-        <line x1="9" y1="8" x2="15" y2="8" />
-        <line x1="17" y1="16" x2="23" y2="16" />
-      </svg>
-    </button>
+    <div class="topbar-actions">
+      <button class="stack-btn" title="Advanced settings" onclick={() => (showAdvanced = true)}>
+        <!-- sliders icon (advanced settings) -->
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="4" y1="21" x2="4" y2="14" />
+          <line x1="4" y1="10" x2="4" y2="3" />
+          <line x1="12" y1="21" x2="12" y2="12" />
+          <line x1="12" y1="8" x2="12" y2="3" />
+          <line x1="20" y1="21" x2="20" y2="16" />
+          <line x1="20" y1="12" x2="20" y2="3" />
+          <line x1="1" y1="14" x2="7" y2="14" />
+          <line x1="9" y1="8" x2="15" y2="8" />
+          <line x1="17" y1="16" x2="23" y2="16" />
+        </svg>
+        <span class="stack-label">Advanced</span>
+      </button>
+      <button class="stack-btn" title="Manage viewer plugins" onclick={() => (showPlugins = true)}>
+        <!-- puzzle-piece icon (plugins) -->
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 3v2a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-2a2 2 0 0 0-2-2H2a2 2 0 0 1 0-4h2a2 2 0 0 0 2-2V5a2 2 0 0 1 2-2h2" />
+          <path d="M12 3a2 2 0 0 1 2 2" />
+        </svg>
+        <span class="stack-label">Plugins</span>
+      </button>
+    </div>
   </header>
 
   <main class="content">
@@ -225,6 +238,9 @@
   {#if showAdvanced}
     <AdvancedPanel onclose={() => (showAdvanced = false)} {showToast} />
   {/if}
+  {#if showPlugins}
+    <PluginsPanel onclose={() => (showPlugins = false)} {showToast} />
+  {/if}
 </div>
 
 <style>
@@ -279,23 +295,35 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .icon-btn {
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
+  /* Vertical stack of two icon-with-label buttons in the top-right. */
+  .topbar-actions {
+    display: flex;
+    gap: 12px;
+  }
+  .stack-btn {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 8px 2px;
     background: transparent;
     color: var(--text-muted);
     border: 1px solid var(--border);
+    border-radius: 8px;
     cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.15s, color 0.15s;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    font-family: inherit;
   }
-  .icon-btn:hover {
+  .stack-btn:hover {
     background: var(--bg-soft);
     color: var(--accent);
     border-color: var(--accent);
+  }
+  .stack-label {
+    font-size: 0.7rem;
+    font-weight: 500;
+    line-height: 1;
+    letter-spacing: 0.01em;
   }
 
   /* ── Content ──────────────────────────────────────── */
