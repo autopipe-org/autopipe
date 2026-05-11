@@ -102,7 +102,10 @@ pub async fn list_registry(registry_url: &str) -> Result<Vec<RegistryPlugin>, St
 /// Install (or re-install) a plugin from the registry by name.
 ///
 /// Steps:
-/// 1. Resolve plugin metadata by exact name match against the registry search API.
+/// 1. Resolve plugin metadata via the full registry list (we reuse the same
+///    `/api/plugins` endpoint as `list_registry` so we don't depend on the
+///    `/api/plugins/search` endpoint, which has been observed to return a
+///    different response shape on some Hub deployments).
 /// 2. Parse the GitHub URL, then fetch `manifest.json`, the entry script, and
 ///    the optional style file from `raw.githubusercontent.com`.
 /// 3. Write all three files into `plugins_dir/<plugin_name>/`.
@@ -111,39 +114,19 @@ pub async fn install_one(
     registry_url: &str,
     plugins_dir: &Path,
 ) -> Result<InstallResult, String> {
-    let base = registry_url.trim_end_matches('/');
     let client = reqwest::Client::new();
 
-    // 1. Resolve plugin in the registry.
-    let encoded_name: String = plugin_name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
-            }
-        })
-        .collect();
-    let search_url = format!("{}/api/plugins/search?q={}", base, encoded_name);
-    let plugins: Vec<serde_json::Value> = client
-        .get(&search_url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let plugin = plugins
+    // 1. Resolve plugin via the full registry list.
+    let registry = list_registry(registry_url).await?;
+    let plugin = registry
         .into_iter()
-        .find(|p| p["name"].as_str() == Some(plugin_name))
+        .find(|p| p.name == plugin_name)
         .ok_or_else(|| format!("Plugin '{}' not found in the registry.", plugin_name))?;
 
-    let github_url = plugin["github_url"]
-        .as_str()
-        .ok_or_else(|| "Plugin has no GitHub URL in the registry.".to_string())?
-        .to_string();
+    let github_url = plugin.github_url.clone();
+    if github_url.is_empty() {
+        return Err("Plugin has no GitHub URL in the registry.".to_string());
+    }
 
     // 2. Parse GitHub URL.
     let (gh_owner, gh_repo, gh_branch, gh_path) = parse_github_url(&github_url)

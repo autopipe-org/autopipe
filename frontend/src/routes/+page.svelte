@@ -115,10 +115,13 @@
         <span class="stack-label">Advanced</span>
       </button>
       <button class="stack-btn" title="Manage viewer plugins" onclick={() => (showPlugins = true)}>
-        <!-- puzzle-piece icon (plugins) -->
+        <!-- plug icon (plugins) -->
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 3v2a2 2 0 0 0 2 2h2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2h-2a2 2 0 0 0-2 2v2a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2v-2a2 2 0 0 0-2-2H2a2 2 0 0 1 0-4h2a2 2 0 0 0 2-2V5a2 2 0 0 1 2-2h2" />
-          <path d="M12 3a2 2 0 0 1 2 2" />
+          <path d="M9 2v6" />
+          <path d="M15 2v6" />
+          <path d="M12 17v5" />
+          <path d="M5 8h14" />
+          <path d="M6 11V8h12v3a6 6 0 0 1-12 0Z" />
         </svg>
         <span class="stack-label">Plugins</span>
       </button>
