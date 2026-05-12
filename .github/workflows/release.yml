@@ -11,10 +11,30 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Fail fast when the git tag does not match the version embedded in
+  # frontend/src-tauri/tauri.conf.json. Without this gate, tauri-action
+  # silently produces artifacts named after the stale conf version while
+  # the GitHub Release uses the tag — leaving a v0.0.X release filled
+  # with 0.0.Y-named files. Both build jobs depend on this check.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tauri.conf.json version matches tag
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          CONF_VER=$(jq -r '.version' frontend/src-tauri/tauri.conf.json)
+          if [ "$TAG_VER" != "$CONF_VER" ]; then
+            echo "::error::Version mismatch — tag=$TAG_VER but tauri.conf.json=$CONF_VER. Bump frontend/src-tauri/tauri.conf.json before tagging."
+            exit 1
+          fi
+          echo "Version OK: tag=$TAG_VER == tauri.conf.json=$CONF_VER"
+
   # The CLI binary (used by AI clients that spawn `autopipe --mcp-server`
   # over stdio) is built once on Linux + Mac + Windows so users on each
   # platform can download a portable executable.
   build-cli:
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
@@ -85,6 +105,7 @@ jobs:
   # GUI app (Tauri + Svelte) bundled per-platform via tauri-action.
   # Produces: .exe (Windows), .dmg (macOS), .deb + .AppImage (Linux).
   build-tauri:
+    needs: verify-version
     strategy:
       fail-fast: false
       matrix:
