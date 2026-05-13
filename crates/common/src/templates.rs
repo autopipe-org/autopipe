@@ -215,6 +215,22 @@ Every pipeline is a directory with 5 required files:
 - Before generating ro-crate-metadata.json, ask the user what name they want for their pipeline.
 - This name will be displayed on the AutoPipe registry when published.
 
+## Author (use GitHub login as default; do NOT prompt)
+Read the `GitHub: <login>` line from `get_workspace_info` and use the login
+as the **default** value for the `#author` node's `name` field. Do NOT ask
+the user for an author name — the default is good enough for most users.
+If the user explicitly says they want a different author (e.g., "publish
+as 'Smith Lab'"), use what they specified instead.
+
+If `get_workspace_info` shows `GitHub: (not connected)`: generate the
+pipeline anyway with `#author.name` left empty, and tell the user once, in
+chat, that they will need to complete the GitHub connection step in the
+AutoPipe app before publishing. Do not block generation on this — when the
+user later runs `validate_pipeline`, the validator will automatically fill
+`#author.name` from the GitHub login once it is available, and will return
+a clear error pointing back to the AutoPipe app if GitHub is still not
+connected at that point.
+
 ## License Selection (ASK USER before generating ro-crate-metadata.json)
 Before writing the metadata file, ask the user which open-source license to apply.
 You MUST present ALL FIVE options below — do not collapse, omit, or summarise any

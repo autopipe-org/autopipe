@@ -29,11 +29,13 @@ struct DownloadParams {
     pipeline_id: i32,
     /// Remote directory path (optional, defaults to configured pipelines directory)
     output_dir: Option<String>,
-    /// Set to true ONLY after the user has reviewed every entry in the
-    /// pipeline's `security_warnings` (returned by the registry) and
-    /// explicitly confirmed each one is safe. Required to be true whenever
-    /// the pipeline has any warnings — the tool refuses to download
-    /// otherwise. For pipelines with no warnings, this can be omitted.
+    /// Set to true ONLY after the AI has reviewed the pipeline's source
+    /// code (returned by the first call of this tool) for suspicious
+    /// patterns and, if anything risky was found, the user has explicitly
+    /// confirmed they want to proceed anyway. The first call (with this
+    /// flag absent or false) returns a code dump for review and does NOT
+    /// download anything; the second call (with this flag true) performs
+    /// the actual download.
     #[serde(default)]
     user_reviewed_warnings: Option<bool>,
 }
@@ -228,44 +230,12 @@ struct UploadWorkflowParams {
     repo_name: Option<String>,
 }
 
-/// One AI-detected suspicious code pattern that the user explicitly marked as
-/// safe before publish. Shown verbatim to anyone downloading the pipeline so
-/// they can decide whether to accept the same risk. The MCP client builds
-/// these from its own code review of the uploaded files.
-#[derive(Debug, serde::Serialize, Deserialize, JsonSchema)]
-struct AiWarning {
-    /// Path of the file inside the pipeline directory (e.g. "scripts/preprocess.py").
-    file: String,
-    /// 1-based line number where the suspicious snippet starts.
-    line: u32,
-    /// The exact line of code that raised the concern. Keep it short — one or two lines.
-    code_snippet: String,
-    /// Explanation of what could go wrong. **Always write this in English**, even if
-    /// you are conversing with the user in another language. The registry stores it
-    /// alongside the pipeline and shows it to downloaders worldwide; a single language
-    /// keeps the audit trail consistent. Translate to the user's language only when
-    /// presenting findings in chat — do not store translations in this field.
-    concern: String,
-    /// Optional grouping label in English (e.g. "permissions", "network", "obfuscation").
-    #[serde(default)]
-    category: Option<String>,
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 struct PublishWorkflowParams {
     /// GitHub URL of the uploaded workflow (from upload_workflow result)
     github_url: String,
     /// Set to an existing pipeline_id to link this as a related/derived version. Same-name pipelines are auto-linked. Use this for cross-name forks (e.g., a similar pipeline with a different name).
     forked_from: Option<i32>,
-    /// AI-detected suspicious patterns the user has already marked as safe.
-    /// Required (can be an empty list) — the LLM MUST review every code file
-    /// in the pipeline (Snakefile, Dockerfile, scripts/*, config.yaml, etc.),
-    /// surface anything risky to the user with a plain-English concern, and
-    /// only call publish_workflow after the user explicitly approves each item.
-    /// The list is stored on the pipeline record and shown verbatim to anyone
-    /// who later downloads the pipeline so they can review the same risks.
-    #[serde(default)]
-    ai_warnings: Option<Vec<AiWarning>>,
 }
 
 // ── Server ──────────────────────────────────────────────────────────
@@ -348,6 +318,175 @@ fn extract_absolute_path(value: &str) -> Option<String> {
 ///   https://github.com/{owner}/{repo}/tree/{branch}/{path}
 ///   https://github.com/{owner}/{repo}
 /// Parse a GitHub URL into (owner, repo, branch_or_tag, subpath).
+/// Best-effort: fetch the GitHub `login` (username) for the configured
+/// personal access token. Returns `None` if no token is set, the token
+/// is invalid, or the request fails. Never panics — callers decide how
+/// to handle the absence of a login.
+pub(crate) async fn fetch_github_login(token: Option<&str>) -> Option<String> {
+    let token = token.filter(|t| !t.is_empty())?;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "autopipe-desktop")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v["login"].as_str().map(String::from)
+}
+
+/// Walk the `@graph` array in a parsed ro-crate-metadata.json and set the
+/// Person `#author` node's `name` field to `login`. Returns the rewritten
+/// JSON, pretty-printed for human readability when committed to GitHub.
+pub(crate) fn fill_ro_crate_author(content: &str, login: &str) -> Result<String, String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| format!("parse: {}", e))?;
+    let graph = v["@graph"]
+        .as_array_mut()
+        .ok_or_else(|| "@graph is not an array".to_string())?;
+    for node in graph.iter_mut() {
+        if node["@id"].as_str() == Some("#author") {
+            node["name"] = serde_json::Value::String(login.to_string());
+        }
+    }
+    serde_json::to_string_pretty(&v).map_err(|e| format!("serialize: {}", e))
+}
+
+/// Return true if `path` looks like a source/config file the AI should
+/// review before download. The list is intentionally permissive on the
+/// "obviously source code" side (Snakefile, Dockerfile, Makefile, common
+/// script extensions) and restrictive on the data side (no BAM, no FASTA,
+/// no images, no compiled binaries) so the dump stays small and useful.
+pub(crate) fn is_code_review_target(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    let basename = lower.rsplit('/').next().unwrap_or(&lower);
+    if basename == "snakefile" || basename == "dockerfile" || basename == "makefile" {
+        return true;
+    }
+    const EXTS: &[&str] = &[
+        ".py", ".r", ".rmd", ".sh", ".bash", ".zsh", ".yaml", ".yml",
+        ".json", ".jsonl", ".toml", ".md", ".txt", ".ipynb", ".sql",
+        ".pl", ".rb", ".js", ".ts",
+    ];
+    EXTS.iter().any(|e| lower.ends_with(e))
+}
+
+/// Fetch every reviewable source/config file (see `is_code_review_target`)
+/// from the pipeline's GitHub directory and assemble a single textual dump
+/// for the calling AI to silently review. The dump ends with an
+/// `INSTRUCTIONS FOR AI` block that tells the agent what to do next (call
+/// again with `user_reviewed_warnings=true`, or surface findings to the
+/// user first). The function does not write anything to disk and does
+/// not perform the actual download.
+pub(crate) async fn fetch_pipeline_code_dump(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+    subpath: &str,
+    token: Option<&str>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+
+    // 1. List every blob in the repo at the given branch in a single call.
+    let tree_url = format!(
+        "https://api.github.com/repos/{}/{}/git/trees/{}?recursive=1",
+        owner, repo, branch
+    );
+    let mut tree_req = client.get(&tree_url).header("User-Agent", "autopipe-desktop");
+    if let Some(t) = token {
+        tree_req = tree_req.header("Authorization", format!("Bearer {}", t));
+    }
+    let tree_resp = tree_req.send().await.map_err(|e| e.to_string())?;
+    if !tree_resp.status().is_success() {
+        return Err(format!("GitHub tree fetch failed: HTTP {}", tree_resp.status()));
+    }
+    let tree_body: serde_json::Value = tree_resp.json().await.map_err(|e| e.to_string())?;
+    let tree = tree_body["tree"]
+        .as_array()
+        .ok_or_else(|| "GitHub tree response missing 'tree' array".to_string())?;
+
+    // 2. Keep blobs that live under the pipeline's subpath and look like code.
+    let normalized = subpath.trim_matches('/');
+    let prefix = if normalized.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", normalized)
+    };
+
+    let mut targets: Vec<String> = Vec::new();
+    for entry in tree {
+        if entry["type"].as_str() != Some("blob") {
+            continue;
+        }
+        let path = match entry["path"].as_str() {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        if !prefix.is_empty() && !path.starts_with(&prefix) {
+            continue;
+        }
+        if !is_code_review_target(&path) {
+            continue;
+        }
+        targets.push(path);
+    }
+    targets.sort();
+
+    if targets.is_empty() {
+        return Err("No reviewable source files found in the pipeline directory.".to_string());
+    }
+
+    // 3. Fetch each blob's contents from raw.githubusercontent.com.
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Reviewing pipeline source ({} file{}) before download.\n\n",
+        targets.len(),
+        if targets.len() == 1 { "" } else { "s" }
+    ));
+    for path in &targets {
+        let raw_url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}",
+            owner, repo, branch, path
+        );
+        let mut req = client.get(&raw_url).header("User-Agent", "autopipe-desktop");
+        if let Some(t) = token {
+            req = req.header("Authorization", format!("Bearer {}", t));
+        }
+        let content = match req.send().await {
+            Ok(r) if r.status().is_success() => r.text().await.unwrap_or_default(),
+            Ok(r) => format!("<failed to fetch: HTTP {}>", r.status()),
+            Err(e) => format!("<failed to fetch: {}>", e),
+        };
+        let display_path = path.strip_prefix(&prefix).unwrap_or(path);
+        out.push_str(&format!("=== {} ===\n{}\n\n", display_path, content));
+    }
+
+    // 4. Instruction footer for the calling AI.
+    out.push_str(
+        "INSTRUCTIONS FOR AI: Silently review every file above for suspicious patterns — \
+         overly permissive permissions (chmod 777, SUID/SGID), credentials or tokens \
+         hard-coded in source, unexpected outbound network calls, obfuscated or base64-decoded \
+         execution, mounting host paths beyond the workspace, --network host or --privileged \
+         docker flags, executing remotely-fetched scripts without verification, deleting files \
+         outside the pipeline workspace, etc. Then either:\n\
+         - No concerns found → call download_pipeline again with user_reviewed_warnings=true \
+         to perform the actual download.\n\
+         - Concerns found → present each finding to the user IN THEIR LANGUAGE with (1) file \
+         path, (2) line number, (3) the offending code snippet, (4) a plain-English explanation \
+         of the risk. Then ask: 'Mark all of this code as safe and download anyway?' (or the \
+         equivalent in the user's language). Only call download_pipeline again with \
+         user_reviewed_warnings=true after the user explicitly confirms.\n\
+         NEVER skip this review just because you remember a previous approval of the same \
+         pipeline — repeat the review every time.",
+    );
+
+    Ok(out)
+}
+
 pub(crate) fn parse_github_url(url: &str) -> Option<(String, String, Option<String>, String)> {
     let url = url.trim().trim_end_matches('/');
     let url = url.strip_prefix("https://github.com/")
@@ -584,6 +723,16 @@ impl AutoPipeServer {
         } else {
             format!("single repo ({})", config.github_repo)
         };
+
+        // Look up GitHub login so the AI can fill ro-crate `#author.name`
+        // without asking the user. Best-effort: when no token is set or
+        // GitHub is unreachable we report "(not connected)" — the AI then
+        // proceeds with an empty author and validate_pipeline gates the
+        // publish step until the user connects GitHub.
+        let github_login = fetch_github_login(config.github_token.as_deref())
+            .await
+            .unwrap_or_else(|| "(not connected)".to_string());
+
         let info = format!(
             "Workspace Configuration:\n\
              - Base path (repo_path): {}\n\
@@ -591,12 +740,14 @@ impl AutoPipeServer {
              - Input directory: {}\n\
              - Output directory: {}\n\
              - SSH: {}@{}:{}\n\
+             - GitHub: {}\n\
              - Upload mode: {}\n\n\
              When creating pipelines, save files under the Pipelines directory.\n\
              When preparing input data, use prepare_input to download from a URL or symlink a server path into the Input directory. Pass the returned path as input_dir to dry_run or execute_pipeline.\n\
              When executing pipelines, outputs are automatically stored under the Output directory.\n\
              To view result files, use list_files and read_file directly on the output path.\n\
-             To remove input files, use remove_input.",
+             To remove input files, use remove_input.\n\
+             When generating ro-crate-metadata.json, use the GitHub login above as the default `#author.name`. If GitHub is (not connected), leave the author empty for now — validate_pipeline will auto-fill it once the user connects GitHub from the AutoPipe app.",
             if config.repo_path.is_empty() {
                 "(not set)"
             } else {
@@ -608,6 +759,7 @@ impl AutoPipeServer {
             config.ssh_user,
             config.ssh_host,
             config.ssh_port,
+            github_login,
             upload_mode,
         );
         Ok(CallToolResult::success(vec![Content::text(info)]))
@@ -646,14 +798,17 @@ impl AutoPipeServer {
         }
     }
 
-    #[tool(description = "Download a pipeline by ID from the registry and save it to the remote SSH server. Fetches pipeline files from its GitHub repository. If output_dir is omitted, saves to the configured pipelines directory.\n\n\
-                          MANDATORY — SECURITY REVIEW BEFORE DOWNLOAD: When the registry response includes a non-empty `security_warnings` array, you MUST present every entry to the user IN THEIR LANGUAGE before the actual download proceeds. For each entry show: (1) the file and line number, (2) the offending code snippet, (3) the `concern` text — this is stored in English by the publisher; translate it into the user's chat language when you display it (do not show the raw English text if the user is conversing in another language). Then ask the user, per pipeline (not per item): 'Mark all of this code as safe and continue downloading?' (or the equivalent in the user's language). Only when the user explicitly confirms should you call download_pipeline again with user_reviewed_warnings=true. If the user declines, do not download. This confirmation is REQUIRED EVERY TIME, even for the same pipeline downloaded again later — never skip the review just because you remember a previous approval.\n\
-                          When `security_warnings` is empty, no review prompt is needed and you can call download_pipeline directly.")]
+    #[tool(description = "Download a pipeline by ID from the registry to the remote SSH server. Fetches pipeline files from its GitHub repository. If output_dir is omitted, saves to the configured pipelines directory.\n\n\
+                          MANDATORY — SECURITY REVIEW BEFORE DOWNLOAD (two-call protocol):\n\
+                          First call (without user_reviewed_warnings=true): this tool fetches every code/config file from the pipeline's GitHub repository (Snakefile, Dockerfile, *.py, *.R, *.sh, *.yaml, *.json, *.md, scripts/*, etc.) and returns them inline as a code dump. It does NOT save anything to the remote server. You MUST silently review every file in the dump for suspicious patterns — overly permissive permissions (chmod 777, SUID/SGID), credentials or tokens hard-coded in source, unexpected outbound network calls, obfuscated or base64-decoded execution, mounting host paths beyond the workspace, --network host or --privileged docker flags, executing remotely fetched scripts without verification, deleting files outside the pipeline workspace, etc. Use your judgement — the goal is to find anything that could harm the user if they run this pipeline.\n\
+                          Second call (with user_reviewed_warnings=true): performs the actual download to the SSH server. Only call with this flag set when EITHER (a) you found no concerns in the review, OR (b) the user has explicitly confirmed they want to download despite the findings you presented. NEVER skip the review by calling with user_reviewed_warnings=true straight away.\n\
+                          If you find concerns, present them to the user IN THEIR LANGUAGE: for each finding show (1) the file path and line number, (2) the offending code snippet, (3) a plain-English explanation of the risk (translated to the user's chat language). Then ask: 'Mark all of this code as safe and download anyway?' (or the equivalent in the user's language). Wait for an explicit yes/no per pipeline.\n\
+                          This review is REQUIRED EVERY TIME, even for the same pipeline downloaded again later — never skip it just because you remember a previous approval.")]
     async fn download_pipeline(
         &self,
         Parameters(params): Parameters<DownloadParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // 1. Get pipeline metadata from registry (includes github_url + security_warnings)
+        // 1. Get pipeline metadata from registry.
         let pipeline = match self.registry.get_pipeline(params.pipeline_id).await {
             Ok(p) => p,
             Err(e) => {
@@ -664,36 +819,9 @@ impl AutoPipeServer {
             }
         };
 
-        // 2. Gate download on the user reviewing AI-detected warnings.
-        // The MCP description above tells the LLM to surface the warnings
-        // and ask the user; we enforce that contract here so a buggy or
-        // adversarial client can't silently bypass the review.
-        if !pipeline.security_warnings.is_empty()
-            && !params.user_reviewed_warnings.unwrap_or(false)
-        {
-            let mut listing = String::new();
-            for (idx, w) in pipeline.security_warnings.iter().enumerate() {
-                listing.push_str(&format!(
-                    "\n{}. {} (line {})\n   Code: {}\n   Concern: {}\n",
-                    idx + 1,
-                    w.file,
-                    w.line,
-                    w.code_snippet.trim(),
-                    w.concern.trim(),
-                ));
-            }
-            return Ok(CallToolResult::error(vec![Content::text(format!(
-                "This pipeline contains {} suspicious code pattern(s) that the publisher acknowledged. \
-                 Show each item to the user in their language and ask whether to mark all of them as safe and proceed:{}\n\
-                 If the user agrees, call download_pipeline again with user_reviewed_warnings=true.\n\
-                 If the user declines, stop and do not download.",
-                pipeline.security_warnings.len(),
-                listing
-            ))]));
-        }
-
-        // 2. Parse GitHub URL
-        let (owner, repo, _branch, path) = match parse_github_url(&pipeline.github_url) {
+        // 2. Parse GitHub URL once — used by both the review dump path and
+        //    the actual download path below.
+        let (owner, repo, branch_opt, path) = match parse_github_url(&pipeline.github_url) {
             Some(parsed) => parsed,
             None => {
                 return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -702,6 +830,28 @@ impl AutoPipeServer {
                 ))]));
             }
         };
+        let branch = branch_opt.as_deref().unwrap_or("main");
+
+        // 3. First call (user_reviewed_warnings != true): fetch source code
+        //    for the AI to review and return it inline. Do NOT download.
+        if !params.user_reviewed_warnings.unwrap_or(false) {
+            let token = self.config().github_token.clone();
+            return match fetch_pipeline_code_dump(
+                &owner,
+                &repo,
+                branch,
+                &path,
+                token.as_deref(),
+            )
+            .await
+            {
+                Ok(dump) => Ok(CallToolResult::success(vec![Content::text(dump)])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to fetch pipeline source for review: {}",
+                    e
+                ))])),
+            };
+        }
 
         // 3. Create directory on remote server
         // Convert any Windows-style path the user may have typed (e.g.
@@ -1124,14 +1274,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (Korean): '이 파이프라인은 <원본 이름>(#<원본 id>) 파이프라인을 다운로드해서 수정한 것으로 보이는데, 맞나요? 맞으면 출처(forked_from)를 자동으로 기록합니다. 아니면 출처를 끊고 독립 파이프라인으로 등록합니다.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.\n\n\
-                          MANDATORY — AI CODE REVIEW BEFORE PUBLISH: BEFORE calling this tool you MUST review every code file in the pipeline directory (Snakefile, Dockerfile, config.yaml, scripts/*, requirements.txt, and any other file you wrote). Use read_file (or fetch each file from GitHub at the github_url) to read them. **Read silently — do NOT echo full file contents to the user.** The user has only asked to publish, not to see the code; only surface concrete findings (file path, line number, snippet, plain-English concern). For each file, identify suspicious patterns such as: overly permissive permissions (chmod 777, SUID/SGID), credentials or tokens hard-coded in source, unexpected outbound network calls, obfuscated or base64-decoded execution, mounting host paths beyond the workspace, --network host or --privileged docker flags, executing remotely fetched scripts without verification, deleting files outside the pipeline workspace, etc. Use your judgement — there is no fixed list, the goal is to find anything that could harm a downloader who runs this pipeline.\n\
-                          For every concern you find, present it to the user in their own language with: (1) the file path and line number, (2) the offending code snippet, (3) an explanation of what could go wrong (translate the explanation into the user's language for chat display). Then ask: 'Mark this code as safe and continue with publish?' (or the equivalent in the user's language). Wait for an explicit answer per item.\n\
-                          - If the user marks ALL items as safe → call publish_workflow with ai_warnings set to the full list of approved items (each item: {file, line, code_snippet, concern, [category]}). **The `concern` field MUST be written in English** regardless of the user's chat language — the registry shares this list across all downloaders worldwide, so a consistent English audit trail is required. Use the user's language only for the in-chat explanation, never for the stored `concern` value.\n\
-                          - If the user marks SOME items as unsafe → offer to refactor those specific files. After the user agrees, edit the affected files (write_file on the SSH server), call upload_workflow again to push the changes, then re-run this AI review from scratch on the new code, and finally call publish_workflow when the user is satisfied.\n\
-                          - If the user cancels → do not call publish_workflow at all.\n\
-                          When you find no suspicious patterns at all, still call publish_workflow with ai_warnings=[] (empty list) so the registry knows a review happened and the pipeline is clean.\n\
-                          IMPORTANT: ai_warnings must reflect what the user actually approved in this conversation — never copy/paste from a prior pipeline or invent items the user did not see.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (Korean): '이 파이프라인은 <원본 이름>(#<원본 id>) 파이프라인을 다운로드해서 수정한 것으로 보이는데, 맞나요? 맞으면 출처(forked_from)를 자동으로 기록합니다. 아니면 출처를 끊고 독립 파이프라인으로 등록합니다.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -1436,20 +1579,14 @@ impl AutoPipeServer {
         }
 
         // Call registry publish endpoint FIRST, then create tag only on success.
-        // `ai_warnings` carries the LLM's code review results that the user has
-        // already approved; the registry stores them so downloaders see the
-        // same list of suspicious patterns at fetch time.
-        let ai_warnings_json = match &params.ai_warnings {
-            Some(list) => serde_json::to_value(list).unwrap_or(serde_json::json!([])),
-            None => serde_json::json!([]),
-        };
+        // Security review at publish time has been removed; downloaders run a
+        // fresh AI code review on the GitHub source at download time instead.
         let resp = client
             .post(format!("{}/api/publish", base))
             .json(&serde_json::json!({
                 "github_url": params.github_url,
                 "github_token": token,
                 "forked_from": resolved_forked_from,
-                "ai_warnings": ai_warnings_json,
             }))
             .send()
             .await
@@ -1492,33 +1629,6 @@ impl AutoPipeServer {
                  Pipeline ID: {}",
                 name, version, web_url, pipeline_id
             ))]))
-        } else if status.as_u16() == 422 {
-            // Hard-layer security check rejected the publish. Each issue
-            // ships with `short` (one-line label) and `detail` (why it's a
-            // risk) so the user can decide what to fix without re-asking.
-            let issues = body["issues"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .map(|i| {
-                            format!(
-                                "- {} (line {} in {})\n    Why: {}",
-                                i["short"].as_str().unwrap_or_else(|| i["message"].as_str().unwrap_or("Security issue")),
-                                i["line"].as_u64().unwrap_or(0),
-                                i["file"].as_str().unwrap_or(""),
-                                i["detail"].as_str().unwrap_or_else(|| i["message"].as_str().unwrap_or(""))
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_else(|| body["error"].as_str().unwrap_or("Unknown error").to_string());
-
-            Ok(CallToolResult::error(vec![Content::text(format!(
-                "Security validation blocked publish. The following critical patterns were found in Snakefile/Dockerfile and must be removed before retrying:\n{}\n\n\
-                 Explain each item to the user, ask whether to refactor, then edit the files (write_file), re-run upload_workflow, and call publish_workflow again.",
-                issues
-            ))]))
         } else {
             let error_msg = body["error"].as_str().unwrap_or("Unknown error");
             Ok(CallToolResult::error(vec![Content::text(format!(
@@ -1536,6 +1646,10 @@ impl AutoPipeServer {
         let pipeline_dir_translated = windows_to_wsl(&params.pipeline_dir);
         let dir = &pipeline_dir_translated;
         let mut errors: Vec<String> = Vec::new();
+        // `notices` carries advisory information about state the validator
+        // changed on the user's behalf (e.g., auto-filling `#author.name`).
+        // Validation still PASSES when only notices are present.
+        let mut notices: Vec<String> = Vec::new();
         let required = [
             "Snakefile",
             "Dockerfile",
@@ -1560,6 +1674,52 @@ impl AutoPipeServer {
                                 if m.name.is_empty() {
                                     errors.push("ro-crate-metadata.json: 'name' is empty".into());
                                 }
+                                // Author auto-fix when GitHub is connected.
+                                // We never block the user on this — the AI is
+                                // supposed to leave the field empty during
+                                // generation if GitHub wasn't connected yet,
+                                // and rely on this validator to backfill it
+                                // the first time the user runs validation
+                                // after connecting GitHub.
+                                if m.author.is_empty() {
+                                    let token = self.config().github_token.clone();
+                                    match fetch_github_login(token.as_deref()).await {
+                                        Some(login) => {
+                                            match fill_ro_crate_author(&content, &login) {
+                                                Ok(updated) => {
+                                                    match self
+                                                        .ssh_write_file(&path, &updated)
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                            notices.push(format!(
+                                                                "Auto-filled '#author.name' in ro-crate-metadata.json with '{}' from your GitHub login.",
+                                                                login
+                                                            ));
+                                                        }
+                                                        Err(e) => {
+                                                            errors.push(format!(
+                                                                "ro-crate-metadata.json: '#author.name' was empty and auto-fill via SSH failed ({}). Check your SSH connection and re-run validate_pipeline; it will retry the fix automatically.",
+                                                                e
+                                                            ));
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    errors.push(format!(
+                                                        "ro-crate-metadata.json: '#author.name' is empty and auto-fill failed to rewrite the file ({}).",
+                                                        e
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        None => {
+                                            errors.push(
+                                                "ro-crate-metadata.json: '#author.name' is empty and GitHub is not connected. Open the AutoPipe app, complete the GitHub connection step, then re-run validate_pipeline (it will auto-fill the author from your GitHub login).".into()
+                                            );
+                                        }
+                                    }
+                                }
                                 // `tools` is intentionally not enforced here.
                                 // Pipelines that don't call any bioinformatics
                                 // tool (e.g. trivial format conversions, test
@@ -1577,9 +1737,14 @@ impl AutoPipeServer {
         }
 
         if errors.is_empty() {
-            Ok(CallToolResult::success(vec![Content::text(
-                "Validation passed. All files present and valid.",
-            )]))
+            let mut msg = String::from("Validation passed. All files present and valid.");
+            if !notices.is_empty() {
+                msg.push_str("\n\nNotes:");
+                for n in &notices {
+                    msg.push_str(&format!("\n- {}", n));
+                }
+            }
+            Ok(CallToolResult::success(vec![Content::text(msg)]))
         } else {
             Ok(CallToolResult::error(vec![Content::text(format!(
                 "Validation errors:\n{}",
@@ -2342,7 +2507,7 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
     }
 
     #[tool(description = "Read a file's contents on the remote SSH server. Two valid uses:\n\
-                          (1) INTERNAL ANALYSIS — you (the AI) need to inspect a code or config file for your own work, e.g. the publish-time security review required by publish_workflow, or sanity-checking a Snakefile before a build. In this mode read silently: do NOT echo the full contents to the user, surface only specific findings (file path, line number, snippet, plain-English concern). No prior user permission is required because nothing is shown to the user yet.\n\
+                          (1) INTERNAL ANALYSIS — you (the AI) need to inspect a code or config file for your own work, e.g. the pre-download security review required by download_pipeline, or sanity-checking a Snakefile before a build. In this mode read silently: do NOT echo the full contents to the user, surface only specific findings (file path, line number, snippet, plain-English concern). No prior user permission is required because nothing is shown to the user yet.\n\
                           (2) USER ASKED FOR ONE FILE'S CONTENTS — the user explicitly said something like 'show me X' for a specific text/log/summary file. Read it and display the contents. For binary/image/large/genomic files (BAM, VCF, BCF, BED, GFF, CRAM, PNG, PDF, HDF5, etc.) do NOT use read_file — direct the user to show_results instead.\n\
                           Do NOT proactively ask 'do you want to save this locally?' after displaying — only mention download_results if the user themselves expresses interest in keeping a copy.")]
     async fn read_file(

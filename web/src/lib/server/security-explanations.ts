@@ -1,8 +1,12 @@
-// English explanations for hard-layer error patterns. The publish API uses
-// these to give the publisher a clear reason when a pattern blocks them.
-// The MCP client renders the explanation in the chat so the user understands
-// why their pipeline was rejected and what they need to change.
+// ──────────────────────────────────────────────────────────────────────────
+// Deactivated 2026-05: this file backed the publish-time hard-layer security
+// gate. That gate was removed; downloaders now run a fresh AI code review on
+// the GitHub source at download time. The definitions below are kept in a
+// block comment so the file is easy to revive if the gate is reintroduced —
+// safe to delete the entire file once the new flow is proven.
+// ──────────────────────────────────────────────────────────────────────────
 
+/*
 export interface PatternExplanation {
 	short: string;
 	detail: string;
@@ -69,3 +73,6 @@ export function explainPattern(patternId: string): PatternExplanation {
 		}
 	);
 }
+*/
+
+export {};

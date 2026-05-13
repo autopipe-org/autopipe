@@ -10,6 +10,20 @@
 // scripts/*.py and similar files where the AI review provides better
 // context-aware judgement.
 
+// ──────────────────────────────────────────────────────────────────────────
+// Deactivated 2026-05: publish-time hard-layer security validation removed.
+// Downloaders now run a fresh AI code review on the GitHub source at download
+// time (see download_pipeline in crates/desktop/src/mcp/server.rs). The
+// definitions below are kept commented out so this file is easy to revive
+// if the gate is reintroduced — once we're confident in the new flow they
+// can be deleted outright.
+//
+// NOTE: `validateGithubToken`, `extractBearerToken`, and `sanitizeErrorMessage`
+// at the bottom of this file are NOT part of the security-gate block — they
+// are general HTTP utilities used by other API routes and remain active.
+// ──────────────────────────────────────────────────────────────────────────
+
+/*
 export interface SecurityIssue {
 	line: number;
 	file: string;
@@ -188,6 +202,8 @@ export function validateSecurity(snakefile: string, dockerfile: string): Securit
 export function hasErrors(issues: SecurityIssue[]): boolean {
 	return issues.length > 0;
 }
+*/
+// ── End of deactivated security-gate block ────────────────────────────────
 
 /**
  * Validate a GitHub token by fetching the authenticated user.
@@ -235,13 +251,14 @@ export function sanitizeErrorMessage(message: string): string {
 	return message;
 }
 
-/**
- * Shape of an AI-detected suspicious pattern stored alongside a published
- * pipeline. Each entry comes from the MCP client's code review and has been
- * explicitly approved by the publisher; the same list is shown to anyone
- * downloading the pipeline so they can decide whether to accept the same
- * risks.
- */
+// ──────────────────────────────────────────────────────────────────────────
+// Deactivated 2026-05: AI-warning collection at publish time was removed.
+// Downloaders run a fresh review at download time, so we no longer store
+// the publisher's warnings on the pipeline record. Definitions kept
+// commented for easy revival; safe to delete once the new flow is proven.
+// ──────────────────────────────────────────────────────────────────────────
+
+/*
 export interface AiSecurityWarning {
 	file: string;
 	line: number;
@@ -250,7 +267,6 @@ export interface AiSecurityWarning {
 	category?: string;
 }
 
-/** Lightweight runtime validation — accept anything shaped like the type. */
 export function normalizeAiWarnings(input: unknown): AiSecurityWarning[] {
 	if (!Array.isArray(input)) return [];
 	const out: AiSecurityWarning[] = [];
@@ -267,3 +283,5 @@ export function normalizeAiWarnings(input: unknown): AiSecurityWarning[] {
 	}
 	return out;
 }
+*/
+// ── End of deactivated AI-warning block ───────────────────────────────────

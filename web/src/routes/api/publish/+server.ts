@@ -1,27 +1,21 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import {
-	validateSecurity,
-	hasErrors,
-	sanitizeErrorMessage,
-	normalizeAiWarnings
-} from '$lib/server/security.js';
-import { explainPattern } from '$lib/server/security-explanations.js';
+import { sanitizeErrorMessage } from '$lib/server/security.js';
 import { fetchGithubFile } from '$lib/server/github.js';
 import { db, schema } from '$lib/server/db.js';
 import { eq, sql } from 'drizzle-orm';
 
 const { userPipelines } = schema;
 
-// POST /api/publish — Fetch code from GitHub, validate security, store URL + metadata
+// POST /api/publish — Fetch code from GitHub, store URL + metadata.
+// Security review at publish time has been removed; the AutoPipe MCP
+// client now runs a fresh AI code review on the GitHub source at
+// download time instead. `security_warnings` stays in the schema for
+// backwards compatibility with legacy rows; new rows always get [].
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
-		const { github_url, github_token, forked_from, ai_warnings } = body;
-		// AI-detected suspicious patterns the publisher already approved
-		// in the MCP client. Stored alongside the pipeline so downloaders
-		// can review the same list before fetching files.
-		const approvedWarnings = normalizeAiWarnings(ai_warnings);
+		const { github_url, github_token, forked_from } = body;
 
 		if (!github_url || !github_token) {
 			return json({ error: 'github_url and github_token are required' }, { status: 400 });
@@ -127,24 +121,10 @@ export const POST: RequestHandler = async ({ request }) => {
 			return json({ error: 'ro-crate-metadata.json must contain a "name" field' }, { status: 400 });
 		}
 
-		// 5. Hard-layer security validation — only critical patterns on the
-		// Snakefile/Dockerfile. Soft (warning-level) review is delegated to
-		// the MCP client's AI, whose results arrive via `ai_warnings`.
-		const issues = validateSecurity(snakefile, dockerfile);
-		if (hasErrors(issues)) {
-			const enriched = issues.map((i) => {
-				const ex = explainPattern(i.pattern_id);
-				return { ...i, short: ex.short, detail: ex.detail };
-			});
-			return json(
-				{
-					error: 'Security validation failed',
-					issues: enriched,
-					hint: 'Each issue lists the file, line, pattern explanation, and reason. Fix the code and republish.'
-				},
-				{ status: 422 }
-			);
-		}
+		// 5. Hard-layer security validation removed — downloaders now run
+		// a fresh AI code review on the GitHub source at download time.
+		// We still fetched snakefile/dockerfile above purely to verify
+		// they exist (see the not-empty guard earlier).
 
 		// 6. Always INSERT a new record (version tracking)
 		let name = metadata.name as string;
@@ -236,7 +216,7 @@ export const POST: RequestHandler = async ({ request }) => {
 				verified: false,
 				forkedFrom: resolvedForkedFrom,
 				basedOnUrl: (metadata.based_on_url as string) || null,
-				securityWarnings: approvedWarnings
+				securityWarnings: []
 			})
 			.returning({ pipelineId: userPipelines.pipelineId });
 
@@ -254,7 +234,7 @@ export const POST: RequestHandler = async ({ request }) => {
 			pipeline_id: pipelineId,
 			name,
 			author,
-			security_warnings: approvedWarnings
+			security_warnings: []
 		};
 
 		return json(response, { status: 200 });

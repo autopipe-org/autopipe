@@ -1,6 +1,10 @@
 import { db, schema } from './db.js';
 import { eq, ilike, or, sql } from 'drizzle-orm';
-import type { AiSecurityWarning } from './security.js';
+
+// AiSecurityWarning import removed 2026-05 along with the publish-time
+// security gate (see security.ts). Downloaders now run a fresh AI code
+// review at download time, so the API responses no longer carry the
+// publisher's warning list.
 
 const { userPipelines } = schema;
 
@@ -18,10 +22,9 @@ export interface PipelineSummary {
 	verified: boolean;
 	forked_from: number | null;
 	based_on_url: string | null;
-	// Number of AI-detected suspicious patterns the publisher approved.
-	// Lets list/search consumers show a small indicator without pulling
-	// the full warning payload.
-	security_warning_count: number;
+	// `security_warning_count` was removed when the publish-time security
+	// gate was deactivated; the column on the DB row is still populated for
+	// legacy pipelines but is no longer surfaced in list/search responses.
 	created_at: string | null;
 }
 
@@ -40,15 +43,12 @@ export interface Pipeline {
 	verified: boolean;
 	forked_from?: number | null;
 	based_on_url?: string | null;
-	// AI-detected suspicious patterns approved by the publisher.
-	// MCP clients show this list to downloaders before fetching files.
-	security_warnings: AiSecurityWarning[];
+	// `security_warnings` field removed for the same reason as the count
+	// above. The DB column is preserved for legacy rows but the API no
+	// longer returns it — downloaders fetch the source and run their own
+	// AI review at download time instead.
 	created_at?: string | null;
 	updated_at?: string | null;
-}
-
-function readWarnings(value: unknown): AiSecurityWarning[] {
-	return Array.isArray(value) ? (value as AiSecurityWarning[]) : [];
 }
 
 function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
@@ -66,7 +66,6 @@ function rowToSummary(r: typeof userPipelines.$inferSelect): PipelineSummary {
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
 		based_on_url: r.basedOnUrl ?? null,
-		security_warning_count: readWarnings(r.securityWarnings).length,
 		created_at: r.createdAt?.toISOString() ?? null
 	};
 }
@@ -87,7 +86,6 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
 		based_on_url: r.basedOnUrl ?? null,
-		security_warnings: readWarnings(r.securityWarnings),
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};
