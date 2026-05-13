@@ -41,8 +41,16 @@
 
 <main>
 	<div class="plugin-guide">
-		<p>Plugins extend the AutoPipe Results Viewer with custom file viewers. Install plugins in the app to preview additional file formats.</p>
-		<a href="/plugins/guide" class="guide-link">Plugin Development Guide &rarr;</a>
+		<p>Plugins extend the AutoPipe Results Viewer with custom file viewers.</p>
+		<p>
+			This page is a catalog for browsing available plugins —
+			to install, update, or uninstall them, open the AutoPipe desktop app
+			and click the Plugins button.
+		</p>
+		<div class="plugin-guide-links">
+			<a href="/getting-started" class="guide-link">Get AutoPipe &rarr;</a>
+			<a href="/plugins/guide" class="guide-link">Plugin Development Guide &rarr;</a>
+		</div>
 	</div>
 	<div class="section">
 		<h3 class="section-title">Search Plugins</h3>
@@ -64,14 +72,17 @@
 		<div class="plugin-grid">
 			{#each paginatedPlugins() as p (p.plugin_id)}
 				<a href="/plugins/{p.plugin_id}" class="plugin-card">
-					<div class="plugin-card-header">
-						<div class="plugin-card-icon">{p.name.charAt(0).toUpperCase()}</div>
-						<div class="plugin-card-meta">
-							<div class="plugin-card-name">{p.name}</div>
-							<div class="plugin-card-version">v{p.version}</div>
-						</div>
+					<div class="plugin-card-icon">
+						<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#0f4c5c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+							<path d="M9 2v6"/>
+							<path d="M15 2v6"/>
+							<path d="M12 17v5"/>
+							<path d="M5 8h14"/>
+							<path d="M6 11V8h12v3a6 6 0 0 1-12 0Z"/>
+						</svg>
 					</div>
-					<div class="plugin-card-desc">{p.description}</div>
+					<h3 class="plugin-card-name">{p.name}</h3>
+					<p class="plugin-card-desc">{p.description}</p>
 					{#if p.extensions && p.extensions.length > 0}
 						<div class="plugin-card-exts">
 							{#each p.extensions as ext}
@@ -81,6 +92,7 @@
 					{/if}
 					<div class="plugin-card-footer">
 						<span class="plugin-card-author">{p.author || 'unknown'}</span>
+						<span class="plugin-card-version">v{p.version}</span>
 					</div>
 				</a>
 			{:else}
