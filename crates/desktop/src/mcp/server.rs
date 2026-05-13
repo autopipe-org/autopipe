@@ -3390,10 +3390,10 @@ impl ServerHandler for AutoPipeServer {
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
                  CRITICAL: NEVER call upload_workflow or publish_workflow unless the user EXPLICITLY says 'upload', 'publish', or 'register'. Pipeline creation, building, and execution do NOT require uploading or publishing. These are completely separate actions that require explicit user request.\n\n\
                  UPLOAD & PUBLISH RULES:\n\
-                 When the user asks to upload OR publish, ALWAYS do both steps together:\n\
-                 1. Call upload_workflow (version is auto-detected from GitHub, do NOT pass a version).\n\
-                 2. Then immediately call publish_workflow with the returned github_url.\n\
-                 Only skip publish if the user explicitly says 'upload to GitHub only'.\n\
+                 When the user asks to upload OR publish, ALWAYS do these steps in order:\n\
+                 1. Call validate_pipeline first. If it returns errors, fix the underlying files (e.g., fill in empty fields, create missing files, add `rule all` to the Snakefile) and re-run validate_pipeline until it passes. This step is REQUIRED even when the user says 'upload to GitHub only' — broken or empty pipeline files must not reach the public GitHub repository.\n\
+                 2. Call upload_workflow (version is auto-detected from GitHub, do NOT pass a version).\n\
+                 3. If the user said 'upload to GitHub only', stop here. Otherwise, immediately call publish_workflow with the returned github_url.\n\
                  Duplicate names and version upgrades are handled automatically by the tools."
                     .into(),
             ),
