@@ -803,7 +803,9 @@ impl AutoPipeServer {
                           First call (without user_reviewed_warnings=true): this tool fetches every code/config file from the pipeline's GitHub repository (Snakefile, Dockerfile, *.py, *.R, *.sh, *.yaml, *.json, *.md, scripts/*, etc.) and returns them inline as a code dump. It does NOT save anything to the remote server. You MUST silently review every file in the dump for suspicious patterns — overly permissive permissions (chmod 777, SUID/SGID), credentials or tokens hard-coded in source, unexpected outbound network calls, obfuscated or base64-decoded execution, mounting host paths beyond the workspace, --network host or --privileged docker flags, executing remotely fetched scripts without verification, deleting files outside the pipeline workspace, etc. Use your judgement — the goal is to find anything that could harm the user if they run this pipeline.\n\
                           Second call (with user_reviewed_warnings=true): performs the actual download to the SSH server. Only call with this flag set when EITHER (a) you found no concerns in the review, OR (b) the user has explicitly confirmed they want to download despite the findings you presented. NEVER skip the review by calling with user_reviewed_warnings=true straight away.\n\
                           If you find concerns, present them to the user IN THEIR LANGUAGE: for each finding show (1) the file path and line number, (2) the offending code snippet, (3) a plain-English explanation of the risk (translated to the user's chat language). Then ask: 'Mark all of this code as safe and download anyway?' (or the equivalent in the user's language). Wait for an explicit yes/no per pipeline.\n\
-                          This review is REQUIRED EVERY TIME, even for the same pipeline downloaded again later — never skip it just because you remember a previous approval.")]
+                          This review is REQUIRED EVERY TIME, even for the same pipeline downloaded again later — never skip it just because you remember a previous approval.\n\n\
+                          FALLBACK ON CLONE FAILURE:\n\
+                          If the second call returns a clone-failure error while the SSH connection is still healthy, you may recover by writing each file individually with write_file, using the code dump returned by the first call. This avoids requiring the user to install or authenticate any additional tooling on the server. Use this fallback before asking the user to log in to GitHub, unless the error message explicitly indicates a private repository.")]
     async fn download_pipeline(
         &self,
         Parameters(params): Parameters<DownloadParams>,
@@ -883,7 +885,13 @@ impl AutoPipeServer {
             }
         }
 
-        // 4. Clone repo via gh CLI on SSH server
+        // 4. Clone repo: try anonymous `git clone` first (covers all public
+        //    repos without any GitHub authentication on the SSH server),
+        //    then fall back to `gh repo clone`. With our token: authenticated
+        //    (covers private repos). Without our token: anonymous gh, which
+        //    is left as a last-resort fallback for servers where the user
+        //    has independently configured `gh` (via `gh auth login` on the
+        //    server itself or via a GH_TOKEN env var in their shell).
         let config = self.config();
         let github_token: Option<String> = config.github_token
             .as_ref()
@@ -891,36 +899,72 @@ impl AutoPipeServer {
             .cloned();
 
         let tmp_dir = format!("/tmp/autopipe-clone-{}", std::process::id());
-        let clone_cmd = match &github_token {
-            Some(token) => format!(
-                "GH_TOKEN='{}' gh repo clone {}/{} '{}'",
-                token, owner, repo, tmp_dir
-            ),
-            None => format!(
-                "gh repo clone {}/{} '{}'",
-                owner, repo, tmp_dir
-            ),
-        };
 
-        match self.ssh_run(&clone_cmd).await {
-            Ok((_, 0)) => {}
-            Ok((output, code)) => {
+        let git_clone = self.ssh_run(&format!(
+            "git clone --depth 1 https://github.com/{}/{}.git '{}'",
+            owner, repo, tmp_dir
+        )).await;
+
+        let (clone_output, clone_code) = match git_clone {
+            Ok((out, 0)) => (out, 0),
+            Ok((out, code)) => {
+                // Clean partial clone before retrying.
                 let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
-                let msg = if code == 128 || output.contains("Could not resolve") || output.contains("not found") {
-                    "This repository appears to be private or unavailable."
-                } else {
-                    &output
+
+                let gh_cmd = match &github_token {
+                    Some(token) => format!(
+                        "GH_TOKEN='{}' gh repo clone {}/{} '{}'",
+                        token, owner, repo, tmp_dir
+                    ),
+                    None => format!(
+                        "gh repo clone {}/{} '{}'",
+                        owner, repo, tmp_dir
+                    ),
                 };
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to clone repository: {}", msg
-                ))]));
+
+                match self.ssh_run(&gh_cmd).await {
+                    Ok((out2, 0)) => (out2, 0),
+                    Ok((out2, code2)) => {
+                        let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
+                        // Prefer the original git-clone output when gh also
+                        // fails — git's error messages are usually more
+                        // diagnostic than gh's "please authenticate" stub.
+                        let combined = if out2.trim().is_empty() { out } else { out2 };
+                        (combined, code2.max(code))
+                    }
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "SSH error during gh clone fallback: {}", e
+                        ))]));
+                    }
+                }
             }
             Err(e) => {
-                let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
                 return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "SSH error: {}", e
+                    "SSH error during git clone: {}", e
                 ))]));
             }
+        };
+
+        if clone_code != 0 {
+            let msg = if clone_output.contains("could not read Username")
+                      || clone_output.contains("Authentication failed")
+                      || clone_output.contains("terminal prompts disabled") {
+                "Repository may be private. Connect GitHub in the AutoPipe app's GitHub panel and retry."
+            } else if clone_output.contains("Repository not found")
+                      || clone_output.contains("not found")
+                      || clone_output.contains("does not exist") {
+                "Repository not found on GitHub. Verify the pipeline ID."
+            } else if clone_output.contains("Could not resolve host") {
+                "Cannot reach github.com from the SSH server. Check network connectivity."
+            } else if clone_output.contains("command not found") {
+                "git is not installed on the SSH server. Install git and retry."
+            } else {
+                clone_output.as_str()
+            };
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to clone repository: {}", msg
+            ))]));
         }
 
         // 5. Extract subpath if needed, then move to target dir

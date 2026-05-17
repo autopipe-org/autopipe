@@ -135,8 +135,12 @@
 						<h3>2.1 Install WSL with Ubuntu</h3>
 						<p>Open <strong>PowerShell as Administrator</strong> (Start menu → search "PowerShell" → right-click → <em>Run as administrator</em>) and run:</p>
 						<div class="code-block">wsl --install</div>
-						<p>This installs WSL plus Ubuntu in one step. The same window will switch to an Ubuntu prompt once installation finishes - <strong>no manual reboot is required</strong> in most cases.</p>
-						<p class="hint">Microsoft's official guide: <a href="https://learn.microsoft.com/windows/wsl/install" target="_blank" rel="noopener" class="subtle-link">Install WSL on Windows</a>. If <code>wsl --install</code> fails, see the <a href="#troubleshooting" class="subtle-link">troubleshooting section</a>.</p>
+
+						<p>If you see a message that <strong>Ubuntu is being installed</strong>, the installation has succeeded. The same PowerShell window will switch to an Ubuntu setup prompt once it finishes. Continue to step 2.2.</p>
+
+						<p>If instead Windows tells you to <strong>restart your computer</strong>, restart the computer, then open <strong>PowerShell as Administrator</strong> again and run <code>wsl --install</code> once more. This time you should see the "Ubuntu is being installed" message. Continue to step 2.2.</p>
+
+						<p class="hint">Microsoft's official guide: <a href="https://learn.microsoft.com/windows/wsl/install" target="_blank" rel="noopener" class="subtle-link">Install WSL on Windows</a>. If <code>wsl --install</code> still fails after a restart, see the <a href="#troubleshooting" class="subtle-link">troubleshooting section</a>.</p>
 
 						<h3>2.2 Create your Ubuntu user</h3>
 						<p>The same window now shows Ubuntu's first-run prompt. Fill in:</p>
