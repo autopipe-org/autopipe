@@ -3,11 +3,7 @@
 AutoPipe is an AI-powered platform for creating, executing, and sharing reproducible bioinformatics pipelines. It works as an MCP (Model Context Protocol) server, connecting to AI assistants like Claude, Gemini, and OpenAI — enabling researchers to build complete analysis workflows through natural language conversation.
 
 <p align="center">
-  <img src="docs/autopipe-schematic.png" alt="AutoPipe Architecture" width="800" />
-</p>
-
-<p align="center">
-  <img src="docs/figure_user.png" alt="AutoPipe User Workflow" width="800" />
+  <img src="docs/autopipe-schematic.png" alt="AutoPipe Architecture and User Workflow" width="800" />
 </p>
 
 ## Key Features
