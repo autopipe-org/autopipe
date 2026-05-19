@@ -1793,7 +1793,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             Some(t) if !t.is_empty() => t.clone(),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "GitHub login is required to unpublish a pipeline because the Hub verifies ownership via your GitHub token. Please open the AutoPipe app, connect GitHub from the GitHub panel, and try again.".into()
+                    "GitHub login is required to unpublish a pipeline because the Hub verifies ownership via your GitHub token. Please open the AutoPipe app, connect GitHub from the GitHub panel, and try again."
                 )]));
             }
         };
@@ -1810,7 +1810,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         if !resp.status().is_success() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "Pipeline not found on the Hub.".into()
+                "Pipeline not found on the Hub."
             )]));
         }
         let body: serde_json::Value = resp
@@ -1820,7 +1820,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         let versions = body["versions"].as_array().cloned().unwrap_or_default();
         if versions.is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "Pipeline not found on the Hub.".into()
+                "Pipeline not found on the Hub."
             )]));
         }
 
