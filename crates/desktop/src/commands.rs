@@ -264,6 +264,23 @@ pub fn set_github_repo(repo: String) -> Result<(), String> {
     cfg.save().map_err(|e| e.to_string())
 }
 
+/// Read the `per_pipeline_repo` flag. When false (default), every pipeline
+/// is uploaded into a subdirectory of the configured `github_repo`. When
+/// true, the user picks a fresh repo for each pipeline at upload time.
+/// This pair of commands restores the toggle that the old egui Setup tab
+/// exposed; the Svelte GitHub panel needs the same control.
+#[tauri::command]
+pub fn get_per_pipeline_repo() -> bool {
+    AppConfig::load().per_pipeline_repo
+}
+
+#[tauri::command]
+pub fn set_per_pipeline_repo(value: bool) -> Result<(), String> {
+    let mut cfg = AppConfig::load();
+    cfg.per_pipeline_repo = value;
+    cfg.save().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn clear_github_token() -> Result<(), String> {
     let mut cfg = AppConfig::load();
@@ -497,6 +514,8 @@ pub fn register(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wr
         get_ssh_config,
         save_ssh_config,
         get_github_username,
+        get_per_pipeline_repo,
+        set_per_pipeline_repo,
         clear_github_token,
         start_github_login,
         list_installed_plugins,

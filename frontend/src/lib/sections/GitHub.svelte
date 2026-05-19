@@ -16,10 +16,15 @@
   let verificationUri = $state('');
   let repo = $state('');
   let repoSaving = $state(false);
+  let perPipelineRepo = $state(false);
+  let perPipelineSaving = $state(false);
 
   onMount(async () => {
     try {
       repo = await invoke<string>('get_github_repo');
+    } catch {}
+    try {
+      perPipelineRepo = await invoke<boolean>('get_per_pipeline_repo');
     } catch {}
   });
 
@@ -62,6 +67,27 @@
       showToast('err', `${e}`);
     } finally {
       repoSaving = false;
+    }
+  }
+
+  async function togglePerPipelineRepo(e: Event) {
+    const next = (e.target as HTMLInputElement).checked;
+    perPipelineSaving = true;
+    try {
+      await invoke('set_per_pipeline_repo', { value: next });
+      perPipelineRepo = next;
+      showToast(
+        'ok',
+        next
+          ? 'Switched to per-pipeline repository mode.'
+          : 'Switched to single repository mode.'
+      );
+    } catch (err) {
+      showToast('err', `${err}`);
+      // Roll back the visual toggle since the save failed.
+      (e.target as HTMLInputElement).checked = !next;
+    } finally {
+      perPipelineSaving = false;
     }
   }
 
@@ -110,21 +136,38 @@
   </div>
 
   <div class="repo-block">
-    <p class="repo-hint">
-      Pipelines you upload will go to here. Change this if you want a
-      different repository name.
-    </p>
-    <div class="repo-row">
-      <span class="repo-prefix">github.com/{username}/</span>
+    <label class="repo-toggle">
       <input
-        class="repo-input"
-        bind:value={repo}
-        placeholder="autopipe-hub"
+        type="checkbox"
+        checked={perPipelineRepo}
+        disabled={perPipelineSaving}
+        onchange={togglePerPipelineRepo}
       />
-      <button class="ghost" disabled={repoSaving} onclick={saveRepo}>
-        {repoSaving ? 'Saving…' : 'Save'}
-      </button>
-    </div>
+      <span>Create a separate repository per pipeline</span>
+    </label>
+
+    {#if !perPipelineRepo}
+      <p class="repo-hint">
+        Pipelines you upload will go to here. Change this if you want a
+        different repository name.
+      </p>
+      <div class="repo-row">
+        <span class="repo-prefix">github.com/{username}/</span>
+        <input
+          class="repo-input"
+          bind:value={repo}
+          placeholder="autopipe-hub"
+        />
+        <button class="ghost" disabled={repoSaving} onclick={saveRepo}>
+          {repoSaving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    {:else}
+      <p class="repo-hint">
+        The AI will ask you for a repository name each time you upload a
+        pipeline.
+      </p>
+    {/if}
   </div>
 {:else if userCode}
   <div class="device-flow">
@@ -235,6 +278,19 @@
     font-size: 0.8rem;
     color: var(--text-muted);
     font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  .repo-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    font-size: 0.85rem;
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    cursor: pointer;
+  }
+  .repo-toggle input[type='checkbox'] {
+    cursor: pointer;
   }
 
   /* ── Device flow ──────────────────────────────── */

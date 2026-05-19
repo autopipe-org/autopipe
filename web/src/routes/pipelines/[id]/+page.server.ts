@@ -66,12 +66,19 @@ export const load: PageServerLoad = async ({ params }) => {
 	}
 
 	// Resolve basedOn from forked_from when the parent author differs.
+	// If the parent pipeline has been unpublished from the Hub, track it so the
+	// template can render "original pipeline has been deleted" instead of a
+	// broken link. We never cascade-delete forks, so the dangling reference is
+	// expected and handled here.
 	let basedOn: { pipeline_id: number; name: string; version: string; author: string } | null =
 		null;
+	let forkedFromDeleted: { id: number } | null = null;
 	if (pipeline.forked_from) {
 		const parent = await getPipeline(pipeline.forked_from);
 		if (parent && parent.author !== pipeline.author) {
 			basedOn = await resolveBasedOn(pipeline.forked_from);
+		} else if (!parent) {
+			forkedFromDeleted = { id: pipeline.forked_from };
 		}
 	}
 
@@ -80,7 +87,7 @@ export const load: PageServerLoad = async ({ params }) => {
 	// this regardless of author so users see the lineage they recorded via
 	// download_pipeline → publish_workflow.
 	let basedOnUrl: string | null = pipeline.based_on_url ?? null;
-	if (!basedOn && basedOnUrl) {
+	if (!basedOn && !forkedFromDeleted && basedOnUrl) {
 		const internalId = extractInternalPipelineId(basedOnUrl);
 		if (internalId !== null && internalId !== pipeline.pipeline_id) {
 			const internal = await resolveBasedOn(internalId);
@@ -89,9 +96,13 @@ export const load: PageServerLoad = async ({ params }) => {
 				// Internal lineage is now represented by `basedOn` — clear the raw
 				// URL so the template doesn't render a duplicate "External" link.
 				basedOnUrl = null;
+			} else {
+				// The Hub URL points to a now-deleted pipeline.
+				forkedFromDeleted = { id: internalId };
+				basedOnUrl = null;
 			}
 		}
 	}
 
-	return { pipeline, fileTree, githubUrl, versionChain, basedOn, basedOnUrl };
+	return { pipeline, fileTree, githubUrl, versionChain, basedOn, basedOnUrl, forkedFromDeleted };
 };

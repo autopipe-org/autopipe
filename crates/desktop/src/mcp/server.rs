@@ -238,6 +238,19 @@ struct PublishWorkflowParams {
     forked_from: Option<i32>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UnpublishParams {
+    /// Pipeline ID to unpublish from Autopipe Hub.
+    pipeline_id: i64,
+    /// 'latest' = delete only the most recent version in this pipeline's
+    /// version chain (same name + same author). 'all' = delete every
+    /// version. Omit on the first call to discover how many versions
+    /// exist; the tool will return the version list and ask you to call
+    /// again with a scope.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
 // ── Server ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1040,7 +1053,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub token error, tell the user to log in via the GitHub tab in the Autopipe desktop app and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_workflow. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir.")]
+    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_workflow. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -1050,7 +1063,7 @@ impl AutoPipeServer {
             Some(t) if !t.is_empty() => t.clone(),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                    "GitHub login is required. Please open the AutoPipe app, connect GitHub from the GitHub panel, and try again.",
                 )]));
             }
         };
@@ -1147,6 +1160,85 @@ impl AutoPipeServer {
                 ))]));
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // ── Directory-conflict check ────────────────────────────────────
+        // If the target subdirectory (single-repo mode) or the repo itself
+        // (per-pipeline mode) already contains files but the Hub has no
+        // record of a pipeline by this name and author, the previous
+        // pipeline was probably unpublished. Block the upload so the
+        // user's new pipeline does not silently inherit residual files
+        // from the old one via base_tree inheritance.
+        let registry_url = config.registry_url.trim_end_matches('/').to_string();
+        let dir_prefix = path_prefix.trim_end_matches('/').to_string();
+        let tree_resp = client
+            .get(format!(
+                "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
+                owner, repo_name
+            ))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", "autopipe-desktop")
+            .send()
+            .await;
+        if let Ok(r) = tree_resp {
+            if r.status().is_success() {
+                if let Ok(tree_body) = r.json::<serde_json::Value>().await {
+                    let entries = tree_body["tree"].as_array().cloned().unwrap_or_default();
+                    let dir_exists = if dir_prefix.is_empty() {
+                        // per-pipeline mode: any blob in the repo means non-empty.
+                        entries.iter().any(|e| e["type"].as_str() == Some("blob"))
+                    } else {
+                        let needle = format!("{}/", dir_prefix);
+                        entries.iter().any(|e| {
+                            e["path"].as_str().map(|p| p.starts_with(&needle)).unwrap_or(false)
+                        })
+                    };
+
+                    if dir_exists {
+                        // Check the Hub for a matching name + author row. The
+                        // existing /api/pipelines endpoint returns the latest
+                        // version per name, which is enough: if any row with
+                        // this name + this author exists, the upload is part
+                        // of the legitimate version-upgrade flow.
+                        let list_resp = client
+                            .get(format!("{}/api/pipelines", registry_url))
+                            .send()
+                            .await;
+                        let has_hub_record = match list_resp {
+                            Ok(lr) if lr.status().is_success() => {
+                                let body = lr
+                                    .json::<serde_json::Value>()
+                                    .await
+                                    .unwrap_or_else(|_| serde_json::Value::Null);
+                                let list = body.as_array().cloned().unwrap_or_default();
+                                list.iter().any(|p| {
+                                    p["name"].as_str() == Some(pipeline_name.as_str())
+                                        && p["author"].as_str() == Some(owner.as_str())
+                                })
+                            }
+                            _ => false,
+                        };
+
+                        if !has_hub_record {
+                            let location = if dir_prefix.is_empty() {
+                                format!("the repository `{}/{}`", owner, repo_name)
+                            } else {
+                                format!(
+                                    "directory `{}/` in `{}/{}`",
+                                    dir_prefix, owner, repo_name
+                                )
+                            };
+                            return Ok(CallToolResult::error(vec![Content::text(format!(
+                                "{} already contains files, but the Hub has no record of pipeline '{}' by '{}'. This often happens after a previous `unpublish_pipeline` or an external push. To avoid mixing residual files from the previous pipeline with the new one, please choose one of:\n\n\
+                                 (1) [Recommended] Change the pipeline name in `ro-crate-metadata.json` (the `name` field of the dataset node with `@id: \"./\"`) to a different unique name, then retry. This only affects this one pipeline.\n\n\
+                                 (2) If you want to keep the same name: in the AutoPipe desktop app's GitHub section, change the repository name to a new empty repository and save, then retry. \
+                                 Alternatively, delete the existing repository `{}/{}` on GitHub if you don't need its other contents (this removes all other pipelines hosted there too — verify first).",
+                                location, pipeline_name, owner, owner, repo_name
+                            ))]));
+                        }
+                    }
+                }
+            }
         }
 
         // Read all specified files from SSH
@@ -1318,7 +1410,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (Korean): '이 파이프라인은 <원본 이름>(#<원본 id>) 파이프라인을 다운로드해서 수정한 것으로 보이는데, 맞나요? 맞으면 출처(forked_from)를 자동으로 기록합니다. 아니면 출처를 끊고 독립 파이프라인으로 등록합니다.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (in English; translate to the user's language at runtime): 'It looks like this pipeline was downloaded from <original name>(#<original id>) and modified. Is that correct? If yes, the source (forked_from) will be recorded automatically. If not, the lineage will be cleared and this will be registered as an independent pipeline.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
     async fn publish_workflow(
         &self,
         Parameters(params): Parameters<PublishWorkflowParams>,
@@ -1328,7 +1420,7 @@ impl AutoPipeServer {
             Some(t) if !t.is_empty() => t.clone(),
             _ => {
                 return Ok(CallToolResult::error(vec![Content::text(
-                    "GitHub token not configured. Please login via the GitHub tab in the desktop app first.",
+                    "GitHub login is required. Please open the AutoPipe app, connect GitHub from the GitHub panel, and try again.",
                 )]));
             }
         };
@@ -1679,6 +1771,186 @@ impl AutoPipeServer {
                 "Publish failed: {}", error_msg
             ))]))
         }
+    }
+
+    #[tool(description = "Remove a pipeline that you previously published to Autopipe Hub. \
+This deletes (1) the Hub registry record(s), and (2) the corresponding GitHub git tag(s) of the form `refs/tags/<pipeline-name>/v<version>` so the same version can be cleanly republished later. \
+GITHUB SOURCE FILES ARE NOT DELETED BY THIS TOOL. The `pipelines/<name>/` directory and its files remain in your GitHub repository. If the user asks you to also delete the pipeline source code or files from GitHub, you MUST refuse and tell the user: this tool can only remove the pipeline from the Autopipe Hub and clean up the version tag. To delete the actual source files, the user must do it themselves on GitHub — by deleting the `pipelines/<name>/` directory via the GitHub website, or by deleting the entire repository. \
+Only the pipeline's author can unpublish (the Hub verifies this against your GitHub token). GitHub login is required; if no token is configured the tool will tell you to connect GitHub via the AutoPipe app's GitHub panel. \
+TWO-CALL PROTOCOL: \
+First call (without `scope`): the tool fetches the pipeline's version chain — that is, all rows on the Hub with the same name and same author — and returns the list. You MUST present this list to the user IN THEIR LANGUAGE and ask whether to delete only the latest version or every version (example wording in English; translate to the user's language at runtime: 'This pipeline has N version(s) registered. Delete only the latest version, or all versions?'). Wait for an explicit answer. \
+Second call (with `scope='latest'` or `scope='all'`): performs the deletion. Confirm with the user once more in their language before this second call. \
+If other users have forked this pipeline, their forks remain on the Hub but their 'based on' reference becomes a dangling pointer that the Hub UI shows as 'original pipeline has been deleted'.")]
+    async fn unpublish_pipeline(
+        &self,
+        Parameters(params): Parameters<UnpublishParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let config = self.config();
+
+        // 1. GitHub login is required so the Hub can verify that the caller
+        //    actually owns the pipeline they want to remove.
+        let token = match &config.github_token {
+            Some(t) if !t.is_empty() => t.clone(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "GitHub login is required to unpublish a pipeline because the Hub verifies ownership via your GitHub token. Please open the AutoPipe app, connect GitHub from the GitHub panel, and try again.".into()
+                )]));
+            }
+        };
+
+        let base = config.registry_url.trim_end_matches('/');
+        let client = reqwest::Client::new();
+
+        // 2. Fetch the version chain (same name + same author).
+        let chain_url = format!("{}/api/pipelines/{}/versions", base, params.pipeline_id);
+        let resp = client
+            .get(&chain_url)
+            .send()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        if !resp.status().is_success() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Pipeline not found on the Hub.".into()
+            )]));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let versions = body["versions"].as_array().cloned().unwrap_or_default();
+        if versions.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "Pipeline not found on the Hub.".into()
+            )]));
+        }
+
+        // 3. First call (no scope): return the discovered version list so the
+        //    LLM can ask the user which scope to use.
+        if params.scope.is_none() {
+            let info = versions
+                .iter()
+                .map(|v| {
+                    format!(
+                        "- pipeline_id={}, version={}",
+                        v["pipeline_id"],
+                        v["version"].as_str().unwrap_or("?")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Pipeline '{}' (by {}) has {} version(s):\n{}\n\nAsk the user whether to delete only the latest version or all versions, then call this tool again with scope='latest' or scope='all'.",
+                versions[0]["name"].as_str().unwrap_or(""),
+                versions[0]["author"].as_str().unwrap_or(""),
+                versions.len(),
+                info
+            ))]));
+        }
+
+        // 4. Second call: figure out which rows to remove based on scope.
+        let scope = params.scope.clone().unwrap();
+        let targets: Vec<&serde_json::Value> = match scope.as_str() {
+            // `versions` is sorted newest-first by createdAt in getVersionChain.
+            "latest" => vec![&versions[0]],
+            "all" => versions.iter().collect(),
+            _ => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Invalid scope '{}'. Use 'latest' or 'all'.",
+                    scope
+                ))]));
+            }
+        };
+
+        // The version chain shares one github_url because rows in a chain
+        // share name + author, and uploads always go to the same repo.
+        let github_url = versions[0]["github_url"].as_str().unwrap_or("");
+        let parsed_repo = parse_github_url(github_url);
+
+        let mut results: Vec<String> = Vec::new();
+        for v in &targets {
+            let pid = v["pipeline_id"].as_i64().unwrap_or(0);
+            let pname = v["name"].as_str().unwrap_or("");
+            let pver = v["version"].as_str().unwrap_or("");
+
+            // 4a. Delete the Hub registry row.
+            let url = format!("{}/api/pipelines/{}", base, pid);
+            let resp = client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .send()
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            let status = resp.status().as_u16();
+            if status != 200 {
+                let reason = match status {
+                    401 => "authentication failed",
+                    403 => "forbidden (not your pipeline)",
+                    404 => "not found (already deleted?)",
+                    _ => "HTTP error",
+                };
+                results.push(format!(
+                    "✗ pipeline_id={} Hub delete failed: {} (HTTP {})",
+                    pid, reason, status
+                ));
+                continue;
+            }
+
+            // 4b. Delete the GitHub tag created at publish time so the same
+            //     version number can be republished cleanly later. Missing
+            //     tag (422 / 404) is treated as success: older pipelines
+            //     published before tagging existed will simply have nothing
+            //     to remove.
+            if let Some((owner, repo, _, _)) = &parsed_repo {
+                let tag = format!("{}/v{}", pname.replace(' ', "-"), pver);
+                let tag_url = format!(
+                    "https://api.github.com/repos/{}/{}/git/refs/tags/{}",
+                    owner, repo, tag
+                );
+                let tag_resp = client
+                    .delete(&tag_url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .header("User-Agent", "autopipe-desktop")
+                    .send()
+                    .await;
+                match tag_resp {
+                    Ok(r)
+                        if r.status().is_success()
+                            || r.status().as_u16() == 422
+                            || r.status().as_u16() == 404 =>
+                    {
+                        results.push(format!(
+                            "✓ pipeline_id={} deleted (Hub row + tag {})",
+                            pid, tag
+                        ));
+                    }
+                    Ok(r) => results.push(format!(
+                        "✓ pipeline_id={} Hub deleted, but tag {} cleanup returned HTTP {}",
+                        pid,
+                        tag,
+                        r.status().as_u16()
+                    )),
+                    Err(_) => results.push(format!(
+                        "✓ pipeline_id={} Hub deleted, but tag {} cleanup failed (network)",
+                        pid, tag
+                    )),
+                }
+            } else {
+                results.push(format!(
+                    "✓ pipeline_id={} Hub deleted (could not parse github_url for tag cleanup)",
+                    pid
+                ));
+            }
+        }
+
+        let pipeline_name = versions[0]["name"].as_str().unwrap_or("");
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Unpublish complete (scope={}, {} version(s) processed):\n{}\n\nNote: GitHub source files in `pipelines/{}/` remain in your repository. This tool does not delete those files — if the user wants to remove them, they must do so directly from GitHub (delete the `pipelines/{}/` directory via the GitHub website, or delete the entire repository). Future uploads of the same pipeline name will overwrite these files; if the user plans to publish a different pipeline under the same name, advise them to change the pipeline name in `ro-crate-metadata.json` to avoid mixing files from this version with the new one.",
+            scope,
+            targets.len(),
+            results.join("\n"),
+            pipeline_name,
+            pipeline_name
+        ))]))
     }
 
     #[tool(description = "Validate a pipeline directory structure on the remote SSH server")]

@@ -150,6 +150,8 @@ fn run_gui() {
             commands::get_github_username,
             commands::get_github_repo,
             commands::set_github_repo,
+            commands::get_per_pipeline_repo,
+            commands::set_per_pipeline_repo,
             commands::clear_github_token,
             commands::start_github_login,
             commands::move_to_tray,
