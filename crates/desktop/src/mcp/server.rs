@@ -3529,21 +3529,17 @@ are removed via Docker to handle permission issues. relative_path is relative to
         let total_files = files.len() + remote_files.len();
 
         // Compute the browse root — the directory the viewer is allowed to
-        // navigate within. For a directory target it's the directory itself;
-        // for a single file it's the file's parent directory, so the user can
-        // see sibling files and walk up the output tree. Canonicalize on the
-        // remote so the sandbox prefix check in the viewer is reliable.
-        let browse_root_raw = if is_dir {
-            path.clone()
-        } else {
-            std::path::Path::new(&path)
-                .parent()
-                .and_then(|p| p.to_str())
-                .unwrap_or(&path)
-                .to_string()
-        };
-        let browse_root = match self
-            .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&browse_root_raw)))
+        // navigate within. We confine browsing to the run's output directory:
+        // canonicalize both the configured output directory and the requested
+        // path on the remote, then take the first path segment under the
+        // output directory as the run name. This lets the user explore the
+        // entire run output (no matter how deep the opened file is) but blocks
+        // crossing into other runs or escaping the output tree. Paths outside
+        // the configured output directory fall back to the immediate parent
+        // (single file) or the directory itself.
+        let output_dir = self.config().full_output_dir();
+        let output_canon: Option<String> = match self
+            .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&output_dir)))
             .await
         {
             Ok((out, 0)) => {
@@ -3552,6 +3548,60 @@ are removed via Docker to handle permission issues. relative_path is relative to
             }
             _ => None,
         };
+        let path_canon: Option<String> = match self
+            .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&path)))
+            .await
+        {
+            Ok((out, 0)) => {
+                let r = clean_content(&out).trim().to_string();
+                if r.is_empty() { None } else { Some(r) }
+            }
+            _ => None,
+        };
+
+        let mut browse_root: Option<String> = None;
+        if let (Some(out_root), Some(p)) = (&output_canon, &path_canon) {
+            if p == out_root || p.starts_with(&format!("{}/", out_root)) {
+                if p == out_root {
+                    // The path is the output directory itself — allow browsing
+                    // every run under it (rare; only when the user explicitly
+                    // opens the whole output folder).
+                    browse_root = Some(out_root.clone());
+                } else {
+                    // First segment after the output dir is the run name.
+                    let rest = &p[out_root.len() + 1..];
+                    let run_name = rest.split('/').next().unwrap_or("");
+                    browse_root = if run_name.is_empty() {
+                        Some(out_root.clone())
+                    } else {
+                        Some(format!("{}/{}", out_root, run_name))
+                    };
+                }
+            }
+        }
+        if browse_root.is_none() {
+            // Outside the configured output directory: fall back to the parent
+            // directory (single file) or the directory itself.
+            let raw = if is_dir {
+                path.clone()
+            } else {
+                std::path::Path::new(&path)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or(&path)
+                    .to_string()
+            };
+            browse_root = match self
+                .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&raw)))
+                .await
+            {
+                Ok((out, 0)) => {
+                    let r = clean_content(&out).trim().to_string();
+                    if r.is_empty() { None } else { Some(r) }
+                }
+                _ => None,
+            };
+        }
 
         match viewer::show_files(
             files.clone(),
