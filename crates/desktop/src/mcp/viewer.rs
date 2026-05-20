@@ -702,22 +702,39 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
         None => return Json(serde_json::json!({ "error": "Could not resolve the output directory" })),
     };
 
-    let resolved = match realpath_within_root(&ssh_cfg, &root, &requested).await {
-        Some(p) => p,
-        None => {
-            return Json(serde_json::json!({
-                "error": "Path is outside the allowed output directory"
-            }));
+    // Resolve the path, verify it's a regular file, and read its size in a
+    // SINGLE SSH round trip (previously three: realpath + test -f + stat).
+    // `realpath` follows symlinks; the sandbox prefix check still runs in Rust
+    // on the returned canonical path, so symlink/`..` escapes are rejected
+    // exactly as realpath_within_root would. On success the command prints
+    // "<canonical path>\t<size>"; if the path is missing or not a regular file
+    // the `&&` chain short-circuits and prints nothing.
+    let esc = requested.replace('\'', "'\\''");
+    let combined = format!(
+        "p=$(realpath '{esc}' 2>/dev/null) && [ -f \"$p\" ] && \
+         printf '%s\\t%s\\n' \"$p\" \"$(stat -c%s \"$p\" 2>/dev/null || stat -f%z \"$p\" 2>/dev/null)\"",
+        esc = esc
+    );
+    let (resolved, size): (String, u64) = match ssh_run(&ssh_cfg, &combined).await {
+        Ok((out, _)) => {
+            let line = clean_content(&out);
+            match line.trim().split_once('\t') {
+                Some((p, s)) if !p.is_empty() => {
+                    (p.to_string(), s.trim().parse().unwrap_or(0))
+                }
+                // No tab / empty path → missing, a directory, or realpath failed.
+                _ => return Json(serde_json::json!({ "error": "Not a file" })),
+            }
         }
+        Err(_) => return Json(serde_json::json!({ "error": "Not a file" })),
     };
 
-    // Reject directories — only files can be opened.
-    let is_file = matches!(
-        ssh_run(&ssh_cfg, &format!("test -f '{}' && echo OK", resolved.replace('\'', "'\\''"))).await,
-        Ok((out, 0)) if clean_content(&out).trim() == "OK"
-    );
-    if !is_file {
-        return Json(serde_json::json!({ "error": "Not a file" }));
+    // Sandbox: the canonical path must stay within the browse root.
+    let root_trimmed = root.trim_end_matches('/');
+    if !(resolved == root_trimmed || resolved.starts_with(&format!("{}/", root_trimmed))) {
+        return Json(serde_json::json!({
+            "error": "Path is outside the allowed output directory"
+        }));
     }
 
     let filename = std::path::Path::new(&resolved)
@@ -727,21 +744,6 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
         .to_string();
     let ext = filename.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
     let mime = mime_for_ext(&ext);
-
-    // Stat the size.
-    let size: u64 = match ssh_run(
-        &ssh_cfg,
-        &format!(
-            "stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null",
-            resolved.replace('\'', "'\\''"),
-            resolved.replace('\'', "'\\''")
-        ),
-    )
-    .await
-    {
-        Ok((s, 0)) => clean_content(&s).trim().parse().unwrap_or(0),
-        _ => 0,
-    };
 
     // Register into the remote file store so /file/{filename} + /data/{filename}
     // serve it lazily through the existing pipeline.

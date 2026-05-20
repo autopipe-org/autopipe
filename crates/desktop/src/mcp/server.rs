@@ -228,6 +228,13 @@ struct UploadWorkflowParams {
     /// GitHub repository name. Required only when per-pipeline repo mode is enabled. Omit when using single repo mode.
     #[serde(default)]
     repo_name: Option<String>,
+    /// Set to true ONLY after the user has explicitly confirmed they want to
+    /// upload into a target that already contains files not recorded in the
+    /// Hub. Leave unset on the first call — if a conflict is detected the tool
+    /// returns instructions to ask the user, and you re-call with this set to
+    /// true once they agree. See the directory-conflict guidance in the result.
+    #[serde(default)]
+    confirm_overwrite: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1053,7 +1060,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_workflow. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir.")]
+    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_workflow. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir. DIRECTORY CONFLICT: If the upload target already contains files that the Hub has no record of, this tool returns (as a normal success result) detailed guidance explaining that proceeding may mix in residual files from a different pipeline and produce an incomplete/broken pipeline. When you receive that guidance you MUST relay the risk to the user and ask whether to upload anyway; only if they confirm do you call this tool again with confirm_overwrite=true. Do NOT set confirm_overwrite on the first attempt.")]
     async fn upload_workflow(
         &self,
         Parameters(params): Parameters<UploadWorkflowParams>,
@@ -1167,10 +1174,11 @@ impl AutoPipeServer {
         // ── Directory-conflict check ────────────────────────────────────
         // If the target subdirectory (single-repo mode) or the repo root
         // (per-pipeline mode) already holds an EXISTING pipeline but the Hub
-        // has no record of a pipeline by this name and author, the previous
-        // pipeline was probably unpublished. Block the upload so the user's
-        // new pipeline does not silently inherit residual files from the old
-        // one via base_tree inheritance.
+        // has no record of a pipeline by this name and author, the existing
+        // files might belong to a different pipeline (e.g. one that was
+        // unpublished). Rather than silently inheriting those residual files
+        // via base_tree, we return guidance asking the user to confirm before
+        // proceeding (see the confirm_overwrite handling below).
         //
         // We detect an existing pipeline by the presence of a pipeline-defining
         // marker file (Snakefile or ro-crate-metadata.json) at the target
@@ -1238,7 +1246,12 @@ impl AutoPipeServer {
                             _ => false,
                         };
 
-                        if !has_hub_record {
+                        // Conflict detected. Unless the user has already
+                        // confirmed they want to overwrite, return detailed
+                        // guidance (as a SUCCESS result, not an error) so the
+                        // assistant explains the risk and asks the user, then
+                        // re-calls with confirm_overwrite=true.
+                        if !has_hub_record && params.confirm_overwrite != Some(true) {
                             let location = if dir_prefix.is_empty() {
                                 format!("the repository `{}/{}`", owner, repo_name)
                             } else {
@@ -1247,12 +1260,15 @@ impl AutoPipeServer {
                                     dir_prefix, owner, repo_name
                                 )
                             };
-                            return Ok(CallToolResult::error(vec![Content::text(format!(
-                                "{} already contains files, but the Hub has no record of pipeline '{}' by '{}'. This often happens after a previous `unpublish_pipeline` or an external push. To avoid mixing residual files from the previous pipeline with the new one, please choose one of:\n\n\
-                                 (1) [Recommended] Change the pipeline name in `ro-crate-metadata.json` (the `name` field of the dataset node with `@id: \"./\"`) to a different unique name, then retry. This only affects this one pipeline.\n\n\
-                                 (2) If you want to keep the same name: in the AutoPipe desktop app's GitHub section, change the repository name to a new empty repository and save, then retry. \
-                                 Alternatively, delete the existing repository `{}/{}` on GitHub if you don't need its other contents (this removes all other pipelines hosted there too — verify first).",
-                                location, pipeline_name, owner, owner, repo_name
+                            return Ok(CallToolResult::success(vec![Content::text(format!(
+                                "The target {location} already contains pipeline files, but the AutoPipe Hub has no record of a pipeline named '{pipeline_name}' by '{owner}'. Do NOT upload yet — confirm with the user first, because this is ambiguous:\n\n\
+                                 (A) If you created/uploaded this pipeline earlier in THIS session and are just re-uploading it (e.g. to fix metadata) before publishing, it is safe to continue.\n\n\
+                                 (B) If this repository/folder was created in a previous session, by someone else, or holds a DIFFERENT pipeline that merely shares the same name, the existing files belong to another pipeline.\n\n\
+                                 Why this matters: the upload merges your files into the existing file tree. Any file already present that is NOT in your current file list will be KEPT, not removed. If those leftover files come from a different pipeline, your pipeline will be MIXED with unrelated code — stale scripts, conflicting config, or leftover rules — and the result may be an incomplete or broken pipeline that does not run correctly.\n\n\
+                                 Ask the user, in their language, e.g.: \"A repository/folder with this name already exists and contains files the Hub doesn't know about. If this is NOT the pipeline you just created in this session — for example an older or different pipeline that only shares the name — uploading on top of it can leave unrelated files behind and produce an incomplete or broken pipeline. Do you want to upload to this location anyway?\"\n\n\
+                                 - If the user confirms it is their own pipeline and wants to proceed: call upload_workflow again with the same arguments plus confirm_overwrite=true.\n\
+                                 - If the user is unsure or says it is a different pipeline: do NOT set confirm_overwrite. Instead either (1) change the `name` field in ro-crate-metadata.json (the dataset node with @id \"./\") to a unique name and retry, or (2) set a new empty repository in the AutoPipe app's GitHub panel, then retry.",
+                                location = location, pipeline_name = pipeline_name, owner = owner
                             ))]));
                         }
                     }
