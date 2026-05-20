@@ -3200,7 +3200,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
     // ── Browser viewer ─────────────────────────────────────────
 
-    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
+    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. The viewer includes a sidebar file browser: from the opened file (or directory) the user can navigate the output directory tree — including parent folders, up to the run's output directory — and open other files on demand, each loaded lazily. So passing a single file is enough; the user can explore sibling and nearby files themselves without you calling show_results again. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -3527,12 +3527,39 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
         // --- Reference confirmed / declined / no genomics → open viewer ---
         let total_files = files.len() + remote_files.len();
+
+        // Compute the browse root — the directory the viewer is allowed to
+        // navigate within. For a directory target it's the directory itself;
+        // for a single file it's the file's parent directory, so the user can
+        // see sibling files and walk up the output tree. Canonicalize on the
+        // remote so the sandbox prefix check in the viewer is reliable.
+        let browse_root_raw = if is_dir {
+            path.clone()
+        } else {
+            std::path::Path::new(&path)
+                .parent()
+                .and_then(|p| p.to_str())
+                .unwrap_or(&path)
+                .to_string()
+        };
+        let browse_root = match self
+            .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&browse_root_raw)))
+            .await
+        {
+            Ok((out, 0)) => {
+                let r = clean_content(&out).trim().to_string();
+                if r.is_empty() { None } else { Some(r) }
+            }
+            _ => None,
+        };
+
         match viewer::show_files(
             files.clone(),
             remote_files.clone(),
             self.config().full_plugins_dir(),
             reference,
             Some(self.config()),
+            browse_root,
         ).await {
             Ok(url) => {
                 let mut msg = format!(

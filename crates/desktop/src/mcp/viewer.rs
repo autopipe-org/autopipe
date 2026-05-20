@@ -180,6 +180,47 @@ async fn get_row_count_cache() -> &'static Arc<Mutex<HashMap<String, usize>>> {
         .await
 }
 
+/// The canonicalized output directory the viewer is allowed to browse. All
+/// /api/browse and /api/browse-open requests are sandboxed under this root.
+/// `None` disables in-viewer directory navigation (snapshot-only mode).
+static BROWSE_ROOT: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_browse_root_lock() -> &'static Arc<Mutex<Option<String>>> {
+    BROWSE_ROOT
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
+/// Resolve `requested` to its canonical path on the remote server and verify
+/// it stays within `root`. Returns the canonical path on success, or `None`
+/// when the path escapes the sandbox or cannot be resolved. Using the remote
+/// `realpath` means symlinks are followed, so a symlink pointing outside the
+/// output directory is correctly rejected.
+async fn realpath_within_root(
+    ssh_cfg: &AppConfig,
+    root: &str,
+    requested: &str,
+) -> Option<String> {
+    // Resolve the requested path. `realpath -m` resolves even when the final
+    // component does not exist yet, but we only ever browse existing paths so
+    // a plain `realpath` is fine and additionally guarantees existence.
+    let cmd = format!("realpath '{}' 2>/dev/null", requested.replace('\'', "'\\''"));
+    let resolved = match ssh_run(ssh_cfg, &cmd).await {
+        Ok((out, 0)) => clean_content(&out).trim().to_string(),
+        _ => return None,
+    };
+    if resolved.is_empty() {
+        return None;
+    }
+    let root_trimmed = root.trim_end_matches('/');
+    if resolved == root_trimmed || resolved.starts_with(&format!("{}/", root_trimmed)) {
+        Some(resolved)
+    } else {
+        None
+    }
+}
+
 /// Scan local plugins directory, reading manifest.json from each subdirectory.
 fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
     let mut plugins = Vec::new();
@@ -251,6 +292,8 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
         .route("/logo.png", get(logo_handler))
         .route("/api/files", get(files_list_handler))
         .route("/api/reference", get(reference_handler))
+        .route("/api/browse", get(browse_handler))
+        .route("/api/browse-open", get(browse_open_handler))
         .route("/file/{filename}", get(file_handler))
         .route("/data/{filename}", get(data_handler))
         .route("/plugin/{name}/{*path}", get(plugin_asset_handler))
@@ -293,6 +336,7 @@ pub async fn show_files(
     plugins_dir: String,
     reference: Option<String>,
     ssh_config: Option<AppConfig>,
+    browse_root: Option<String>,
 ) -> Result<String, String> {
     // Update file store
     let store = get_file_store().await;
@@ -317,6 +361,12 @@ pub async fn show_files(
     {
         let mut cfg = get_ssh_config_lock().await.lock().await;
         *cfg = ssh_config;
+    }
+
+    // Store the browse root (sandbox boundary for in-viewer navigation).
+    {
+        let mut root = get_browse_root_lock().await.lock().await;
+        *root = browse_root;
     }
 
     // Clear row count cache (new file set)
@@ -407,6 +457,263 @@ async fn reference_handler() -> Json<serde_json::Value> {
     match &*r {
         Some(ref_val) => Json(serde_json::json!({ "reference": ref_val })),
         None => Json(serde_json::json!({ "reference": null })),
+    }
+}
+
+/// Query parameters for the /api/browse and /api/browse-open endpoints.
+#[derive(Deserialize)]
+struct BrowseQuery {
+    /// Absolute path to browse (directory) or open (file). When omitted on
+    /// /api/browse, the browse root itself is listed.
+    #[serde(default)]
+    dir: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BrowseEntry {
+    name: String,
+    /// Full remote path of this entry.
+    path: String,
+    is_dir: bool,
+    size: u64,
+}
+
+#[derive(Serialize)]
+struct BrowseListing {
+    /// Whether browsing is available (browse root configured).
+    enabled: bool,
+    /// The configured sandbox root.
+    root: String,
+    /// The directory currently being listed.
+    cwd: String,
+    /// Parent directory path, or null when `cwd` is the root (cannot go up).
+    parent: Option<String>,
+    entries: Vec<BrowseEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// API: list a directory under the browse root. Sandboxed — any path that
+/// resolves outside the root is rejected.
+async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing> {
+    let root = {
+        let r = get_browse_root_lock().await.lock().await;
+        r.clone()
+    };
+    let root = match root {
+        Some(r) => r,
+        None => {
+            return Json(BrowseListing {
+                enabled: false,
+                root: String::new(),
+                cwd: String::new(),
+                parent: None,
+                entries: Vec::new(),
+                error: None,
+            });
+        }
+    };
+
+    let ssh_cfg = {
+        let lock = get_ssh_config_lock().await.lock().await;
+        lock.clone()
+    };
+    let ssh_cfg = match ssh_cfg {
+        Some(c) => c,
+        None => {
+            return Json(BrowseListing {
+                enabled: true,
+                root: root.clone(),
+                cwd: root.clone(),
+                parent: None,
+                entries: Vec::new(),
+                error: Some("SSH not configured".into()),
+            });
+        }
+    };
+
+    // Default to the root when no dir is given.
+    let requested = query.dir.unwrap_or_else(|| root.clone());
+
+    // Sandbox: resolve and verify within root.
+    let cwd = match realpath_within_root(&ssh_cfg, &root, &requested).await {
+        Some(p) => p,
+        None => {
+            return Json(BrowseListing {
+                enabled: true,
+                root: root.clone(),
+                cwd: root.clone(),
+                parent: None,
+                entries: Vec::new(),
+                error: Some("Path is outside the allowed output directory".into()),
+            });
+        }
+    };
+
+    // List directory entries (name, type, size). Use a NUL-safe-ish format:
+    // one entry per line as "<type>\t<size>\t<name>".
+    let list_cmd = format!(
+        "cd '{}' && for f in * .[!.]*; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then echo \"d\\t0\\t$f\"; else echo \"f\\t$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\\t$f\"; fi; done",
+        cwd.replace('\'', "'\\''")
+    );
+    let entries: Vec<BrowseEntry> = match ssh_run(&ssh_cfg, &list_cmd).await {
+        Ok((out, _)) => clean_content(&out)
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                if parts.len() != 3 {
+                    return None;
+                }
+                let is_dir = parts[0] == "d";
+                let size: u64 = parts[1].parse().unwrap_or(0);
+                let name = parts[2].to_string();
+                if name.is_empty() {
+                    return None;
+                }
+                Some(BrowseEntry {
+                    name: name.clone(),
+                    path: format!("{}/{}", cwd.trim_end_matches('/'), name),
+                    is_dir,
+                    size,
+                })
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    // Compute parent only if cwd is strictly inside the root.
+    let root_trimmed = root.trim_end_matches('/').to_string();
+    let parent = if cwd == root_trimmed {
+        None
+    } else {
+        cwd.rsplit_once('/').map(|(p, _)| {
+            if p.is_empty() { "/".to_string() } else { p.to_string() }
+        })
+    };
+
+    Json(BrowseListing {
+        enabled: true,
+        root: root_trimmed,
+        cwd,
+        parent,
+        entries,
+        error: None,
+    })
+}
+
+/// API: register a file (under the browse root) into the remote file store
+/// so it can be rendered on demand through the existing /file/ + plugin
+/// pipeline. Returns the filename key to use. Sandboxed.
+async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_json::Value> {
+    let root = {
+        let r = get_browse_root_lock().await.lock().await;
+        r.clone()
+    };
+    let root = match root {
+        Some(r) => r,
+        None => return Json(serde_json::json!({ "error": "Browsing is not enabled" })),
+    };
+    let requested = match query.path {
+        Some(p) => p,
+        None => return Json(serde_json::json!({ "error": "Missing path" })),
+    };
+
+    let ssh_cfg = {
+        let lock = get_ssh_config_lock().await.lock().await;
+        lock.clone()
+    };
+    let ssh_cfg = match ssh_cfg {
+        Some(c) => c,
+        None => return Json(serde_json::json!({ "error": "SSH not configured" })),
+    };
+
+    let resolved = match realpath_within_root(&ssh_cfg, &root, &requested).await {
+        Some(p) => p,
+        None => {
+            return Json(serde_json::json!({
+                "error": "Path is outside the allowed output directory"
+            }));
+        }
+    };
+
+    // Reject directories — only files can be opened.
+    let is_file = matches!(
+        ssh_run(&ssh_cfg, &format!("test -f '{}' && echo OK", resolved.replace('\'', "'\\''"))).await,
+        Ok((out, 0)) if clean_content(&out).trim() == "OK"
+    );
+    if !is_file {
+        return Json(serde_json::json!({ "error": "Not a file" }));
+    }
+
+    let filename = std::path::Path::new(&resolved)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    let ext = filename.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+    let mime = mime_for_ext(&ext);
+
+    // Stat the size.
+    let size: u64 = match ssh_run(
+        &ssh_cfg,
+        &format!(
+            "stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null",
+            resolved.replace('\'', "'\\''"),
+            resolved.replace('\'', "'\\''")
+        ),
+    )
+    .await
+    {
+        Ok((s, 0)) => clean_content(&s).trim().parse().unwrap_or(0),
+        _ => 0,
+    };
+
+    // Register into the remote file store so /file/{filename} + /data/{filename}
+    // serve it lazily through the existing pipeline.
+    {
+        let mut rmap = get_remote_files_lock().await.lock().await;
+        rmap.insert(
+            filename.clone(),
+            RemoteFileEntry { remote_path: resolved.clone(), size, mime: mime.to_string() },
+        );
+    }
+    // Drop any stale cached row count for this filename (file may have changed).
+    {
+        let mut cache = get_row_count_cache().await.lock().await;
+        cache.remove(&filename);
+        cache.remove(&format!("__ds_method__{}", filename));
+    }
+
+    Json(serde_json::json!({
+        "filename": filename,
+        "mime": mime,
+        "size": size,
+        "remote": true,
+    }))
+}
+
+/// Map a file extension to a MIME type. Shared by browse-open and the
+/// snapshot loader's classification.
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "md" | "sh" | "py" | "r" | "nf" | "smk" | "cfg" | "ini" | "toml" => "text/plain",
+        "csv" | "tsv" => "text/csv",
+        "json" => "application/json",
+        "yaml" | "yml" => "text/yaml",
+        "xml" => "text/xml",
+        "html" | "htm" => "text/html",
+        "fastq" | "fq" | "fasta" | "fa" => "text/plain",
+        _ => "application/octet-stream",
     }
 }
 
@@ -915,6 +1222,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .file-icon {{ width: 18px; text-align: center; font-size: 14px; flex-shrink: 0; opacity: 0.6; }}
   .file-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .file-size {{ margin-left: auto; font-size: 11px; color: #999; flex-shrink: 0; }}
+  .browse-crumb {{ padding: 8px 16px; font-size: 12px; color: #666; background: #f8f8f8; border-bottom: 1px solid #f0f0f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 
   /* Main viewer */
   .main {{ flex: 1; display: flex; flex-direction: column; overflow: hidden; }}
@@ -991,6 +1299,8 @@ function formatSize(bytes) {{
 var indexExts = ['bai','crai','fai','csi','tbi','idx'];
 
 // Load file list and reference info
+var BROWSE = null;
+
 async function loadFiles() {{
   var resp = await fetch('/api/files');
   var allFiles = await resp.json();
@@ -1004,6 +1314,20 @@ async function loadFiles() {{
     var refData = await refResp.json();
     REFERENCE = refData.reference || null;
   }} catch(e) {{ REFERENCE = null; }}
+
+  // If directory browsing is enabled, show the output-directory browser in
+  // the sidebar; otherwise fall back to the flat snapshot file list.
+  try {{
+    var bResp = await fetch('/api/browse');
+    var listing = await bResp.json();
+    if (listing && listing.enabled) {{
+      BROWSE = listing;
+      renderBrowseSidebar(listing);
+      if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name);
+      return;
+    }}
+  }} catch(e) {{ /* fall through to flat list */ }}
+
   renderSidebar();
   if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name);
 }}
@@ -1021,6 +1345,78 @@ function renderSidebar() {{
     el.onclick = function() {{ selectFile(f.name); }};
     list.appendChild(el);
   }});
+}}
+
+// ── Output-directory browser (lazy: only the clicked file is loaded) ──
+async function loadBrowse(dir) {{
+  try {{
+    var url = '/api/browse' + (dir ? ('?dir=' + encodeURIComponent(dir)) : '');
+    var resp = await fetch(url);
+    var listing = await resp.json();
+    if (listing.error) {{ alert(listing.error); return; }}
+    BROWSE = listing;
+    renderBrowseSidebar(listing);
+  }} catch(e) {{ console.error(e); }}
+}}
+
+function renderBrowseSidebar(listing) {{
+  var list = document.getElementById('fileList');
+  list.innerHTML = '';
+
+  // Breadcrumb showing the path relative to the browse root.
+  var crumb = document.createElement('div');
+  crumb.className = 'browse-crumb';
+  var rel = (listing.cwd === listing.root) ? '/' : listing.cwd.slice(listing.root.length);
+  crumb.textContent = '📂 ' + (rel || '/');
+  crumb.title = listing.cwd;
+  list.appendChild(crumb);
+
+  // Parent navigation (hidden at the root so the user cannot escape it).
+  if (listing.parent) {{
+    var up = document.createElement('div');
+    up.className = 'file-item';
+    up.innerHTML = '<span class="file-icon">↑</span><span class="file-name">.. (parent folder)</span>';
+    up.onclick = function() {{ loadBrowse(listing.parent); }};
+    list.appendChild(up);
+  }}
+
+  var dirs = listing.entries.filter(function(e) {{ return e.is_dir; }});
+  var files = listing.entries.filter(function(e) {{ return !e.is_dir; }});
+  dirs.sort(function(a, b) {{ return a.name.localeCompare(b.name); }});
+  files.sort(function(a, b) {{ return a.name.localeCompare(b.name); }});
+
+  dirs.forEach(function(e) {{
+    var el = document.createElement('div');
+    el.className = 'file-item';
+    el.innerHTML = '<span class="file-icon">📁</span>' +
+                   '<span class="file-name" title="' + e.name + '">' + e.name + '</span>';
+    el.onclick = function() {{ loadBrowse(e.path); }};
+    list.appendChild(el);
+  }});
+
+  files.forEach(function(e) {{
+    var ext = e.name.split('.').pop().toLowerCase();
+    if (indexExts.indexOf(ext) >= 0) return;
+    var el = document.createElement('div');
+    el.className = 'file-item';
+    el.dataset.name = e.name;
+    el.innerHTML = '<span class="file-icon">' + getFileIcon(e.name) + '</span>' +
+                   '<span class="file-name" title="' + e.name + '">' + e.name + '</span>' +
+                   '<span class="file-size">' + formatSize(e.size) + '</span>';
+    el.onclick = function() {{ browseOpenFile(e.path); }};
+    list.appendChild(el);
+  }});
+}}
+
+// Register the clicked file on the server (lazy), then render it through the
+// standard plugin pipeline. Only this one file is fetched into the browser.
+async function browseOpenFile(path) {{
+  try {{
+    var resp = await fetch('/api/browse-open?path=' + encodeURIComponent(path));
+    var result = await resp.json();
+    if (result.error) {{ alert(result.error); return; }}
+    selectFile(result.filename);
+  }} catch(e) {{ console.error(e); }}
 }}
 
 function selectFile(name) {{
