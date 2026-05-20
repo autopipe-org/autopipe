@@ -621,8 +621,10 @@ async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing>
     // List directory entries as "<type>\t<size>\t<name>", one per line.
     // Use `printf` (not `echo`) so the \t become real tab characters — most
     // shells' `echo` prints a literal backslash-t, which would break parsing.
+    // Glob is `*` only (no `.[!.]*`) so dotfiles such as `.snakemake_timestamp`
+    // are hidden, matching the eager-load path's `find ! -name '.*'`.
     let list_cmd = format!(
-        "cd '{}' && for f in * .[!.]*; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else printf 'f\\t%s\\t%s\\n' \"$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\" \"$f\"; fi; done",
+        "cd '{}' && for f in *; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else printf 'f\\t%s\\t%s\\n' \"$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\" \"$f\"; fi; done",
         cwd.replace('\'', "'\\''")
     );
     let entries: Vec<BrowseEntry> = match ssh_run(&ssh_cfg, &list_cmd).await {

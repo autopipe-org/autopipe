@@ -3491,7 +3491,11 @@ are removed via Docker to handle permission issues. relative_path is relative to
         files.retain(|(name, _, _)| has_viewer(name));
         // Keep index files in remote_files (accessible via /file/ endpoint) but filter non-viewable, non-index files
         remote_files.retain(|(name, _, _, _)| has_viewer(name) || is_index_file(name));
-        if files.is_empty() && remote_files.is_empty() {
+        // In list-only mode files/remote_files are intentionally empty (the
+        // browse sidebar loads each file lazily on click), so this emptiness
+        // guard must NOT fire — otherwise opening a directory fails with
+        // "No viewable files found".
+        if !list_only && files.is_empty() && remote_files.is_empty() {
             let msg = if errors.is_empty() {
                 format!("No viewable files found in '{}'", path)
             } else {
