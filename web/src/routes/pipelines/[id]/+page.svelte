@@ -185,7 +185,7 @@
 			{#if data.basedOn}
 				<p class="based-on">Based on: <a href="/pipelines/{data.basedOn.pipeline_id}">{data.basedOn.name} v{data.basedOn.version}</a> by {data.basedOn.author}</p>
 			{:else if data.forkedFromDeleted}
-				<p class="based-on" style="color:#6b7280">Based on pipeline #{data.forkedFromDeleted.id} <span style="color:#9ca3af;font-style:italic">(original pipeline has been deleted from the Hub)</span></p>
+				<p class="based-on">Based on: <span style="color:#9ca3af;font-style:italic">a pipeline that has been deleted from the Hub</span></p>
 			{:else if data.basedOnUrl}
 				<p class="based-on">Based on: <a href={data.basedOnUrl} target="_blank" rel="noopener">{data.basedOnUrl.includes('workflowhub.eu') ? 'WorkflowHub' : 'External'} workflow</a></p>
 			{/if}

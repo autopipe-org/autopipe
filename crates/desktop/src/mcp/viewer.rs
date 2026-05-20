@@ -180,8 +180,9 @@ async fn get_row_count_cache() -> &'static Arc<Mutex<HashMap<String, usize>>> {
         .await
 }
 
-/// The canonicalized output directory the viewer is allowed to browse. All
-/// /api/browse and /api/browse-open requests are sandboxed under this root.
+/// The output directory the viewer is allowed to browse, as passed by
+/// show_results (a raw, not-yet-canonicalized path). All /api/browse and
+/// /api/browse-open requests are sandboxed under its canonical form.
 /// `None` disables in-viewer directory navigation (snapshot-only mode).
 static BROWSE_ROOT: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
     tokio::sync::OnceCell::const_new();
@@ -190,6 +191,52 @@ async fn get_browse_root_lock() -> &'static Arc<Mutex<Option<String>>> {
     BROWSE_ROOT
         .get_or_init(|| async { Arc::new(Mutex::new(None)) })
         .await
+}
+
+/// Cached canonical form of BROWSE_ROOT. Computed lazily on the first browse
+/// request (one SSH `realpath`) and reused, so show_results does not pay for
+/// canonicalization on its critical path. Cleared whenever show_files sets a
+/// new browse root.
+static CANONICAL_ROOT: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_canonical_root_lock() -> &'static Arc<Mutex<Option<String>>> {
+    CANONICAL_ROOT
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
+/// Return the canonical browse root. On the first call after a new browse root
+/// is set, this canonicalizes the raw root on the remote (one SSH call) and
+/// caches it; subsequent calls reuse the cache. Returns `None` when browsing
+/// is disabled or canonicalization fails.
+async fn get_canonical_root(ssh_cfg: &AppConfig) -> Option<String> {
+    {
+        let cache = get_canonical_root_lock().await.lock().await;
+        if cache.is_some() {
+            return cache.clone();
+        }
+    }
+    let raw = {
+        let r = get_browse_root_lock().await.lock().await;
+        r.clone()
+    }?;
+    let cmd = format!("realpath '{}' 2>/dev/null", raw.replace('\'', "'\\''"));
+    let canon = match ssh_run(ssh_cfg, &cmd).await {
+        Ok((out, 0)) => {
+            let c = clean_content(&out).trim().to_string();
+            if c.is_empty() {
+                return None;
+            }
+            c
+        }
+        _ => return None,
+    };
+    {
+        let mut cache = get_canonical_root_lock().await.lock().await;
+        *cache = Some(canon.clone());
+    }
+    Some(canon)
 }
 
 /// Resolve `requested` to its canonical path on the remote server and verify
@@ -363,10 +410,15 @@ pub async fn show_files(
         *cfg = ssh_config;
     }
 
-    // Store the browse root (sandbox boundary for in-viewer navigation).
+    // Store the browse root (sandbox boundary for in-viewer navigation) and
+    // clear the cached canonical form so it is recomputed for this new root.
     {
         let mut root = get_browse_root_lock().await.lock().await;
         *root = browse_root;
+    }
+    {
+        let mut canon = get_canonical_root_lock().await.lock().await;
+        *canon = None;
     }
 
     // Clear row count cache (new file set)
@@ -498,23 +550,21 @@ struct BrowseListing {
 /// API: list a directory under the browse root. Sandboxed — any path that
 /// resolves outside the root is rejected.
 async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing> {
-    let root = {
+    // Browsing is enabled when a browse root was set by show_files.
+    let enabled = {
         let r = get_browse_root_lock().await.lock().await;
-        r.clone()
+        r.is_some()
     };
-    let root = match root {
-        Some(r) => r,
-        None => {
-            return Json(BrowseListing {
-                enabled: false,
-                root: String::new(),
-                cwd: String::new(),
-                parent: None,
-                entries: Vec::new(),
-                error: None,
-            });
-        }
-    };
+    if !enabled {
+        return Json(BrowseListing {
+            enabled: false,
+            root: String::new(),
+            cwd: String::new(),
+            parent: None,
+            entries: Vec::new(),
+            error: None,
+        });
+    }
 
     let ssh_cfg = {
         let lock = get_ssh_config_lock().await.lock().await;
@@ -525,11 +575,27 @@ async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing>
         None => {
             return Json(BrowseListing {
                 enabled: true,
-                root: root.clone(),
-                cwd: root.clone(),
+                root: String::new(),
+                cwd: String::new(),
                 parent: None,
                 entries: Vec::new(),
                 error: Some("SSH not configured".into()),
+            });
+        }
+    };
+
+    // Canonicalize the browse root lazily (cached). This is the one SSH call
+    // that show_results deferred off its critical path.
+    let root = match get_canonical_root(&ssh_cfg).await {
+        Some(r) => r,
+        None => {
+            return Json(BrowseListing {
+                enabled: true,
+                root: String::new(),
+                cwd: String::new(),
+                parent: None,
+                entries: Vec::new(),
+                error: Some("Could not resolve the output directory".into()),
             });
         }
     };
@@ -552,10 +618,11 @@ async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing>
         }
     };
 
-    // List directory entries (name, type, size). Use a NUL-safe-ish format:
-    // one entry per line as "<type>\t<size>\t<name>".
+    // List directory entries as "<type>\t<size>\t<name>", one per line.
+    // Use `printf` (not `echo`) so the \t become real tab characters — most
+    // shells' `echo` prints a literal backslash-t, which would break parsing.
     let list_cmd = format!(
-        "cd '{}' && for f in * .[!.]*; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then echo \"d\\t0\\t$f\"; else echo \"f\\t$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\\t$f\"; fi; done",
+        "cd '{}' && for f in * .[!.]*; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else printf 'f\\t%s\\t%s\\n' \"$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\" \"$f\"; fi; done",
         cwd.replace('\'', "'\\''")
     );
     let entries: Vec<BrowseEntry> = match ssh_run(&ssh_cfg, &list_cmd).await {
@@ -607,14 +674,13 @@ async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing>
 /// so it can be rendered on demand through the existing /file/ + plugin
 /// pipeline. Returns the filename key to use. Sandboxed.
 async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_json::Value> {
-    let root = {
+    let enabled = {
         let r = get_browse_root_lock().await.lock().await;
-        r.clone()
+        r.is_some()
     };
-    let root = match root {
-        Some(r) => r,
-        None => return Json(serde_json::json!({ "error": "Browsing is not enabled" })),
-    };
+    if !enabled {
+        return Json(serde_json::json!({ "error": "Browsing is not enabled" }));
+    }
     let requested = match query.path {
         Some(p) => p,
         None => return Json(serde_json::json!({ "error": "Missing path" })),
@@ -627,6 +693,11 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
     let ssh_cfg = match ssh_cfg {
         Some(c) => c,
         None => return Json(serde_json::json!({ "error": "SSH not configured" })),
+    };
+
+    let root = match get_canonical_root(&ssh_cfg).await {
+        Some(r) => r,
+        None => return Json(serde_json::json!({ "error": "Could not resolve the output directory" })),
     };
 
     let resolved = match realpath_within_root(&ssh_cfg, &root, &requested).await {
@@ -1222,6 +1293,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
   .file-icon {{ width: 18px; text-align: center; font-size: 14px; flex-shrink: 0; opacity: 0.6; }}
   .file-name {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .file-size {{ margin-left: auto; font-size: 11px; color: #999; flex-shrink: 0; }}
+  .file-item.dimmed {{ opacity: 0.45; }}
   .browse-crumb {{ padding: 8px 16px; font-size: 12px; color: #666; background: #f8f8f8; border-bottom: 1px solid #f0f0f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
 
   /* Main viewer */
@@ -1398,14 +1470,47 @@ function renderBrowseSidebar(listing) {{
     var ext = e.name.split('.').pop().toLowerCase();
     if (indexExts.indexOf(ext) >= 0) return;
     var el = document.createElement('div');
-    el.className = 'file-item';
     el.dataset.name = e.name;
+    // CRAM needs a reference genome to be decoded. When none has been
+    // provided, dim the entry (it looks disabled) but keep it clickable so a
+    // click can explain that a reference is required, instead of failing.
+    var needsRef = (ext === 'cram' && !REFERENCE);
+    el.className = needsRef ? 'file-item dimmed' : 'file-item';
     el.innerHTML = '<span class="file-icon">' + getFileIcon(e.name) + '</span>' +
                    '<span class="file-name" title="' + e.name + '">' + e.name + '</span>' +
                    '<span class="file-size">' + formatSize(e.size) + '</span>';
-    el.onclick = function() {{ browseOpenFile(e.path); }};
+    if (needsRef) {{
+      el.onclick = function() {{ showReferenceNeeded(e.name); }};
+    }} else {{
+      el.onclick = function() {{ browseOpenFile(e.path); }};
+    }}
     list.appendChild(el);
   }});
+}}
+
+// Shown when a CRAM file is clicked but no reference genome is available.
+// CRAM cannot be decoded without its reference, so we explain that in the
+// viewer pane rather than attempting (and failing) to render the file.
+function showReferenceNeeded(name) {{
+  currentFile = name;
+  document.querySelectorAll('.file-item').forEach(function(el) {{
+    el.classList.toggle('active', el.dataset.name === name);
+  }});
+  var toolbar = document.getElementById('toolbar');
+  var title = document.getElementById('toolbarTitle');
+  var actions = document.getElementById('toolbarActions');
+  var content = document.getElementById('viewerContent');
+  content.style.padding = '20px';
+  content.style.overflow = 'auto';
+  toolbar.style.display = 'flex';
+  title.textContent = name;
+  actions.innerHTML = '';
+  content.innerHTML =
+    '<div class="no-preview">' +
+      '<div class="no-preview-icon">🧬</div>' +
+      '<p class="no-preview-title">Reference genome required</p>' +
+      '<p class="no-preview-msg">This CRAM file cannot be displayed without a reference genome (FASTA).<br>Provide a reference genome, then reopen the results to view this file.</p>' +
+    '</div>';
 }}
 
 // Register the clicked file on the server (lazy), then render it through the

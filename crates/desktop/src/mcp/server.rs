@@ -1139,6 +1139,7 @@ impl AutoPipeServer {
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
+        let mut repo_just_created = false;
         if repo_check.status() == reqwest::StatusCode::NOT_FOUND {
             let create_resp = client
                 .post("https://api.github.com/user/repos")
@@ -1159,40 +1160,58 @@ impl AutoPipeServer {
                     "Failed to create GitHub repo: {}", err_text
                 ))]));
             }
+            repo_just_created = true;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
         // ── Directory-conflict check ────────────────────────────────────
-        // If the target subdirectory (single-repo mode) or the repo itself
-        // (per-pipeline mode) already contains files but the Hub has no
-        // record of a pipeline by this name and author, the previous
-        // pipeline was probably unpublished. Block the upload so the
-        // user's new pipeline does not silently inherit residual files
-        // from the old one via base_tree inheritance.
+        // If the target subdirectory (single-repo mode) or the repo root
+        // (per-pipeline mode) already holds an EXISTING pipeline but the Hub
+        // has no record of a pipeline by this name and author, the previous
+        // pipeline was probably unpublished. Block the upload so the user's
+        // new pipeline does not silently inherit residual files from the old
+        // one via base_tree inheritance.
+        //
+        // We detect an existing pipeline by the presence of a pipeline-defining
+        // marker file (Snakefile or ro-crate-metadata.json) at the target
+        // location — NOT by "any file". This is important because a freshly
+        // created repo (auto_init) contains only a README.md, which must not
+        // be mistaken for a residual pipeline. We also skip the check entirely
+        // when this upload just created the repo.
         let registry_url = config.registry_url.trim_end_matches('/').to_string();
         let dir_prefix = path_prefix.trim_end_matches('/').to_string();
-        let tree_resp = client
-            .get(format!(
-                "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
-                owner, repo_name
-            ))
-            .header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "autopipe-desktop")
-            .send()
-            .await;
-        if let Ok(r) = tree_resp {
+        let tree_resp = if repo_just_created {
+            None
+        } else {
+            client
+                .get(format!(
+                    "https://api.github.com/repos/{}/{}/git/trees/main?recursive=1",
+                    owner, repo_name
+                ))
+                .header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .send()
+                .await
+                .ok()
+        };
+        if let Some(r) = tree_resp {
             if r.status().is_success() {
                 if let Ok(tree_body) = r.json::<serde_json::Value>().await {
                     let entries = tree_body["tree"].as_array().cloned().unwrap_or_default();
-                    let dir_exists = if dir_prefix.is_empty() {
-                        // per-pipeline mode: any blob in the repo means non-empty.
-                        entries.iter().any(|e| e["type"].as_str() == Some("blob"))
-                    } else {
-                        let needle = format!("{}/", dir_prefix);
+                    // An existing pipeline is identified by a marker file at
+                    // the target location.
+                    let has_marker = |fname: &str| -> bool {
+                        let target = if dir_prefix.is_empty() {
+                            fname.to_string()
+                        } else {
+                            format!("{}/{}", dir_prefix, fname)
+                        };
                         entries.iter().any(|e| {
-                            e["path"].as_str().map(|p| p.starts_with(&needle)).unwrap_or(false)
+                            e["type"].as_str() == Some("blob")
+                                && e["path"].as_str() == Some(target.as_str())
                         })
                     };
+                    let dir_exists = has_marker("Snakefile") || has_marker("ro-crate-metadata.json");
 
                     if dir_exists {
                         // Check the Hub for a matching name + author row. The
@@ -3306,10 +3325,24 @@ are removed via Docker to handle permission issues. relative_path is relative to
                                      "txt", "log", "json", "yaml", "yml", "xml", "md",
                                      "sh", "py", "r", "nf", "smk", "cfg", "ini", "toml",
                                      "bai", "crai", "tbi", "csi", "fai", "idx"];
+        // Detect genomics files early (extensions only, no SSH) so we can
+        // decide whether to skip eager per-file loading.
+        let genomics_exts = ["bam", "bed", "gff", "gtf", "gff3", "cram"];
+        let has_genomics = file_paths.iter().any(|p| {
+            let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            genomics_exts.contains(&ext.as_str())
+        });
+        // Directory list-only mode: a whole directory was opened and it has no
+        // genomics files that need a reference. Skip eager per-file loading —
+        // the viewer's browse sidebar lists the directory and loads each file
+        // lazily on click, so we open with an empty snapshot and an empty pane.
+        let list_only = is_dir && !has_genomics;
+
         let mut files: Vec<(String, Vec<u8>, String)> = Vec::new();
         let mut remote_files: Vec<(String, String, u64, String)> = Vec::new(); // (filename, remote_path, size, mime)
         let mut errors: Vec<String> = Vec::new();
 
+        if !list_only {
         for path in &file_paths {
             let ext = path
                 .rsplit('.')
@@ -3394,6 +3427,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
             };
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
+        } // end if !list_only
 
         // "none" means user explicitly said no reference → open viewer without IGV
         let user_declined_ref = matches!(
@@ -3466,13 +3500,6 @@ are removed via Docker to handle permission issues. relative_path is relative to
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
-        // Detect genomics files
-        let genomics_exts = ["bam", "bed", "gff", "gtf", "gff3", "cram"];
-        let has_genomics = file_paths.iter().any(|p| {
-            let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-            genomics_exts.contains(&ext.as_str())
-        });
-
         // --- Genomics files exist but no reference decision yet → ask first, don't open viewer ---
         if has_genomics && reference.is_none() && !user_declined_ref {
             let fasta_files: Vec<&String> = file_paths.iter().filter(|p| {
@@ -3528,80 +3555,41 @@ are removed via Docker to handle permission issues. relative_path is relative to
         // --- Reference confirmed / declined / no genomics → open viewer ---
         let total_files = files.len() + remote_files.len();
 
-        // Compute the browse root — the directory the viewer is allowed to
-        // navigate within. We confine browsing to the run's output directory:
-        // canonicalize both the configured output directory and the requested
-        // path on the remote, then take the first path segment under the
-        // output directory as the run name. This lets the user explore the
-        // entire run output (no matter how deep the opened file is) but blocks
-        // crossing into other runs or escaping the output tree. Paths outside
+        // Compute the browse root — the directory the viewer may navigate
+        // within. We confine browsing to the run's output directory: take the
+        // first path segment under the configured output directory as the run
+        // name. This is a pure string computation (NO SSH) so show_results
+        // stays fast; the viewer canonicalizes this root once, lazily, on the
+        // first browse request (see realpath_within_root in viewer.rs), which
+        // is where symlink/`..` escapes are actually enforced. Paths outside
         // the configured output directory fall back to the immediate parent
         // (single file) or the directory itself.
         let output_dir = self.config().full_output_dir();
-        let output_canon: Option<String> = match self
-            .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&output_dir)))
-            .await
-        {
-            Ok((out, 0)) => {
-                let r = clean_content(&out).trim().to_string();
-                if r.is_empty() { None } else { Some(r) }
+        let out_trimmed = output_dir.trim_end_matches('/').to_string();
+        let browse_root: Option<String> = if path == out_trimmed {
+            // The whole output directory was opened — allow browsing every run.
+            Some(out_trimmed.clone())
+        } else if path.starts_with(&format!("{}/", out_trimmed)) {
+            // First segment after the output dir is the run name.
+            let rest = &path[out_trimmed.len() + 1..];
+            let run_name = rest.split('/').next().unwrap_or("");
+            if run_name.is_empty() {
+                Some(out_trimmed.clone())
+            } else {
+                Some(format!("{}/{}", out_trimmed, run_name))
             }
-            _ => None,
-        };
-        let path_canon: Option<String> = match self
-            .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&path)))
-            .await
-        {
-            Ok((out, 0)) => {
-                let r = clean_content(&out).trim().to_string();
-                if r.is_empty() { None } else { Some(r) }
-            }
-            _ => None,
-        };
-
-        let mut browse_root: Option<String> = None;
-        if let (Some(out_root), Some(p)) = (&output_canon, &path_canon) {
-            if p == out_root || p.starts_with(&format!("{}/", out_root)) {
-                if p == out_root {
-                    // The path is the output directory itself — allow browsing
-                    // every run under it (rare; only when the user explicitly
-                    // opens the whole output folder).
-                    browse_root = Some(out_root.clone());
-                } else {
-                    // First segment after the output dir is the run name.
-                    let rest = &p[out_root.len() + 1..];
-                    let run_name = rest.split('/').next().unwrap_or("");
-                    browse_root = if run_name.is_empty() {
-                        Some(out_root.clone())
-                    } else {
-                        Some(format!("{}/{}", out_root, run_name))
-                    };
-                }
-            }
-        }
-        if browse_root.is_none() {
+        } else {
             // Outside the configured output directory: fall back to the parent
             // directory (single file) or the directory itself.
-            let raw = if is_dir {
-                path.clone()
+            if is_dir {
+                Some(path.clone())
             } else {
                 std::path::Path::new(&path)
                     .parent()
                     .and_then(|p| p.to_str())
-                    .unwrap_or(&path)
-                    .to_string()
-            };
-            browse_root = match self
-                .ssh_run(&format!("realpath '{}' 2>/dev/null", shell_escape(&raw)))
-                .await
-            {
-                Ok((out, 0)) => {
-                    let r = clean_content(&out).trim().to_string();
-                    if r.is_empty() { None } else { Some(r) }
-                }
-                _ => None,
-            };
-        }
+                    .map(|s| s.to_string())
+            }
+        };
 
         match viewer::show_files(
             files.clone(),
@@ -3612,6 +3600,16 @@ are removed via Docker to handle permission issues. relative_path is relative to
             browse_root,
         ).await {
             Ok(url) => {
+                if list_only {
+                    // Directory opened in list-only mode: nothing is preloaded.
+                    // The sidebar shows the directory; the user clicks a file to
+                    // view it. Tell the user to pick a file from the browser.
+                    let msg = format!(
+                        "Opened the output directory browser in your browser: {}\n\nThe sidebar lists the files in this directory. The viewer pane is empty until you click a file — each file is loaded on demand when selected.",
+                        url
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(msg)]));
+                }
                 let mut msg = format!(
                     "Opened results in browser: {}\n\nDisplaying {} file(s):",
                     url,
