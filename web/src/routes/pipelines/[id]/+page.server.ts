@@ -85,7 +85,7 @@ export const load: PageServerLoad = async ({ params }) => {
 	// If basedOn is still null but based_on_url points to our own Hub, treat
 	// it as an internal lineage and link to the parent pipeline page. We do
 	// this regardless of author so users see the lineage they recorded via
-	// download_pipeline → publish_workflow.
+	// download_pipeline → publish_pipeline.
 	let basedOnUrl: string | null = pipeline.based_on_url ?? null;
 	if (!basedOn && !forkedFromDeleted && basedOnUrl) {
 		const internalId = extractInternalPipelineId(basedOnUrl);

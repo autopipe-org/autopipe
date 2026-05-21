@@ -215,7 +215,7 @@ struct DownloadResultsParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct UploadWorkflowParams {
+struct UploadPipelineParams {
     /// Remote path to the pipeline directory on the SSH server
     pipeline_dir: String,
     /// List of file paths relative to pipeline_dir that are required to run the pipeline.
@@ -238,8 +238,8 @@ struct UploadWorkflowParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct PublishWorkflowParams {
-    /// GitHub URL of the uploaded workflow (from upload_workflow result)
+struct PublishPipelineParams {
+    /// GitHub URL of the uploaded pipeline (from upload_pipeline result)
     github_url: String,
     /// Set to an existing pipeline_id to link this as a related/derived version. Same-name pipelines are auto-linked. Use this for cross-name forks (e.g., a similar pipeline with a different name).
     forked_from: Option<i32>,
@@ -1022,7 +1022,7 @@ impl AutoPipeServer {
         let _ = self.ssh_run(&format!("rm -rf '{}/.git'", shell_escape(&dir))).await;
 
         // Inject isBasedOn into ro-crate-metadata.json so that a later
-        // publish_workflow can automatically set forked_from = source pipeline_id.
+        // publish_pipeline can automatically set forked_from = source pipeline_id.
         // This records the lineage to the source Hub pipeline. Users who want
         // to break the lineage can manually remove the isBasedOn field from
         // ro-crate-metadata.json before publishing.
@@ -1060,10 +1060,10 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_workflow. After this tool succeeds, you MUST call publish_workflow with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_workflow. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir. DIRECTORY CONFLICT: If the upload target already contains files the Hub has no record of, this tool returns (as a normal success result) guidance describing a conflict — this is NOT a completed upload, and you MUST treat it as a HARD STOP. You MUST NOT take any further action automatically. Specifically: (1) you MUST explain the SPECIFIC risk to the user in their language — that the target already holds files the Hub does not track, and that this upload merges your files on top of the existing ones, so residual files from a different or older pipeline can remain and produce an INCOMPLETE or BROKEN pipeline that does not run correctly; (2) you MUST NOT reduce this to a bare 'a repo already exists, overwrite OK?' yes/no question — state the actual risk; (3) you MUST NOT set confirm_overwrite=true on your own initiative or in the same turn. Only AFTER the user has read the risk and EXPLICITLY approves in their next reply may you call upload_workflow again with confirm_overwrite=true. If they do not approve, change the pipeline name in ro-crate-metadata.json or use a new empty repository instead.")]
-    async fn upload_workflow(
+    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_pipeline. After this tool succeeds, you MUST call publish_pipeline with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_pipeline. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir. DIRECTORY CONFLICT: If the upload target already contains files the Hub has no record of, this tool returns (as a normal success result) guidance describing a conflict — this is NOT a completed upload, and you MUST treat it as a HARD STOP. You MUST NOT take any further action automatically. Specifically: (1) you MUST explain the SPECIFIC risk to the user in their language — that the target already holds files the Hub does not track, and that this upload merges your files on top of the existing ones, so residual files from a different or older pipeline can remain and produce an INCOMPLETE or BROKEN pipeline that does not run correctly; (2) you MUST NOT reduce this to a bare 'a repo already exists, overwrite OK?' yes/no question — state the actual risk; (3) you MUST NOT set confirm_overwrite=true on your own initiative or in the same turn. Only AFTER the user has read the risk and EXPLICITLY approves in their next reply may you call upload_pipeline again with confirm_overwrite=true. If they do not approve, change the pipeline name in ro-crate-metadata.json or use a new empty repository instead.")]
+    async fn upload_pipeline(
         &self,
-        Parameters(params): Parameters<UploadWorkflowParams>,
+        Parameters(params): Parameters<UploadPipelineParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let config = self.config();
         let token = match &config.github_token {
@@ -1261,13 +1261,13 @@ impl AutoPipeServer {
                                 )
                             };
                             return Ok(CallToolResult::success(vec![Content::text(format!(
-                                "⚠️ ACTION REQUIRED — NOT UPLOADED YET. This is a conflict, not a successful upload, and it is a HARD STOP. Do NOT call upload_workflow with confirm_overwrite=true on your own or in this same turn. You MUST first show the user the specific risk below and get their EXPLICIT approval in their next reply.\n\n\
+                                "⚠️ ACTION REQUIRED — NOT UPLOADED YET. This is a conflict, not a successful upload, and it is a HARD STOP. Do NOT call upload_pipeline with confirm_overwrite=true on your own or in this same turn. You MUST first show the user the specific risk below and get their EXPLICIT approval in their next reply.\n\n\
                                  The target {location} already contains pipeline files, but the AutoPipe Hub has no record of a pipeline named '{pipeline_name}' by '{owner}'. This is ambiguous:\n\n\
                                  (A) If you created/uploaded this pipeline earlier in THIS session and are just re-uploading it (e.g. to fix metadata) before publishing, it is safe to continue.\n\n\
                                  (B) If this repository/folder was created in a previous session, by someone else, or holds a DIFFERENT pipeline that merely shares the same name, the existing files belong to another pipeline.\n\n\
                                  Why this matters (you MUST convey this — do not shorten it to a yes/no): the upload merges your files into the existing file tree. Any file already present that is NOT in your current file list will be KEPT, not removed. If those leftover files come from a different pipeline, your pipeline will be MIXED with unrelated code — stale scripts, conflicting config, or leftover rules — and the result may be an INCOMPLETE or BROKEN pipeline that does not run correctly.\n\n\
                                  Ask the user, in their language, conveying the risk above — e.g.: \"A repository/folder named '{pipeline_name}' already exists and already contains pipeline files (a Snakefile / ro-crate) that the Hub doesn't track. If this is NOT the exact pipeline you just created in this session — for example an older or different version that only shares the name — uploading on top of it can leave unrelated leftover files behind and produce an incomplete or broken pipeline. Do you want to upload to this location anyway?\"\n\n\
-                                 - ONLY after the user explicitly approves in their reply: call upload_workflow again with the same arguments plus confirm_overwrite=true. Never set confirm_overwrite=true without that explicit approval.\n\
+                                 - ONLY after the user explicitly approves in their reply: call upload_pipeline again with the same arguments plus confirm_overwrite=true. Never set confirm_overwrite=true without that explicit approval.\n\
                                  - If the user is unsure or says it is a different pipeline: do NOT set confirm_overwrite. Instead either (1) change the `name` field in ro-crate-metadata.json (the dataset node with @id \"./\") to a unique name and retry, or (2) set a new empty repository in the AutoPipe app's GitHub panel, then retry.",
                                 location = location, pipeline_name = pipeline_name, owner = owner
                             ))]));
@@ -1446,10 +1446,10 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_workflow FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_workflow with the corrected ro-crate first. Calling publish_workflow with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (in English; translate to the user's language at runtime): 'It looks like this pipeline was downloaded from <original name>(#<original id>) and modified. Is that correct? If yes, the source (forked_from) will be recorded automatically. If not, the lineage will be cleared and this will be registered as an independent pipeline.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
-    async fn publish_workflow(
+    #[tool(description = "Publish a pipeline from GitHub to the AutoPipe registry. PREREQUISITE: Call upload_pipeline FIRST. The registry reads the pipeline name from ro-crate-metadata.json on GitHub — NOT from any parameter. So the name in ro-crate-metadata.json (in the directory referenced by github_url) is what gets registered. Duplicate detection is handled automatically by this tool. Same name + same author: returns existing pipeline info — you MUST ask the user 'Would you like to register this as a new version of the existing pipeline?' before proceeding. If user agrees, call this tool again with forked_from set to the existing pipeline_id. Same name + different author: returns info for user to choose — either change the pipeline name or mark as 'Based on' by setting forked_from to the existing pipeline_id. CRITICAL — RENAME GUARD: If the user wanted a NEW name (e.g., 'publish as test' for a pipeline originally named aptaselect), the rename must already be reflected in BOTH (a) the GitHub directory path inside the github_url AND (b) the `name` field of ro-crate-metadata.json at that path. Before calling this tool, fetch the ro-crate at github_url and verify the name field matches what the user asked for. If the name does not match, STOP and re-run upload_pipeline with the corrected ro-crate first. Calling publish_pipeline with a stale ro-crate will register under the WRONG name and create a duplicate version of the original pipeline. MANDATORY — LINEAGE CONFIRMATION: BEFORE calling this tool, you MUST fetch ro-crate-metadata.json at the github_url and check whether the dataset node (@id == './') contains an `isBasedOn` field. If it does AND the URL points to this AutoPipe Hub (matches the configured registry_url + '/pipelines/<id>' pattern), you MUST first ask the user a confirmation question in their language. Example (in English; translate to the user's language at runtime): 'It looks like this pipeline was downloaded from <original name>(#<original id>) and modified. Is that correct? If yes, the source (forked_from) will be recorded automatically. If not, the lineage will be cleared and this will be registered as an independent pipeline.' Look up the original pipeline's name and id from the isBasedOn URL (the trailing /pipelines/<id> part) and the registry's get_pipeline endpoint. If the user confirms it IS a fork: call this tool normally without forked_from — auto-detection will populate it. If the user says it is NOT based on the original (independent pipeline): call this tool with forked_from=null AND instruct the user to remove the isBasedOn field from ro-crate-metadata.json so future publishes are clean. Skip this confirmation only when isBasedOn is absent or points to an external (non-Hub) URL.")]
+    async fn publish_pipeline(
         &self,
-        Parameters(params): Parameters<PublishWorkflowParams>,
+        Parameters(params): Parameters<PublishPipelineParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let config = self.config();
         let token = match &config.github_token {
@@ -1569,7 +1569,7 @@ impl AutoPipeServer {
                             return Ok(CallToolResult::error(vec![Content::text(format!(
                                 "Your pipeline '{}' v{} already exists in the registry (ID: {}).\n\
                                  Ask the user whether to publish as a version upgrade of the existing pipeline.\n\
-                                 If yes: call publish_workflow again with forked_from={}.\n\
+                                 If yes: call publish_pipeline again with forked_from={}.\n\
                                  If no: the user should change the pipeline name and retry.",
                                 pipeline_name, existing_version, existing_id, existing_id
                             ))]));
@@ -1579,7 +1579,7 @@ impl AutoPipeServer {
                                 "A pipeline named '{}' already exists by '{}' (v{}, ID: {}).\n\
                                  Ask the user:\n\
                                  1. Change the pipeline name to avoid conflict\n\
-                                 2. Mark as 'Based on' this pipeline (call publish_workflow again with forked_from={})",
+                                 2. Mark as 'Based on' this pipeline (call publish_pipeline again with forked_from={})",
                                 pipeline_name, existing_author, existing_version, existing_id, existing_id
                             ))]));
                         }
@@ -3800,12 +3800,12 @@ impl ServerHandler for AutoPipeServer {
                  All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
                  NEVER use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is nextflow run with -profile docker.\n\
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
-                 CRITICAL: NEVER call upload_workflow or publish_workflow unless the user EXPLICITLY says 'upload', 'publish', or 'register'. Pipeline creation, building, and execution do NOT require uploading or publishing. These are completely separate actions that require explicit user request.\n\n\
+                 CRITICAL: NEVER call upload_pipeline or publish_pipeline unless the user EXPLICITLY says 'upload', 'publish', or 'register'. Pipeline creation, building, and execution do NOT require uploading or publishing. These are completely separate actions that require explicit user request.\n\n\
                  UPLOAD & PUBLISH RULES:\n\
                  When the user asks to upload OR publish, ALWAYS do these steps in order:\n\
                  1. Call validate_pipeline first. If it returns errors, fix the underlying files (e.g., fill in empty fields, create missing files, add `rule all` to the Snakefile) and re-run validate_pipeline until it passes. This step is REQUIRED even when the user says 'upload to GitHub only' — broken or empty pipeline files must not reach the public GitHub repository.\n\
-                 2. Call upload_workflow (version is auto-detected from GitHub, do NOT pass a version).\n\
-                 3. If the user said 'upload to GitHub only', stop here. Otherwise, immediately call publish_workflow with the returned github_url.\n\
+                 2. Call upload_pipeline (version is auto-detected from GitHub, do NOT pass a version).\n\
+                 3. If the user said 'upload to GitHub only', stop here. Otherwise, immediately call publish_pipeline with the returned github_url.\n\
                  Duplicate names and version upgrades are handled automatically by the tools."
                     .into(),
             ),

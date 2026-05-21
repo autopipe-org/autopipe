@@ -373,7 +373,9 @@
 						<li>Quit your AI app completely (not just close the window) and reopen it.</li>
 						<li>In Autopipe, click <strong>Save and Register</strong> again.</li>
 						<li>Confirm Autopipe is still running in the menu bar (macOS) or system tray (Windows).</li>
+						<li><strong>Claude Desktop</strong>: open the <strong>+</strong> menu → <strong>Connectors</strong> and toggle <strong>autopipe</strong> off and then back on. This re-registers the tools and usually makes them reappear without restarting the app.</li>
 					</ul>
+					<img src="/image.png" alt="Claude Desktop Connectors menu with the autopipe connector toggled on" class="screenshot-md" />
 				</details>
 
 				<!-- ── macOS-specific ─────────────────────────────────────── -->
@@ -601,6 +603,13 @@ wsl --install -d Ubuntu`}</div>
 	   smaller still so they don't dominate the page. */
 	.screenshot-square {
 		display: block; max-width: 180px; width: 100%; height: auto;
+		border: 1px solid #e5e7eb; border-radius: 8px;
+		margin: 8px 0 12px; background: #fff;
+	}
+	/* Wider menu screenshots (e.g. the Claude Desktop connector toggle) where
+	   the small size would make the UI text unreadable. */
+	.screenshot-md {
+		display: block; max-width: 420px; width: 100%; height: auto;
 		border: 1px solid #e5e7eb; border-radius: 8px;
 		margin: 8px 0 12px; background: #fff;
 	}
