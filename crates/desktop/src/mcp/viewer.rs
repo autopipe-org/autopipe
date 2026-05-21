@@ -222,7 +222,7 @@ async fn get_canonical_root(ssh_cfg: &AppConfig) -> Option<String> {
         r.clone()
     }?;
     let cmd = format!("realpath '{}' 2>/dev/null", raw.replace('\'', "'\\''"));
-    let canon = match ssh_run(ssh_cfg, &cmd).await {
+    let canon = match ssh_run_fast(ssh_cfg, &cmd).await {
         Ok((out, 0)) => {
             let c = clean_content(&out).trim().to_string();
             if c.is_empty() {
@@ -237,35 +237,6 @@ async fn get_canonical_root(ssh_cfg: &AppConfig) -> Option<String> {
         *cache = Some(canon.clone());
     }
     Some(canon)
-}
-
-/// Resolve `requested` to its canonical path on the remote server and verify
-/// it stays within `root`. Returns the canonical path on success, or `None`
-/// when the path escapes the sandbox or cannot be resolved. Using the remote
-/// `realpath` means symlinks are followed, so a symlink pointing outside the
-/// output directory is correctly rejected.
-async fn realpath_within_root(
-    ssh_cfg: &AppConfig,
-    root: &str,
-    requested: &str,
-) -> Option<String> {
-    // Resolve the requested path. `realpath -m` resolves even when the final
-    // component does not exist yet, but we only ever browse existing paths so
-    // a plain `realpath` is fine and additionally guarantees existence.
-    let cmd = format!("realpath '{}' 2>/dev/null", requested.replace('\'', "'\\''"));
-    let resolved = match ssh_run(ssh_cfg, &cmd).await {
-        Ok((out, 0)) => clean_content(&out).trim().to_string(),
-        _ => return None,
-    };
-    if resolved.is_empty() {
-        return None;
-    }
-    let root_trimmed = root.trim_end_matches('/');
-    if resolved == root_trimmed || resolved.starts_with(&format!("{}/", root_trimmed)) {
-        Some(resolved)
-    } else {
-        None
-    }
 }
 
 /// Scan local plugins directory, reading manifest.json from each subdirectory.
@@ -603,57 +574,67 @@ async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing>
     // Default to the root when no dir is given.
     let requested = query.dir.unwrap_or_else(|| root.clone());
 
-    // Sandbox: resolve and verify within root.
-    let cwd = match realpath_within_root(&ssh_cfg, &root, &requested).await {
-        Some(p) => p,
-        None => {
-            return Json(BrowseListing {
-                enabled: true,
-                root: root.clone(),
-                cwd: root.clone(),
-                parent: None,
-                entries: Vec::new(),
-                error: Some("Path is outside the allowed output directory".into()),
-            });
-        }
+    // Resolve the path AND list its entries in a SINGLE SSH command (was two:
+    // realpath + listing) on a non-login shell. `realpath` follows symlinks;
+    // the sandbox prefix check still runs in Rust on the returned canonical
+    // path, so escapes are rejected exactly as before. Output: first line
+    // "ROOT\t<canonical cwd>", then one "<type>\t<size>\t<name>" line per
+    // entry. `printf` (not `echo`) emits real tabs; the glob is `*` only so
+    // dotfiles such as `.snakemake_timestamp` stay hidden.
+    let esc = requested.replace('\'', "'\\''");
+    let combined = format!(
+        "p=$(realpath '{esc}') && [ -n \"$p\" ] && printf 'ROOT\\t%s\\n' \"$p\" && cd \"$p\" && for f in *; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else printf 'f\\t%s\\t%s\\n' \"$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\" \"$f\"; fi; done",
+        esc = esc
+    );
+    let out = match ssh_run_fast(&ssh_cfg, &combined).await {
+        Ok((o, _)) => clean_content(&o),
+        Err(_) => String::new(),
     };
 
-    // List directory entries as "<type>\t<size>\t<name>", one per line.
-    // Use `printf` (not `echo`) so the \t become real tab characters — most
-    // shells' `echo` prints a literal backslash-t, which would break parsing.
-    // Glob is `*` only (no `.[!.]*`) so dotfiles such as `.snakemake_timestamp`
-    // are hidden, matching the eager-load path's `find ! -name '.*'`.
-    let list_cmd = format!(
-        "cd '{}' && for f in *; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; else printf 'f\\t%s\\t%s\\n' \"$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\" \"$f\"; fi; done",
-        cwd.replace('\'', "'\\''")
-    );
-    let entries: Vec<BrowseEntry> = match ssh_run(&ssh_cfg, &list_cmd).await {
-        Ok((out, _)) => clean_content(&out)
-            .lines()
-            .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(3, '\t').collect();
-                if parts.len() != 3 {
-                    return None;
-                }
-                let is_dir = parts[0] == "d";
-                let size: u64 = parts[1].parse().unwrap_or(0);
-                let name = parts[2].to_string();
-                if name.is_empty() {
-                    return None;
-                }
-                Some(BrowseEntry {
-                    name: name.clone(),
-                    path: format!("{}/{}", cwd.trim_end_matches('/'), name),
-                    is_dir,
-                    size,
-                })
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    // First line carries the canonical cwd; remaining lines are entries.
+    let mut cwd = String::new();
+    let mut raw_entries: Vec<(bool, u64, String)> = Vec::new();
+    for line in out.lines() {
+        if let Some(rest) = line.strip_prefix("ROOT\t") {
+            cwd = rest.to_string();
+            continue;
+        }
+        let parts: Vec<&str> = line.splitn(3, '\t').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let name = parts[2].to_string();
+        if name.is_empty() {
+            continue;
+        }
+        raw_entries.push((parts[0] == "d", parts[1].parse().unwrap_or(0), name));
+    }
+
+    // Sandbox: the canonical cwd must stay within the browse root. An empty
+    // cwd means realpath failed (missing path / error).
+    let root_trimmed = root.trim_end_matches('/').to_string();
+    if cwd.is_empty()
+        || !(cwd == root_trimmed || cwd.starts_with(&format!("{}/", root_trimmed)))
+    {
+        return Json(BrowseListing {
+            enabled: true,
+            root: root_trimmed,
+            cwd: root.clone(),
+            parent: None,
+            entries: Vec::new(),
+            error: Some("Path is outside the allowed output directory".into()),
+        });
+    }
+
+    let entries: Vec<BrowseEntry> = raw_entries
+        .into_iter()
+        .map(|(is_dir, size, name)| {
+            let path = format!("{}/{}", cwd.trim_end_matches('/'), name);
+            BrowseEntry { name, path, is_dir, size }
+        })
+        .collect();
 
     // Compute parent only if cwd is strictly inside the root.
-    let root_trimmed = root.trim_end_matches('/').to_string();
     let parent = if cwd == root_trimmed {
         None
     } else {
@@ -715,7 +696,7 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
          printf '%s\\t%s\\n' \"$p\" \"$(stat -c%s \"$p\" 2>/dev/null || stat -f%z \"$p\" 2>/dev/null)\"",
         esc = esc
     );
-    let (resolved, size): (String, u64) = match ssh_run(&ssh_cfg, &combined).await {
+    let (resolved, size): (String, u64) = match ssh_run_fast(&ssh_cfg, &combined).await {
         Ok((out, _)) => {
             let line = clean_content(&out);
             match line.trim().split_once('\t') {
@@ -856,10 +837,33 @@ async fn find_data_source(ext: &str) -> Option<DataSource> {
 
 /// Helper: run SSH command via spawn_blocking.
 async fn ssh_run(config: &AppConfig, cmd: &str) -> Result<(String, i32), String> {
+    ssh_run_inner(config, cmd, true).await
+}
+
+/// Like `ssh_run` but runs the command in a NON-login shell (`bash -c` instead
+/// of `bash -l -c`). Use only for browse/metadata commands that need nothing
+/// beyond coreutils (realpath, ls, stat, test) — this skips ~/.bash_profile /
+/// conda / module initialization, which can add seconds per call on HPC
+/// servers. Do NOT use for plugin data_source commands that rely on
+/// conda/module-provided tools (samtools, bcftools, …).
+async fn ssh_run_fast(config: &AppConfig, cmd: &str) -> Result<(String, i32), String> {
+    ssh_run_inner(config, cmd, false).await
+}
+
+async fn ssh_run_inner(
+    config: &AppConfig,
+    cmd: &str,
+    login_shell: bool,
+) -> Result<(String, i32), String> {
     let config = config.clone();
-    // Wrap in login shell so ~/.bash_profile / conda / module PATH is loaded
     let escaped = cmd.replace('\'', "'\\''");
-    let cmd = format!("bash -l -c '{}'", escaped);
+    // A login shell loads ~/.bash_profile (conda/module PATH); a plain shell
+    // skips it for speed when only coreutils are needed.
+    let cmd = if login_shell {
+        format!("bash -l -c '{}'", escaped)
+    } else {
+        format!("bash -c '{}'", escaped)
+    };
     let (output, code) = tokio::task::spawn_blocking(move || ssh::ssh_exec(&config, &cmd))
         .await
         .map_err(|e| format!("Task error: {}", e))??;
