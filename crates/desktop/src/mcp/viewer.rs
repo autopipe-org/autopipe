@@ -193,6 +193,19 @@ async fn get_browse_root_lock() -> &'static Arc<Mutex<Option<String>>> {
         .await
 }
 
+/// Directory the browse sidebar opens at on first load — the parent folder of
+/// a single opened file, so its siblings show immediately. Navigation is still
+/// capped at BROWSE_ROOT. `None` means open at the browse root (used when a
+/// whole directory was opened).
+static INITIAL_BROWSE_DIR: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_initial_browse_dir_lock() -> &'static Arc<Mutex<Option<String>>> {
+    INITIAL_BROWSE_DIR
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
 /// Cached canonical form of BROWSE_ROOT. Computed lazily on the first browse
 /// request (one SSH `realpath`) and reused, so show_results does not pay for
 /// canonicalization on its critical path. Cleared whenever show_files sets a
@@ -355,6 +368,7 @@ pub async fn show_files(
     reference: Option<String>,
     ssh_config: Option<AppConfig>,
     browse_root: Option<String>,
+    initial_dir: Option<String>,
 ) -> Result<String, String> {
     // Update file store
     let store = get_file_store().await;
@@ -390,6 +404,10 @@ pub async fn show_files(
     {
         let mut canon = get_canonical_root_lock().await.lock().await;
         *canon = None;
+    }
+    {
+        let mut idir = get_initial_browse_dir_lock().await.lock().await;
+        *idir = initial_dir;
     }
 
     // Clear row count cache (new file set)
@@ -571,8 +589,16 @@ async fn browse_handler(Query(query): Query<BrowseQuery>) -> Json<BrowseListing>
         }
     };
 
-    // Default to the root when no dir is given.
-    let requested = query.dir.unwrap_or_else(|| root.clone());
+    // When no dir is given, open at the configured initial directory (the
+    // opened file's folder), if any, otherwise at the browse root. Navigation
+    // stays capped at the root either way (verified below).
+    let requested = match query.dir {
+        Some(d) => d,
+        None => {
+            let idir = get_initial_browse_dir_lock().await.lock().await.clone();
+            idir.unwrap_or_else(|| root.clone())
+        }
+    };
 
     // Resolve the path AND list its entries in a SINGLE SSH command (was two:
     // realpath + listing) on a non-login shell. `realpath` follows symlinks;

@@ -1060,7 +1060,7 @@ impl AutoPipeServer {
         ))]))
     }
 
-    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_pipeline. After this tool succeeds, you MUST call publish_pipeline with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_pipeline. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir. DIRECTORY CONFLICT: If the upload target already contains files the Hub has no record of, this tool returns (as a normal success result) guidance describing a conflict — this is NOT a completed upload, and you MUST treat it as a HARD STOP. You MUST NOT take any further action automatically. Specifically: (1) you MUST explain the SPECIFIC risk to the user in their language — that the target already holds files the Hub does not track, and that this upload merges your files on top of the existing ones, so residual files from a different or older pipeline can remain and produce an INCOMPLETE or BROKEN pipeline that does not run correctly; (2) you MUST NOT reduce this to a bare 'a repo already exists, overwrite OK?' yes/no question — state the actual risk; (3) you MUST NOT set confirm_overwrite=true on your own initiative or in the same turn. Only AFTER the user has read the risk and EXPLICITLY approves in their next reply may you call upload_pipeline again with confirm_overwrite=true. If they do not approve, change the pipeline name in ro-crate-metadata.json or use a new empty repository instead.")]
+    #[tool(description = "Upload a pipeline to GitHub. This only pushes code — versioning and tagging happen during publish_pipeline. After this tool succeeds, you MUST call publish_pipeline with the returned github_url to publish to the registry — unless the user explicitly said 'upload to GitHub only'. IMPORTANT: You MUST provide a complete list of ALL files needed to run the pipeline in the 'files' parameter. Include every file you created: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any additional files such as scripts/*.py, requirements.txt, .dockerignore, etc. Do NOT omit any file — if the pipeline needs it to run, it must be in the list. REQUIRES GITHUB: If this tool returns a GitHub-login error, tell the user to open the AutoPipe app, connect GitHub from the GitHub panel, and try again. No restart is needed. REPO MODE: Call get_workspace_info first to see the upload mode. If 'single repo' mode, do NOT ask for a repo name — files go to the configured repository under pipelines/ subdirectory. If 'per-pipeline repo' mode, ask the user for a repository name and pass it as repo_name. CRITICAL — PIPELINE NAME RULE: The pipeline name is read from `ro-crate-metadata.json` -> `@graph[@id=='./']` -> `name` field. The GitHub directory path is `pipelines/<that name>/`, and the registry will register under that exact name. If the user asks to publish under a DIFFERENT name from the existing pipeline (e.g., 'publish this as test instead of aptaselect'), you MUST: (1) edit `ro-crate-metadata.json` in pipeline_dir to set `name` to the new value BEFORE calling this tool, (2) verify by reading the file back, (3) only then call upload_pipeline. Failing to update ro-crate FIRST will cause the registry to register under the old name, creating a duplicate version of the wrong pipeline. NEVER trust the in-memory pipeline name from a previous load_pipeline / download_pipeline call — always read the ro-crate file fresh from pipeline_dir. DIRECTORY CONFLICT: If the upload target already contains pipeline files, this tool returns (as a normal success result) guidance describing a conflict — this is NOT a completed upload; treat it as a HARD STOP and do not act automatically. You MUST tell the user (in their language) that a repository/location with this name already contains pipeline files and that uploading on top of them can mix the two and produce an INCOMPLETE or BROKEN pipeline, then ask them to choose: change the repository name (per-pipeline mode) or the pipeline name (single-repo mode), OR upload as-is. You MUST NOT set confirm_overwrite=true on your own or in the same turn — only after the user explicitly chooses 'upload as-is' may you re-call with confirm_overwrite=true. Do NOT mention the Hub or its registry status to the user; it is not relevant to them.")]
     async fn upload_pipeline(
         &self,
         Parameters(params): Parameters<UploadPipelineParams>,
@@ -1252,24 +1252,31 @@ impl AutoPipeServer {
                         // assistant explains the risk and asks the user, then
                         // re-calls with confirm_overwrite=true.
                         if !has_hub_record && params.confirm_overwrite != Some(true) {
-                            let location = if dir_prefix.is_empty() {
-                                format!("the repository `{}/{}`", owner, repo_name)
+                            // Mode-specific wording: per-pipeline mode lets the
+                            // user pick a different repository name; single-repo
+                            // mode keys off the pipeline name in ro-crate. The
+                            // Hub registry status is intentionally NOT surfaced
+                            // to the user — only the repo/file situation is.
+                            let (thing, change_choice, change_how) = if dir_prefix.is_empty() {
+                                (
+                                    format!("A GitHub repository named `{}`", repo_name),
+                                    "repository name",
+                                    "ask the user for a new repository name and call upload_pipeline again with that repo_name",
+                                )
                             } else {
-                                format!(
-                                    "directory `{}/` in `{}/{}`",
-                                    dir_prefix, owner, repo_name
+                                (
+                                    format!("The directory `{}/` in `{}/{}`", dir_prefix, owner, repo_name),
+                                    "pipeline name",
+                                    "change the `name` field in ro-crate-metadata.json (the dataset node with @id \"./\") to a unique name and retry",
                                 )
                             };
                             return Ok(CallToolResult::success(vec![Content::text(format!(
-                                "⚠️ ACTION REQUIRED — NOT UPLOADED YET. This is a conflict, not a successful upload, and it is a HARD STOP. Do NOT call upload_pipeline with confirm_overwrite=true on your own or in this same turn. You MUST first show the user the specific risk below and get their EXPLICIT approval in their next reply.\n\n\
-                                 The target {location} already contains pipeline files, but the AutoPipe Hub has no record of a pipeline named '{pipeline_name}' by '{owner}'. This is ambiguous:\n\n\
-                                 (A) If you created/uploaded this pipeline earlier in THIS session and are just re-uploading it (e.g. to fix metadata) before publishing, it is safe to continue.\n\n\
-                                 (B) If this repository/folder was created in a previous session, by someone else, or holds a DIFFERENT pipeline that merely shares the same name, the existing files belong to another pipeline.\n\n\
-                                 Why this matters (you MUST convey this — do not shorten it to a yes/no): the upload merges your files into the existing file tree. Any file already present that is NOT in your current file list will be KEPT, not removed. If those leftover files come from a different pipeline, your pipeline will be MIXED with unrelated code — stale scripts, conflicting config, or leftover rules — and the result may be an INCOMPLETE or BROKEN pipeline that does not run correctly.\n\n\
-                                 Ask the user, in their language, conveying the risk above — e.g.: \"A repository/folder named '{pipeline_name}' already exists and already contains pipeline files (a Snakefile / ro-crate) that the Hub doesn't track. If this is NOT the exact pipeline you just created in this session — for example an older or different version that only shares the name — uploading on top of it can leave unrelated leftover files behind and produce an incomplete or broken pipeline. Do you want to upload to this location anyway?\"\n\n\
-                                 - ONLY after the user explicitly approves in their reply: call upload_pipeline again with the same arguments plus confirm_overwrite=true. Never set confirm_overwrite=true without that explicit approval.\n\
-                                 - If the user is unsure or says it is a different pipeline: do NOT set confirm_overwrite. Instead either (1) change the `name` field in ro-crate-metadata.json (the dataset node with @id \"./\") to a unique name and retry, or (2) set a new empty repository in the AutoPipe app's GitHub panel, then retry.",
-                                location = location, pipeline_name = pipeline_name, owner = owner
+                                "⚠️ ACTION REQUIRED — NOT UPLOADED YET. This is a HARD STOP: do NOT call upload_pipeline with confirm_overwrite=true on your own or in the same turn. You MUST ask the user first and act on their explicit choice.\n\n\
+                                 {thing} already contains pipeline files. Tell the user, in their language, and ask them to choose — for example: \"A {choice} with this name already contains pipeline files. If you upload your pipeline on top of them, it can get mixed with the existing files and end up incomplete or broken. We recommend using a different {choice}. Would you like to change the {choice}, or upload here as-is?\"\n\n\
+                                 - If the user wants to change it: {change_how} (do NOT set confirm_overwrite).\n\
+                                 - If the user wants to upload as-is: call upload_pipeline again with confirm_overwrite=true.\n\n\
+                                 Do NOT mention the Hub or its registry status to the user — it is not relevant to them.",
+                                thing = thing, choice = change_choice, change_how = change_how
                             ))]));
                         }
                     }
@@ -3577,21 +3584,23 @@ are removed via Docker to handle permission issues. relative_path is relative to
         let total_files = files.len() + remote_files.len();
 
         // Compute the browse root — the directory the viewer may navigate
-        // within. We confine browsing to the run's output directory: take the
-        // first path segment under the configured output directory as the run
-        // name. This is a pure string computation (NO SSH) so show_results
-        // stays fast; the viewer canonicalizes this root once, lazily, on the
-        // first browse request (see realpath_within_root in viewer.rs), which
-        // is where symlink/`..` escapes are actually enforced. Paths outside
-        // the configured output directory fall back to the immediate parent
-        // (single file) or the directory itself.
+        // within — and the initial directory the sidebar opens at. This is a
+        // pure string computation (NO SSH) so show_results stays fast; the
+        // viewer canonicalizes the root lazily on the first browse request,
+        // which is where symlink/`..` escapes are actually enforced.
+        //
+        // browse_root caps navigation at the run's output directory:
+        //  - the whole configured output dir was opened → that dir (all runs)
+        //  - a path under it → output_dir/<run_name>
+        //  - a path outside it → "<...>/outputs/<run>" when the
+        //    `outputs`/`output` convention is found (so a result file opened
+        //    from elsewhere still gets its run dir as the cap), otherwise the
+        //    directory itself or, for a single file, its parent.
         let output_dir = self.config().full_output_dir();
         let out_trimmed = output_dir.trim_end_matches('/').to_string();
         let browse_root: Option<String> = if path == out_trimmed {
-            // The whole output directory was opened — allow browsing every run.
             Some(out_trimmed.clone())
         } else if path.starts_with(&format!("{}/", out_trimmed)) {
-            // First segment after the output dir is the run name.
             let rest = &path[out_trimmed.len() + 1..];
             let run_name = rest.split('/').next().unwrap_or("");
             if run_name.is_empty() {
@@ -3600,16 +3609,35 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 Some(format!("{}/{}", out_trimmed, run_name))
             }
         } else {
-            // Outside the configured output directory: fall back to the parent
-            // directory (single file) or the directory itself.
-            if is_dir {
-                Some(path.clone())
-            } else {
-                std::path::Path::new(&path)
-                    .parent()
-                    .and_then(|p| p.to_str())
-                    .map(|s| s.to_string())
-            }
+            // Locate an `outputs`/`output` segment and treat its child as the
+            // run directory; fall back to the path itself / its parent.
+            let segs: Vec<&str> = path.split('/').collect();
+            let conv = segs
+                .iter()
+                .position(|s| *s == "outputs" || *s == "output")
+                .filter(|&i| i + 1 < segs.len())
+                .map(|i| segs[..=i + 1].join("/"));
+            conv.or_else(|| {
+                if is_dir {
+                    Some(path.clone())
+                } else {
+                    std::path::Path::new(&path)
+                        .parent()
+                        .and_then(|p| p.to_str())
+                        .map(|s| s.to_string())
+                }
+            })
+        };
+
+        // The sidebar opens at the opened file's own folder (single file) so
+        // its siblings show immediately; for a directory it opens at the root.
+        let initial_dir: Option<String> = if is_dir {
+            None
+        } else {
+            std::path::Path::new(&path)
+                .parent()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
         };
 
         match viewer::show_files(
@@ -3619,6 +3647,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
             reference,
             Some(self.config()),
             browse_root,
+            initial_dir,
         ).await {
             Ok(url) => {
                 if list_only {

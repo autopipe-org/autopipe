@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { env } from '$env/dynamic/public';
+	import { onMount } from 'svelte';
 
 	const hubUrl = env.PUBLIC_HUB_URL;
 	const downloadUrl = env.PUBLIC_DOWNLOAD_URL ?? 'https://download.autopipe.org';
@@ -36,6 +37,40 @@
 		window.scrollTo({ top, behavior: 'smooth' });
 		history.replaceState(null, '', '#troubleshooting');
 	}
+
+	// Add a "Copy" button (far right) to every command block (.code-block).
+	// A MutationObserver covers blocks added later when the OS tabs switch.
+	onMount(() => {
+		function addCopy(block: HTMLElement) {
+			if (block.querySelector('.code-copy')) return;
+			const cmd = block.textContent?.trim() ?? '';
+			const btn = document.createElement('button');
+			btn.type = 'button';
+			btn.className = 'code-copy';
+			btn.textContent = 'Copy';
+			btn.addEventListener('click', async () => {
+				try {
+					await navigator.clipboard.writeText(cmd);
+					btn.textContent = 'Copied!';
+					setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+				} catch {}
+			});
+			block.appendChild(btn);
+		}
+		const scan = (root: ParentNode) =>
+			root.querySelectorAll('.code-block').forEach((b) => addCopy(b as HTMLElement));
+		scan(document);
+		const obs = new MutationObserver((muts) => {
+			for (const m of muts)
+				for (const n of m.addedNodes) {
+					if (!(n instanceof HTMLElement)) continue;
+					if (n.classList.contains('code-block')) addCopy(n);
+					else scan(n);
+				}
+		});
+		obs.observe(document.body, { childList: true, subtree: true });
+		return () => obs.disconnect();
+	});
 </script>
 
 <svelte:head>
@@ -132,6 +167,13 @@
 						<div class="code-block">curl -fsSL https://download.autopipe.org/setup.sh | bash</div>
 						<p>The script installs everything Autopipe needs and prints the SSH info (Host, Port, User, Repo Path) at the end. Note these values for Section 4 - once you have them, you can close the Terminal.</p>
 					{:else if serverOs === 'windows'}
+						<h3 class="section-label">Setup video</h3>
+						<p class="hint">Watch the whole setup in the video above. For the exact commands to type and the order to run them in, expand <strong>Detailed steps</strong> below.</p>
+						<!-- svelte-ignore a11y_media_has_caption -->
+						<video src="/autopipe_win_server.mp4" class="setup-video" controls preload="metadata" playsinline></video>
+
+						<details class="detailed-steps">
+							<summary class="section-label">Detailed steps</summary>
 						<h3>2.1 Install WSL with Ubuntu</h3>
 						<p>Open <strong>PowerShell as Administrator</strong> (Start menu → search "PowerShell" → right-click → <em>Run as administrator</em>) and run:</p>
 						<div class="code-block">wsl --install</div>
@@ -170,6 +212,7 @@
 						<h3>2.5 Keep this PowerShell window open</h3>
 						<p>WSL only stays alive while a session is open. If you close this window, WSL shuts down and Autopipe can't connect over SSH. <strong>Minimize is fine; don't close.</strong></p>
 						<p class="hint">If you do close it later by accident, just open PowerShell, type <code>wsl</code>, and leave the window minimized - Autopipe's setup script already configured the SSH server to start automatically when WSL launches.</p>
+						</details>
 					{:else if serverOs === 'linux'}
 						<h3>2.1 SSH into your Linux server</h3>
 						<div class="code-block">ssh user@server-address</div>
@@ -555,10 +598,36 @@ wsl --install -d Ubuntu`}</div>
 	.hint code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; }
 
 	.code-block {
-		background: #1a2332; color: #e5e7eb; padding: 14px 20px;
+		position: relative;
+		background: #1a2332; color: #e5e7eb; padding: 14px 88px 14px 20px;
 		border-radius: 8px; font-family: 'Fira Code', monospace; font-size: 0.9rem;
 		margin: 12px 0; white-space: pre; overflow-x: auto;
 	}
+	/* The Copy button is created in JS (not in markup), so it must be :global —
+	   otherwise Svelte scopes the selector and it never matches the button. */
+	:global(.code-copy) {
+		position: absolute; top: 8px; right: 8px;
+		display: inline-flex; align-items: center; justify-content: center;
+		min-width: 60px; padding: 6px 14px;
+		background: #334155; color: #e5e7eb; border: 1px solid #475569;
+		border-radius: 6px; font-size: 0.8rem; font-weight: 500; cursor: pointer;
+		font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+	}
+	:global(.code-copy:hover) { background: #475569; }
+
+	/* Windows setup walkthrough video (shown above the written steps). */
+	.setup-video {
+		width: 100%; max-width: 760px; display: block;
+		border-radius: 10px; border: 1px solid #e5e7eb; margin: 8px 0 20px;
+	}
+
+	/* Distinct, larger labels separating the "Setup video" and "Detailed
+	   steps" blocks from the smaller numbered sub-steps (2.1, 2.2 …). */
+	.step-content .section-label {
+		font-size: 1.2rem; font-weight: 700; color: #0f4c5c; margin: 24px 0 12px;
+	}
+	.detailed-steps { margin-bottom: 12px; }
+	.detailed-steps > summary { cursor: pointer; }
 
 	.btn-sm {
 		display: inline-block; padding: 8px 16px; background: #0f4c5c; color: #fff;
