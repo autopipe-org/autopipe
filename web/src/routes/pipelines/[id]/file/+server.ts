@@ -25,9 +25,12 @@ export const GET: RequestHandler = async ({ params, url }) => {
 			? await getPipeline(latest.pipeline_id)
 			: pipeline;
 	const githubUrl = (codeSource ?? pipeline).github_url;
+	// Anchor file fetch to the publish-time tag when available, otherwise
+	// let fetchGithubFile fall through to the default branch.
+	const ref = (codeSource ?? pipeline).git_tag ?? undefined;
 
 	try {
-		const content = await fetchGithubFile(githubUrl, filePath);
+		const content = await fetchGithubFile(githubUrl, filePath, ref);
 		return json({ content });
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {

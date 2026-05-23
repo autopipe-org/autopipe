@@ -15,10 +15,27 @@ const { userPipelines } = schema;
 export const POST: RequestHandler = async ({ request }) => {
 	try {
 		const body = await request.json();
-		const { github_url, github_token, forked_from } = body;
+		const { github_url, github_token, forked_from, git_tag, commit_sha } = body;
 
 		if (!github_url || !github_token) {
 			return json({ error: 'github_url and github_token are required' }, { status: 400 });
+		}
+
+		// git_tag and commit_sha are optional for backwards compatibility with
+		// older desktop clients. When provided, they pin the pipeline to a
+		// specific Git ref so downloads can fetch the publish-time source
+		// instead of the moving HEAD of the default branch. We do minimal
+		// format checks here; the columns are nullable and the consumer
+		// falls back gracefully when absent.
+		if (git_tag !== undefined && git_tag !== null) {
+			if (typeof git_tag !== 'string' || git_tag.length === 0 || git_tag.length > 255) {
+				return json({ error: 'git_tag must be a non-empty string up to 255 chars' }, { status: 400 });
+			}
+		}
+		if (commit_sha !== undefined && commit_sha !== null) {
+			if (typeof commit_sha !== 'string' || !/^[0-9a-f]{40}$/.test(commit_sha)) {
+				return json({ error: 'commit_sha must be a 40-char lowercase hex string' }, { status: 400 });
+			}
 		}
 
 		// Validate that github_url actually points to GitHub (SSRF prevention)
@@ -216,7 +233,9 @@ export const POST: RequestHandler = async ({ request }) => {
 				verified: false,
 				forkedFrom: resolvedForkedFrom,
 				basedOnUrl: (metadata.based_on_url as string) || null,
-				securityWarnings: []
+				securityWarnings: [],
+				gitTag: (git_tag as string | undefined) ?? null,
+				commitSha: (commit_sha as string | undefined) ?? null
 			})
 			.returning({ pipelineId: userPipelines.pipelineId });
 

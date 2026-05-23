@@ -18,10 +18,14 @@ export const GET: RequestHandler = async ({ params, url }) => {
 		throw error(400, 'Invalid tag format');
 	}
 
-	// Fetch all files from GitHub
+	// Fetch all files from GitHub. Precedence:
+	//   1. explicit ?tag= query (caller chose a specific version)
+	//   2. pipeline.git_tag stored at publish time (anchors to publish-time source)
+	//   3. 'main' (legacy fallback for rows backfill couldn't fill)
+	const effectiveRef = tag || pipeline.git_tag || 'main';
 	let allFiles;
 	try {
-		allFiles = await fetchAllGithubFiles(pipeline.github_url, tag || 'main');
+		allFiles = await fetchAllGithubFiles(pipeline.github_url, effectiveRef);
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
 			throw error(404, 'The original GitHub repository has been deleted or is no longer accessible. Please contact the pipeline author.');

@@ -18,6 +18,9 @@ node_modules/
 # Deployment automation (not part of application)
 /download_binary.sh
 
+# One-off operational / migration scripts (not part of application)
+/scripts/
+
 # Frontend (Tauri + Svelte) build artifacts
 /frontend/build/
 /frontend/.svelte-kit/

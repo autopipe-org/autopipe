@@ -22,11 +22,18 @@ CREATE TABLE IF NOT EXISTS user_pipelines (
     -- Each entry: { file, line, code_snippet, concern, category? }.
     -- Shown to downloaders so they can decide whether to accept the same risks.
     security_warnings JSONB DEFAULT '[]'::jsonb,
+    -- Git tag and commit SHA captured at publish time. Downloads and Hub-side
+    -- rendering use these to fetch the exact published source rather than the
+    -- moving HEAD of the default branch. NULL on rows published before this
+    -- feature; the application code falls back to the default branch then.
+    git_tag        VARCHAR(255),
+    commit_sha     CHAR(40),
     created_at     TIMESTAMP DEFAULT now(),
     updated_at     TIMESTAMP DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS idx_user_pipelines_name ON user_pipelines (name);
+CREATE INDEX IF NOT EXISTS idx_user_pipelines_name    ON user_pipelines (name);
+CREATE INDEX IF NOT EXISTS idx_user_pipelines_git_tag ON user_pipelines (git_tag);
 
 CREATE TABLE IF NOT EXISTS user_plugins (
     plugin_id       SERIAL PRIMARY KEY,

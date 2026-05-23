@@ -678,9 +678,9 @@ wsl --install -d Ubuntu`}</div>
 	/* Wider menu screenshots (e.g. the Claude Desktop connector toggle) where
 	   the small size would make the UI text unreadable. */
 	.screenshot-md {
-		display: block; max-width: 420px; width: 100%; height: auto;
+		display: block; max-width: 300px; width: 100%; height: auto;
 		border: 1px solid #e5e7eb; border-radius: 8px;
-		margin: 8px 0 12px; background: #fff;
+		margin: 8px 0 12px 40px; background: #fff;
 	}
 
 	.example-chat { margin: 12px 0; }

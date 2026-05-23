@@ -52,11 +52,14 @@ export const load: PageServerLoad = async ({ params }) => {
 			? await getPipeline(latest.pipeline_id)
 			: pipeline;
 	const githubUrl = (codeSource ?? pipeline).github_url;
+	// Anchor tree fetch to the publish-time tag when available; legacy rows
+	// (git_tag NULL) fall back to the default branch.
+	const treeRef = (codeSource ?? pipeline).git_tag ?? 'main';
 
 	// Fetch file tree from GitHub
 	let fileTree;
 	try {
-		fileTree = await fetchGithubTree(githubUrl);
+		fileTree = await fetchGithubTree(githubUrl, treeRef);
 	} catch (e) {
 		if (e instanceof GithubNotFoundError) {
 			await deletePipeline(id);

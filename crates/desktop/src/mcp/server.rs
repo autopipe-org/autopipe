@@ -174,6 +174,12 @@ struct ListFilesParams {
 struct ReadFileParams {
     /// Remote file path to read
     path: String,
+    /// Set to true ONLY after the user has explicitly agreed to let you read a
+    /// file located in the input directory (user-provided data, which may be
+    /// sensitive). Leave unset otherwise — if a read is gated the tool returns
+    /// instructions to ask the user first, and you re-call with this set to true.
+    #[serde(default)]
+    confirm_read: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -856,12 +862,16 @@ impl AutoPipeServer {
 
         // 3. First call (user_reviewed_warnings != true): fetch source code
         //    for the AI to review and return it inline. Do NOT download.
+        //    Prefer pipeline.git_tag (publish-time anchor) over the parsed
+        //    URL branch so the review sees the same commit that the actual
+        //    download will fetch.
         if !params.user_reviewed_warnings.unwrap_or(false) {
             let token = self.config().github_token.clone();
+            let review_ref = pipeline.git_tag.as_deref().unwrap_or(branch);
             return match fetch_pipeline_code_dump(
                 &owner,
                 &repo,
-                branch,
+                review_ref,
                 &path,
                 token.as_deref(),
             )
@@ -920,9 +930,17 @@ impl AutoPipeServer {
 
         let tmp_dir = format!("/tmp/autopipe-clone-{}", std::process::id());
 
+        // Anchor the clone to the publish-time tag when the registry has one
+        // recorded; this preserves the exact published source even after the
+        // default branch has been updated. Legacy rows (git_tag = None) fall
+        // back to the default-branch HEAD, matching the previous behavior.
+        let branch_flag = pipeline.git_tag.as_deref()
+            .map(|t| format!("--branch '{}' ", t.replace('\'', "'\\''")))
+            .unwrap_or_default();
+
         let git_clone = self.ssh_run(&format!(
-            "git clone --depth 1 https://github.com/{}/{}.git '{}'",
-            owner, repo, tmp_dir
+            "git clone --depth 1 {}https://github.com/{}/{}.git '{}'",
+            branch_flag, owner, repo, tmp_dir
         )).await;
 
         let (clone_output, clone_code) = match git_clone {
@@ -931,14 +949,20 @@ impl AutoPipeServer {
                 // Clean partial clone before retrying.
                 let _ = self.ssh_run(&format!("rm -rf '{}'", shell_escape(&tmp_dir))).await;
 
+                // gh repo clone supports `--` pass-through for git args; we
+                // include the same --branch flag so the fallback path also
+                // pins to the publish-time tag when available.
+                let pin_flag = pipeline.git_tag.as_deref()
+                    .map(|t| format!(" -- --branch '{}'", t.replace('\'', "'\\''")))
+                    .unwrap_or_default();
                 let gh_cmd = match &github_token {
                     Some(token) => format!(
-                        "GH_TOKEN='{}' gh repo clone {}/{} '{}'",
-                        token, owner, repo, tmp_dir
+                        "GH_TOKEN='{}' gh repo clone {}/{} '{}'{}",
+                        token, owner, repo, tmp_dir, pin_flag
                     ),
                     None => format!(
-                        "gh repo clone {}/{} '{}'",
-                        owner, repo, tmp_dir
+                        "gh repo clone {}/{} '{}'{}",
+                        owner, repo, tmp_dir, pin_flag
                     ),
                 };
 
@@ -1757,16 +1781,40 @@ impl AutoPipeServer {
             }
         }
 
-        // Call registry publish endpoint FIRST, then create tag only on success.
-        // Security review at publish time has been removed; downloaders run a
-        // fresh AI code review on the GitHub source at download time instead.
+        // Resolve the main HEAD SHA up front so the registry row and the
+        // tag we create afterwards both reference the exact same commit.
+        // If this lookup fails we still proceed with the publish (without
+        // git_tag/commit_sha) so old behavior is preserved as a fallback;
+        // the row can be populated later by the backfill script.
+        let tag_name = format!("{}/v{}", pipeline_name.replace(' ', "-"), version);
+        let main_sha: Option<String> = match client.get(format!(
+            "https://api.github.com/repos/{}/{}/git/ref/heads/main",
+            gh_owner, gh_repo
+        ))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "autopipe-desktop")
+        .send().await {
+            Ok(r) => r.json::<serde_json::Value>().await.ok()
+                .and_then(|j| j["object"]["sha"].as_str().map(|s| s.to_string())),
+            Err(_) => None,
+        };
+
+        // Call registry publish endpoint. Include git_tag and commit_sha
+        // only when we successfully resolved the main HEAD SHA — otherwise
+        // the tag we promise to create below would not exist.
+        let mut publish_body = serde_json::json!({
+            "github_url": params.github_url,
+            "github_token": token,
+            "forked_from": resolved_forked_from,
+        });
+        if let Some(ref sha) = main_sha {
+            publish_body["git_tag"] = serde_json::Value::String(tag_name.clone());
+            publish_body["commit_sha"] = serde_json::Value::String(sha.clone());
+        }
+
         let resp = client
             .post(format!("{}/api/publish", base))
-            .json(&serde_json::json!({
-                "github_url": params.github_url,
-                "github_token": token,
-                "forked_from": resolved_forked_from,
-            }))
+            .json(&publish_body)
             .send()
             .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
@@ -1776,27 +1824,20 @@ impl AutoPipeServer {
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         if status.is_success() {
-            // Create version tag only after successful publish
-            let tag_name = format!("{}/v{}", pipeline_name.replace(' ', "-"), version);
-            if let Ok(ref_r) = client.get(format!(
-                "https://api.github.com/repos/{}/{}/git/ref/heads/main",
-                gh_owner, gh_repo
-            )).header("Authorization", format!("Bearer {}", token))
-            .header("User-Agent", "autopipe-desktop")
-            .send().await {
-                if let Ok(ref_body) = ref_r.json::<serde_json::Value>().await {
-                    if let Some(sha) = ref_body["object"]["sha"].as_str() {
-                        let _ = client.post(format!(
-                            "https://api.github.com/repos/{}/{}/git/refs",
-                            gh_owner, gh_repo
-                        )).header("Authorization", format!("Bearer {}", token))
-                        .header("User-Agent", "autopipe-desktop")
-                        .json(&serde_json::json!({
-                            "ref": format!("refs/tags/{}", tag_name),
-                            "sha": sha
-                        })).send().await;
-                    }
-                }
+            // Create version tag at the SAME SHA we recorded in the registry.
+            // Best-effort: registry insert is the source of truth, and the
+            // backfill script can re-create the tag later if this step is
+            // skipped or fails.
+            if let Some(sha) = main_sha.as_deref() {
+                let _ = client.post(format!(
+                    "https://api.github.com/repos/{}/{}/git/refs",
+                    gh_owner, gh_repo
+                )).header("Authorization", format!("Bearer {}", token))
+                .header("User-Agent", "autopipe-desktop")
+                .json(&serde_json::json!({
+                    "ref": format!("refs/tags/{}", tag_name),
+                    "sha": sha
+                })).send().await;
             }
 
             let pipeline_id = body["pipeline_id"].as_i64().unwrap_or(0);
@@ -2868,19 +2909,68 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
     #[tool(description = "Read a file's contents on the remote SSH server. Two valid uses:\n\
                           (1) INTERNAL ANALYSIS — you (the AI) need to inspect a code or config file for your own work, e.g. the pre-download security review required by download_pipeline, or sanity-checking a Snakefile before a build. In this mode read silently: do NOT echo the full contents to the user, surface only specific findings (file path, line number, snippet, plain-English concern). No prior user permission is required because nothing is shown to the user yet.\n\
                           (2) USER ASKED FOR ONE FILE'S CONTENTS — the user explicitly said something like 'show me X' for a specific text/log/summary file. Read it and display the contents. For binary/image/large/genomic files (BAM, VCF, BCF, BED, GFF, CRAM, PNG, PDF, HDF5, etc.) do NOT use read_file — direct the user to show_results instead.\n\
+                          INPUT DATA — SENSITIVE: Files under the input directory (user-provided data, possibly patient/PHI) must NOT be read without the user's consent. If you call read_file on one, the tool returns a consent request instead of the content — relay it to the user and only re-call with confirm_read=true after they explicitly agree; if they decline, ask them for the specific values you need (column names, group labels, sample IDs) instead of reading the file. Do NOT read raw user data at external paths directly either — stage user data with prepare_input (into the input directory) first, then read with consent. Large or binary files are refused by this tool — use show_results to view them.\n\
                           Do NOT proactively ask 'do you want to save this locally?' after displaying — only mention download_results if the user themselves expresses interest in keeping a copy.")]
     async fn read_file(
         &self,
         Parameters(params): Parameters<ReadFileParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let path = windows_to_wsl(&params.path);
-        match self.ssh_read_file(&path).await {
-            Ok(content) => Ok(CallToolResult::success(vec![Content::text(content)])),
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Cannot read '{}': {}",
-                path, e
-            ))])),
+        let config = self.config();
+
+        // ── Privacy gate: input-directory files need explicit user consent ──
+        // Files under the configured input directory are user-provided data
+        // (often symlinked in via prepare_input) and may be sensitive (e.g.
+        // patient/PHI data). Do not load them into the conversation without the
+        // user agreeing. This gate lives in the read_file TOOL only — the shared
+        // ssh_read_file helper is untouched, so upload/validate/download-review
+        // reads of pipeline files are unaffected.
+        let input_trimmed = config.full_input_dir().trim_end_matches('/').to_string();
+        let under_input = !input_trimmed.is_empty()
+            && (path == input_trimmed || path.starts_with(&format!("{}/", input_trimmed)));
+        if under_input && params.confirm_read != Some(true) {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "NOT READ — consent required. '{}' is in the input directory and may be user-provided data, which can be sensitive (e.g. patient/PHI data). Do NOT load it into the conversation without the user's permission.\n\n\
+                 Ask the user, in their language, whether you may read this input file:\n\
+                 - If they agree: call read_file again with confirm_read=true.\n\
+                 - If they decline: do NOT read it — instead ask them to tell you the specific information you need (e.g. column names, group labels, sample IDs) so you can proceed without exposing the data.",
+                path
+            ))]));
         }
+
+        // ── Read at most MAX+1 bytes so huge/raw data is never loaded into the
+        //    conversation (raw data belongs in the viewer, not the chat). This
+        //    applies regardless of location, covering sensitive data the user
+        //    may point at outside the input directory. ──
+        const MAX: usize = 2 * 1024 * 1024; // 2 MB
+        let read_cmd = format!("head -c {} '{}'", MAX + 1, shell_escape(&path));
+        let content = match self.ssh_run(&read_cmd).await {
+            Ok((out, 0)) => out,
+            Ok((out, _)) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot read '{}': {}", path, out.trim()
+                ))]));
+            }
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot read '{}': {}", path, e
+                ))]));
+            }
+        };
+
+        if content.len() > MAX {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "NOT READ — '{}' is too large to load into the conversation (> {} MB). Large files are usually raw data; view it with show_results (in the browser) or save it with download_results instead.",
+                path, MAX / (1024 * 1024)
+            ))]));
+        }
+        if content.as_bytes().iter().take(8192).any(|&b| b == 0) {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "NOT READ — '{}' looks like a binary file (contains NUL bytes). Use show_results to view it in the browser instead of read_file.",
+                path
+            ))]));
+        }
+        Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
     #[tool(description = "Download file(s) from the remote SSH server to the user's local machine. Use this when the user wants to save result files locally. If local_dir is omitted, files are saved to the OS default Downloads folder. Tell the user the default path and ask if they want to change it. Supports single files and directories.")]
@@ -3015,7 +3105,8 @@ If source starts with http://, https://, or ftp://, the download runs in the bac
 After calling this for a URL, automatically call check_download_status with the returned filename every 10 seconds until complete. Do NOT ask the user to check — poll automatically. \
 Otherwise, a symlink is created pointing to the given absolute path. \
 Returns the destination directory path — pass this as input_dir to dry_run or execute_pipeline. \
-If this tool fails, fall back to create_symlink using the dest_dir shown in the error message as the target directory.")]
+If this tool fails, fall back to create_symlink using the dest_dir shown in the error message as the target directory. \
+Always stage user-provided data here before inspecting it: read_file applies a consent gate to files in this input directory, so do not read raw user data at its original external path — bring it in with prepare_input first.")]
     async fn prepare_input(
         &self,
         Parameters(params): Parameters<PrepareInputParams>,
@@ -3810,6 +3901,8 @@ impl ServerHandler for AutoPipeServer {
                  Use create_symlink instead of cp for data files.\n\
                  Pipeline outputs are stored under the configured output directory.\n\
                  Use list_files and read_file to view results from the output path.\n\n\
+                 DATA PRIVACY (IMPORTANT):\n\
+                 NEVER load the user's raw input data into the conversation. To let the user view input or output data, use show_results — it streams to a local viewer in the browser, not into the chat. Files under the input directory are gated: read_file will not return their contents until the user explicitly consents (then re-call read_file with confirm_read=true); if the user declines, ask them for the specific values you need (column names, group labels, etc.) instead of reading the file. Stage user-provided data with prepare_input first — do not read raw data at its original external path directly. Large or binary files are never returned by read_file; view them with show_results.\n\n\
                  PATH HANDLING (IMPORTANT for Windows users):\n\
                  If the user provides a Windows-style path (e.g. C:\\Users\\me\\data\\input.fastq \
                  or C:/Users/me/data), pass it through to AutoPipe AS-IS. Do NOT ask the user to \

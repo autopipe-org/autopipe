@@ -2,6 +2,7 @@ import {
 	pgTable,
 	serial,
 	varchar,
+	char,
 	text,
 	integer,
 	boolean,
@@ -32,11 +33,17 @@ export const userPipelines = pgTable(
 		// Shown to downloaders so they can decide whether to accept the same
 		// risks. Empty array means no warnings were surfaced at publish.
 		securityWarnings: jsonb('security_warnings').default([]),
+		// Git tag and commit SHA captured at publish time. NULL on legacy
+		// rows; download / Hub rendering falls back to the default branch
+		// when these are NULL.
+		gitTag: varchar('git_tag', { length: 255 }),
+		commitSha: char('commit_sha', { length: 40 }),
 		createdAt: timestamp('created_at').defaultNow(),
 		updatedAt: timestamp('updated_at').defaultNow()
 	},
 	(table) => [
 		index('idx_user_pipelines_name').on(table.name),
+		index('idx_user_pipelines_git_tag').on(table.gitTag)
 	]
 );
 

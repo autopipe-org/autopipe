@@ -47,6 +47,11 @@ export interface Pipeline {
 	// above. The DB column is preserved for legacy rows but the API no
 	// longer returns it — downloaders fetch the source and run their own
 	// AI review at download time instead.
+	// Git tag (`{name}/v{version}`) and commit SHA captured at publish
+	// time. NULL on legacy rows; consumers fall back to the default branch
+	// when these are absent.
+	git_tag?: string | null;
+	commit_sha?: string | null;
 	created_at?: string | null;
 	updated_at?: string | null;
 }
@@ -86,6 +91,8 @@ function rowToPipeline(r: typeof userPipelines.$inferSelect): Pipeline {
 		verified: r.verified ?? false,
 		forked_from: r.forkedFrom ?? null,
 		based_on_url: r.basedOnUrl ?? null,
+		git_tag: r.gitTag ?? null,
+		commit_sha: r.commitSha ?? null,
 		created_at: r.createdAt?.toISOString() ?? null,
 		updated_at: r.updatedAt?.toISOString() ?? null
 	};

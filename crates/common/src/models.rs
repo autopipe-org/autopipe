@@ -35,6 +35,16 @@ pub struct Pipeline {
     /// older registry responses — default to an empty list in that case.
     #[serde(default)]
     pub security_warnings: Vec<PipelineSecurityWarning>,
+    /// Git tag created at publish time (form `{name}/v{version}`). Used by
+    /// `download_pipeline` to clone the exact published source instead of
+    /// the default branch HEAD. None on legacy rows; the downloader falls
+    /// back to the default branch in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tag: Option<String>,
+    /// Commit SHA the tag pointed to at publish time. Kept for provenance
+    /// / audit; not currently used for validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
