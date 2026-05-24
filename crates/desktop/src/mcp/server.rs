@@ -660,10 +660,20 @@ impl AutoPipeServer {
         format!(" -v '{}:/var/run/docker.sock' -v /usr/bin/docker:/usr/bin/docker", socket_path)
     }
 
-    /// Find symlink target directories inside a directory.
+    /// Find symlink targets inside a directory and return the resolved target
+    /// file paths.
+    ///
+    /// The directory itself may be a symlink (e.g. `inputs/aptaselect` ->
+    /// `0328_test/.../aptaselect`). `find -type l` would match only that
+    /// directory link and never descend into it, so we canonicalize `dir` with
+    /// `readlink -f` first and run `find` on the real path.
+    ///
+    /// We return the individual target files (not their parent directories) so
+    /// callers can bind-mount exactly the referenced files into the container
+    /// and avoid exposing unrelated sibling files in the target directory.
     async fn resolve_symlink_targets(&self, dir: &str) -> Vec<String> {
         let cmd = format!(
-            "find '{}' -maxdepth 3 -type l -exec readlink -f '{{}}' \\; 2>/dev/null | xargs -I{{}} dirname '{{}}' | sort -u",
+            "real=$(readlink -f '{}' 2>/dev/null); find \"$real\" -maxdepth 3 -type l -exec readlink -f '{{}}' \\; 2>/dev/null | sort -u",
             shell_escape(dir)
         );
         match self.ssh_run(&cmd).await {
