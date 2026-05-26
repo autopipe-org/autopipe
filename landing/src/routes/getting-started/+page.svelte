@@ -38,6 +38,17 @@
 		history.replaceState(null, '', '#troubleshooting');
 	}
 
+	// Live keyword filter for the Troubleshooting list: show only entries whose
+	// text matches the query. Toggles stay collapsed — the user opens the one
+	// they want.
+	function filterTs(e: Event) {
+		const q = (e.target as HTMLInputElement).value.toLowerCase().trim();
+		document.querySelectorAll<HTMLElement>('.ts-item').forEach((item) => {
+			const hit = q === '' || (item.textContent ?? '').toLowerCase().includes(q);
+			item.style.display = hit ? '' : 'none';
+		});
+	}
+
 	// Add a "Copy" button (far right) to every command block (.code-block).
 	// A MutationObserver covers blocks added later when the OS tabs switch.
 	onMount(() => {
@@ -373,6 +384,7 @@
 			<div class="step-number">7</div>
 			<div class="step-content">
 				<h2>Troubleshooting</h2>
+				<input class="ts-search" type="search" placeholder="Search troubleshooting (e.g. docker, password, ssh)…" oninput={filterTs} aria-label="Search troubleshooting" />
 
 				<!-- ── Common (any OS) ────────────────────────────────────── -->
 				<details class="ts-item" id="what-is-tray">
@@ -421,6 +433,18 @@
 					<img src="/image.png" alt="Claude Desktop Connectors menu with the autopipe connector toggled on" class="screenshot-md" />
 				</details>
 
+				<details class="ts-item">
+					<summary>The setup script keeps telling you to restart, or pipelines can't find Docker</summary>
+					<p>If you installed <strong>Docker Desktop</strong>, it must be <strong>running</strong> before the setup script or any pipeline can use Docker.</p>
+					<ul>
+						<li><strong>Windows</strong>: type <strong>"Docker Desktop"</strong> in the Windows <strong>search box</strong> (Start menu) to find and open it; wait until the whale icon shows it's running.</li>
+						<li><strong>macOS</strong>: open Docker Desktop from Applications and wait for the whale icon in the menu bar.</li>
+					</ul>
+					<p>Then re-run the setup script:</p>
+					<div class="code-block">curl -fsSL https://download.autopipe.org/setup.sh | bash</div>
+					<p class="hint">On Windows, also enable Docker Desktop → Settings → Resources → <strong>WSL integration</strong> for your Ubuntu distro.</p>
+				</details>
+
 				<!-- ── macOS-specific ─────────────────────────────────────── -->
 				<details class="ts-item">
 					<summary>macOS: Docker Desktop suddenly stopped</summary>
@@ -459,6 +483,21 @@ wsl --install -d Ubuntu`}</div>
 						<li>Find the CPU settings and enable <strong>Intel VT-x</strong> (Intel) or <strong>AMD-V</strong> / <strong>SVM</strong> (AMD).</li>
 						<li>Save, exit BIOS, and run <code>wsl --install</code> again from an Administrator PowerShell.</li>
 					</ol>
+				</details>
+
+				<details class="ts-item">
+					<summary>Windows: you forgot your Ubuntu (WSL) password</summary>
+					<p>You don't need to reinstall - reset the password from <code>root</code> (no data loss). In PowerShell, enter Ubuntu as root (root needs no password):</p>
+					<div class="code-block">wsl -d Ubuntu -u root</div>
+					<p>Then reset your user's password (your username is shown before <code>@</code> in the normal prompt, or run <code>ls /home</code> to find it):</p>
+					<div class="code-block">passwd &lt;your-username&gt;</div>
+					<p>Type a new password twice, then <code>exit</code>. Use the new password in Autopipe's SSH tab.</p>
+					<p class="hint">Only if WSL itself is broken (not just the password), reinstall instead: <code>wsl --unregister Ubuntu</code> (erases everything) then <code>wsl --install -d Ubuntu</code>.</p>
+				</details>
+
+				<details class="ts-item">
+					<summary>Windows: how do I get a file's full path to paste here?</summary>
+					<p>In File Explorer, <strong>right-click the file → "Copy as path"</strong> (hold <strong>Shift</strong> while right-clicking if you don't see the option). Paste it into the chat - it looks like <code>C:\Users\you\data\input.fastq</code>. No need to convert it; Autopipe rewrites Windows paths automatically.</p>
 				</details>
 			</div>
 		</section>
@@ -619,6 +658,14 @@ wsl --install -d Ubuntu`}</div>
 	.setup-video {
 		width: 100%; max-width: 760px; display: block;
 		border-radius: 10px; border: 1px solid #e5e7eb; margin: 8px 0 20px;
+	}
+	.ts-search {
+		width: 100%; box-sizing: border-box; padding: 10px 14px; margin: 8px 0 16px;
+		border: 1px solid #d1d5db; border-radius: 8px; font-size: 0.95rem;
+		font-family: inherit; color: #1a2332; background: #fff;
+	}
+	.ts-search:focus {
+		outline: none; border-color: #0f4c5c; box-shadow: 0 0 0 3px rgba(15, 76, 92, 0.12);
 	}
 
 	/* Distinct, larger labels separating the "Setup video" and "Detailed
