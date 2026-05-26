@@ -71,6 +71,18 @@ fn main() {
 
 fn run_gui() {
     tauri::Builder::default()
+        // Must be the FIRST plugin. If the user launches AutoPipe again while
+        // it is already running (e.g. not realizing it's in the tray), the
+        // second process is detected here and exits before it creates a window
+        // or starts the MCP daemon; the already-running instance just brings
+        // its window back into focus.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
