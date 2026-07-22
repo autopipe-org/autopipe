@@ -1517,8 +1517,12 @@ async function loadFiles() {{
 
   // If directory browsing is enabled, show the output-directory browser in
   // the sidebar; otherwise fall back to the flat snapshot file list.
+  // Stay in whatever folder the user navigated to: without the explicit dir
+  // the server answers with the initial directory, so a plain refresh (this
+  // runs on every window focus) would throw them back to the top.
   try {{
-    var bResp = await fetch('/api/browse');
+    var dir = (BROWSE && BROWSE.cwd) ? ('?dir=' + encodeURIComponent(BROWSE.cwd)) : '';
+    var bResp = await fetch('/api/browse' + dir);
     var listing = await bResp.json();
     if (listing && listing.enabled) {{
       BROWSE = listing;
@@ -1614,6 +1618,15 @@ function renderBrowseSidebar(listing) {{
     }}
     list.appendChild(el);
   }});
+
+  // Rebuilding the list drops the highlight, so restore it for the file that
+  // is actually on screen — otherwise a background refresh makes the viewer
+  // look like nothing is selected.
+  if (currentFile) {{
+    list.querySelectorAll('.file-item').forEach(function(el) {{
+      el.classList.toggle('active', el.dataset.name === currentFile);
+    }});
+  }}
 }}
 
 // Shown when a CRAM file is clicked but no reference genome is available.
