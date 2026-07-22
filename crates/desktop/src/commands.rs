@@ -59,9 +59,35 @@ impl From<&McpServerInfo> for McpStatusDto {
     }
 }
 
+/// Accept a port arriving as either a number or a string. Text inputs in the
+/// UI hand back strings, and rejecting those turned a plain port edit into
+/// "invalid type: string, expected u16".
+fn deserialize_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(n) => n
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or_else(|| D::Error::custom("port out of range")),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return Ok(22);
+            }
+            s.parse::<u16>()
+                .map_err(|_| D::Error::custom(format!("invalid port: {}", s)))
+        }
+        other => Err(D::Error::custom(format!("invalid port: {}", other))),
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SshConfigDto {
     pub host: String,
+    #[serde(deserialize_with = "deserialize_port")]
     pub port: u16,
     pub user: String,
     pub password: String,

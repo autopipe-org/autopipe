@@ -62,7 +62,15 @@
         busy = false;
         return;
       }
-      await invoke('save_ssh_config', { config: sshConfig });
+      // The port field is a text input, so its bound value is a string.
+      // Normalise here rather than relying on the backend to coerce it.
+      const port = Number(String(sshConfig.port).trim());
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        showToast('err', 'SSH port must be a number between 1 and 65535.');
+        busy = false;
+        return;
+      }
+      await invoke('save_ssh_config', { config: { ...sshConfig, port } });
       await invoke<string[]>('register_mcp');
       const ghMsg = githubUsername
         ? ''
