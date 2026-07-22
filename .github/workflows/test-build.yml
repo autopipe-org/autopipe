@@ -1,0 +1,29 @@
+name: Test build (Windows CLI)
+
+# Builds the CLI binary that AI clients spawn as `autopipe --mcp-server`, so a
+# branch can be tried on Windows without cutting a release. A push trigger is
+# used deliberately: workflow_dispatch buttons only appear for workflows that
+# already live on the default branch.
+on:
+  push:
+    branches: ["test"]
+
+jobs:
+  windows-cli:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: test-windows-cli
+
+      - name: Build CLI binary
+        run: cargo build --release -p autopipe --bin autopipe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autopipe-test-exe
+          path: target/release/autopipe.exe
+          retention-days: 14
