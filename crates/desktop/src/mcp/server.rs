@@ -3435,7 +3435,13 @@ are removed via Docker to handle permission issues. relative_path is relative to
             file_paths
         };
 
-        if file_paths.is_empty() {
+        // A directory holding only subdirectories — a run's output folder, say —
+        // has nothing at depth 1, and erroring here made it unopenable even
+        // though the sidebar exists precisely to browse such a tree. Fall
+        // through instead: with no files collected this lands in list-only
+        // mode, which opens an empty pane plus the browser. An explicit filter
+        // that matched nothing is still a real miss and stays an error.
+        if file_paths.is_empty() && (!is_dir || params.filter.is_some()) {
             let filter_msg = params.filter.as_deref().unwrap_or("any");
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "No {} files found in '{}'",

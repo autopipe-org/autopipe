@@ -1,15 +1,19 @@
-name: Test build (Windows CLI)
+name: Test build (Windows)
 
-# Builds the CLI binary that AI clients spawn as `autopipe --mcp-server`, so a
-# branch can be tried on Windows without cutting a release. A push trigger is
-# used deliberately: workflow_dispatch buttons only appear for workflows that
-# already live on the default branch.
+# Builds the Windows artifacts for a branch so changes can be tried without
+# cutting a release. A push trigger is used deliberately: workflow_dispatch
+# buttons only appear for workflows that already live on the default branch.
+#
+# Nothing here creates a tag or a GitHub Release — tauri-action is run without
+# tagName so it only builds, and both products are published as run artifacts.
 on:
   push:
     branches: ["test"]
 
 jobs:
-  windows-cli:
+  # The console binary AI clients spawn as `autopipe --mcp-server`. This is what
+  # serves the results viewer, so it is enough on its own to test viewer changes.
+  cli:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,6 +28,46 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: autopipe-test-exe
+          name: autopipe-cli-exe
           path: target/release/autopipe.exe
           retention-days: 14
+
+  # The installable desktop app (Tauri + Svelte), i.e. the same NSIS installer
+  # the download page serves.
+  gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          key: test-windows-gui
+          # The post-build cache save silently fails on the large Tauri target
+          # directory and fails the whole job with it.
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm install
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: frontend
+          # No tagName/releaseName: build only, do not publish a Release.
+          includeUpdaterJson: false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: autopipe-installer
+          path: |
+            frontend/src-tauri/target/release/bundle/nsis/*.exe
+            frontend/src-tauri/target/release/bundle/msi/*.msi
+          retention-days: 14
+          if-no-files-found: error
