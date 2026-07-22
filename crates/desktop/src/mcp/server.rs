@@ -3464,7 +3464,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         let list_only = is_dir && !has_genomics;
 
         let mut files: Vec<(String, Vec<u8>, String)> = Vec::new();
-        let mut remote_files: Vec<(String, String, u64, String)> = Vec::new(); // (filename, remote_path, size, mime)
+        let mut remote_files: Vec<(String, String, u64, String, bool)> = Vec::new(); // (filename, remote_path, size, mime, listed)
         let mut errors: Vec<String> = Vec::new();
 
         if !list_only {
@@ -3507,7 +3507,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 } else {
                     0
                 };
-                remote_files.push((filename, path.clone(), size, mime.to_string()));
+                remote_files.push((filename, path.clone(), size, mime.to_string(), true));
                 continue;
             }
 
@@ -3615,7 +3615,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         }
         files.retain(|(name, _, _)| has_viewer(name));
         // Keep index files in remote_files (accessible via /file/ endpoint) but filter non-viewable, non-index files
-        remote_files.retain(|(name, _, _, _)| has_viewer(name) || is_index_file(name));
+        remote_files.retain(|(name, _, _, _, _)| has_viewer(name) || is_index_file(name));
         // In list-only mode files/remote_files are intentionally empty (the
         // browse sidebar loads each file lazily on click), so this emptiness
         // guard must NOT fire — otherwise opening a directory fails with
@@ -3629,12 +3629,49 @@ are removed via Docker to handle permission issues. relative_path is relative to
             return Ok(CallToolResult::error(vec![Content::text(msg)]));
         }
 
+        // The reference question has to consider the whole tree, not just the
+        // top level: opening a run's output directory lists nothing at depth 1,
+        // yet the sidebar can open BAM/CRAM files sitting in align/ or similar.
+        // Without this the viewer opens with no reference and the IGV tab never
+        // appears. `list_only` deliberately still keys off the depth-1 scan so
+        // eager loading behaviour is unchanged.
+        let (deep_genomics, deep_fastas): (bool, Vec<String>) = if is_dir && !has_genomics {
+            let cmd = format!(
+                "find '{}' -maxdepth 3 -type f \\( -name '*.bam' -o -name '*.cram' -o -name '*.bed' \
+                 -o -name '*.gff' -o -name '*.gtf' -o -name '*.gff3' -o -name '*.fa' \
+                 -o -name '*.fasta' -o -name '*.fna' \\) 2>/dev/null | head -100",
+                shell_escape(&path)
+            );
+            match self.ssh_run(&cmd).await {
+                Ok((out, _)) => {
+                    let paths: Vec<String> = clean_content(&out)
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                        .collect();
+                    let is_ref = |p: &String| {
+                        let e = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+                        matches!(e.as_str(), "fa" | "fasta" | "fna")
+                    };
+                    let has_data = paths.iter().any(|p| !is_ref(p));
+                    let fastas = paths.into_iter().filter(is_ref).collect();
+                    (has_data, fastas)
+                }
+                Err(_) => (false, Vec::new()),
+            }
+        } else {
+            (false, Vec::new())
+        };
+
         // --- Genomics files exist but no reference decision yet → ask first, don't open viewer ---
-        if has_genomics && reference.is_none() && !user_declined_ref {
-            let fasta_files: Vec<&String> = file_paths.iter().filter(|p| {
+        if (has_genomics || deep_genomics) && reference.is_none() && !user_declined_ref {
+            let mut fasta_files: Vec<&String> = file_paths.iter().filter(|p| {
                 let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
                 matches!(ext.as_str(), "fasta" | "fa" | "fna")
             }).collect();
+            // Suggest references found deeper in the tree as well, so the user
+            // can answer with e.g. ref/reference.fa.
+            fasta_files.extend(deep_fastas.iter());
 
             let igv_only_files: Vec<String> = file_paths.iter().filter(|p| {
                 let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
@@ -3647,9 +3684,15 @@ are removed via Docker to handle permission issues. relative_path is relative to
             let mut msg = String::from("[Reference check] Genomics files detected. The viewer is NOT opened yet.\n");
 
             if !fasta_files.is_empty() {
+                // A FASTA from a subdirectory has to be offered by full path —
+                // its bare filename would not identify it on the way back in.
                 let fasta_names: Vec<String> = fasta_files.iter().map(|p| {
-                    std::path::Path::new(p.as_str())
-                        .file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()
+                    if deep_fastas.iter().any(|d| d == *p) {
+                        (*p).clone()
+                    } else {
+                        std::path::Path::new(p.as_str())
+                            .file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()
+                    }
                 }).collect();
 
                 msg.push_str(&format!(
@@ -3741,6 +3784,78 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 .map(|s| s.to_string())
         };
 
+        // The reference may be a genome ID, a filename among the collected
+        // files, or a path anywhere on the server — the workflow above invites
+        // the user to answer with one. Only the first two cases are servable so
+        // far: /file/{name} resolves against the registered map, so a reference
+        // living outside the opened directory has to be registered here or IGV
+        // gets a 404. Its .fai comes along, without which igv.js falls back to
+        // pulling the entire FASTA.
+        if let Some(ref reference_value) = reference {
+            const GENOME_IDS: &[&str] = &[
+                "hg38", "hg19", "mm39", "mm10", "rn7", "rn6", "dm6", "ce11",
+                "danRer11", "sacCer3", "tair10", "galGal6",
+            ];
+            let basename = std::path::Path::new(reference_value)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(reference_value.as_str())
+                .to_string();
+
+            let already_registered = remote_files.iter().any(|(n, _, _, _, _)| *n == basename)
+                || files.iter().any(|(n, _, _)| *n == basename);
+
+            if !GENOME_IDS.contains(&reference_value.as_str()) && !already_registered {
+                // Resolve the answer against the opened directory so a relative
+                // reply like "ref/reference.fa" works as well as a full path.
+                let candidates = if reference_value.starts_with('/') {
+                    vec![reference_value.clone()]
+                } else {
+                    let base = if is_dir { path.clone() } else {
+                        std::path::Path::new(&path).parent()
+                            .and_then(|p| p.to_str()).unwrap_or(".").to_string()
+                    };
+                    vec![
+                        format!("{}/{}", base.trim_end_matches('/'), reference_value),
+                        reference_value.clone(),
+                    ]
+                };
+
+                for cand in candidates {
+                    let esc = shell_escape(&cand);
+                    let cmd = format!(
+                        "for f in '{esc}' '{esc}.fai'; do [ -f \"$f\" ] && \
+                         printf '%s\\t%s\\n' \"$f\" \
+                         \"$(stat -c%s \"$f\" 2>/dev/null || stat -f%z \"$f\" 2>/dev/null)\"; done",
+                        esc = esc
+                    );
+                    let out = match self.ssh_run(&cmd).await {
+                        Ok((o, _)) => clean_content(&o),
+                        Err(_) => continue,
+                    };
+                    let mut found_any = false;
+                    for line in out.lines() {
+                        if let Some((p, s)) = line.trim().split_once('\t') {
+                            let name = std::path::Path::new(p)
+                                .file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                            if name.is_empty() { continue; }
+                            found_any = true;
+                            // Served but kept out of the file list: it supports
+                            // the alignment view rather than being a result.
+                            remote_files.push((
+                                name,
+                                p.to_string(),
+                                s.trim().parse().unwrap_or(0),
+                                "text/plain".to_string(),
+                                false,
+                            ));
+                        }
+                    }
+                    if found_any { break; }
+                }
+            }
+        }
+
         match viewer::show_files(
             files.clone(),
             remote_files.clone(),
@@ -3769,7 +3884,12 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 for (name, data, _) in &files {
                     msg.push_str(&format!("\n  {} ({} bytes)", name, data.len()));
                 }
-                for (name, _, size, _) in &remote_files {
+                for (name, _, size, _, listed) in &remote_files {
+                    // Supporting files (indexes, an out-of-tree reference) are
+                    // served but not shown, so do not announce them either.
+                    if !listed {
+                        continue;
+                    }
                     msg.push_str(&format!("\n  {} ({} bytes, server-side)", name, size));
                 }
                 if !errors.is_empty() {

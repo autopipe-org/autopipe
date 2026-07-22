@@ -148,6 +148,10 @@ struct RemoteFileEntry {
     remote_path: String,
     size: u64,
     mime: String,
+    /// Whether the file appears in the viewer's file list. Index files and a
+    /// reference pulled in from outside the opened directory are served but
+    /// hidden: they exist to support another file, not to be opened directly.
+    listed: bool,
 }
 
 /// SSH config for on-demand remote data fetching.
@@ -359,11 +363,13 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
 
 /// Add files and open browser. Returns the URL.
 /// `reference` can be a local FASTA filename (present in files), or a genome ID like "hg38", "mm10".
-/// `remote_files`: (filename, remote_path, size, mime) — files kept on remote server, fetched on demand.
+/// `remote_files`: (filename, remote_path, size, mime, listed) — files kept on
+/// the remote server, fetched on demand. `listed` false serves the file without
+/// offering it in the viewer's file list (indexes, an out-of-tree reference).
 /// `ssh_config`: SSH credentials for on-demand remote data fetching.
 pub async fn show_files(
     files: Vec<(String, Vec<u8>, String)>,
-    remote_files: Vec<(String, String, u64, String)>,
+    remote_files: Vec<(String, String, u64, String, bool)>,
     plugins_dir: String,
     reference: Option<String>,
     ssh_config: Option<AppConfig>,
@@ -384,8 +390,8 @@ pub async fn show_files(
     {
         let mut rmap = get_remote_files_lock().await.lock().await;
         rmap.clear();
-        for (name, remote_path, size, mime) in remote_files {
-            rmap.insert(name, RemoteFileEntry { remote_path, size, mime });
+        for (name, remote_path, size, mime, listed) in remote_files {
+            rmap.insert(name, RemoteFileEntry { remote_path, size, mime, listed });
         }
     }
 
@@ -464,12 +470,11 @@ async fn files_list_handler(State(state): State<ViewerState>) -> Json<Vec<FileLi
         .collect();
     drop(files);
 
-    // Add remote files (exclude index files from viewer list — they remain accessible via /file/ endpoint)
-    let index_exts = ["bai", "tbi", "csi", "crai", "fai", "idx"];
+    // Supporting files (indexes, an out-of-tree reference) stay reachable via
+    // /file/ but are not offered as things to open.
     let remote = get_remote_files_lock().await.lock().await;
     for (name, entry) in remote.iter() {
-        let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
-        if index_exts.contains(&ext.as_str()) {
+        if !entry.listed {
             continue;
         }
         items.push(FileListItem {
@@ -758,7 +763,28 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
         let mut rmap = get_remote_files_lock().await.lock().await;
         rmap.insert(
             filename.clone(),
-            RemoteFileEntry { remote_path: resolved.clone(), size, mime: mime.to_string() },
+            RemoteFileEntry {
+                remote_path: resolved.clone(),
+                size,
+                mime: mime.to_string(),
+                listed: true,
+            },
+        );
+    }
+
+    // An alignment file is useless to IGV without its index, and the sidebar
+    // only ever registers the file that was clicked. Pull the sidecar in too,
+    // hidden from the file list the same way indexes always have been.
+    for (name, path, isize) in find_sidecar_indexes(&ssh_cfg, &resolved, &ext).await {
+        let mut rmap = get_remote_files_lock().await.lock().await;
+        rmap.insert(
+            name,
+            RemoteFileEntry {
+                remote_path: path,
+                size: isize,
+                mime: "application/octet-stream".to_string(),
+                listed: false,
+            },
         );
     }
     // Drop any stale cached row count for this filename (file may have changed).
@@ -774,6 +800,74 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
         "size": size,
         "remote": true,
     }))
+}
+
+/// Index files that sit next to a data file, by the data file's extension.
+/// Both naming conventions are tried: `reads.bam.bai` and `reads.bai`.
+fn sidecar_index_exts(ext: &str) -> &'static [&'static str] {
+    match ext {
+        "bam" => &["bai", "csi"],
+        "cram" => &["crai"],
+        "gz" | "bgz" => &["tbi", "csi"],
+        "fa" | "fasta" | "fna" => &["fai"],
+        _ => &[],
+    }
+}
+
+/// Locate the index files belonging to `path`, in a single SSH round trip.
+/// Returns (filename, remote_path, size) for each one that exists.
+async fn find_sidecar_indexes(
+    ssh_cfg: &AppConfig,
+    path: &str,
+    ext: &str,
+) -> Vec<(String, String, u64)> {
+    let exts = sidecar_index_exts(ext);
+    if exts.is_empty() {
+        return Vec::new();
+    }
+
+    let stem = path.rsplit_once('.').map(|(s, _)| s).unwrap_or(path);
+    let mut candidates: Vec<String> = Vec::new();
+    for e in exts {
+        candidates.push(format!("{}.{}", path, e)); // reads.bam.bai
+        candidates.push(format!("{}.{}", stem, e)); // reads.bai
+    }
+
+    // One command prints "<path>\t<size>" for each candidate that exists.
+    let probes: Vec<String> = candidates
+        .iter()
+        .map(|c| {
+            let esc = c.replace('\'', "'\\''");
+            format!(
+                "[ -f '{esc}' ] && printf '%s\\t%s\\n' '{esc}' \
+                 \"$(stat -c%s '{esc}' 2>/dev/null || stat -f%z '{esc}' 2>/dev/null)\"",
+                esc = esc
+            )
+        })
+        .collect();
+
+    let out = match ssh_run_fast(ssh_cfg, &probes.join("; ")).await {
+        Ok((o, _)) => clean_content(&o),
+        Err(_) => return Vec::new(),
+    };
+
+    let mut found = Vec::new();
+    for line in out.lines() {
+        if let Some((p, s)) = line.trim().split_once('\t') {
+            if p.is_empty() {
+                continue;
+            }
+            let name = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if !name.is_empty() {
+                found.push((name, p.to_string(), s.trim().parse().unwrap_or(0)));
+            }
+        }
+    }
+    found
 }
 
 /// Map a file extension to a MIME type. Shared by browse-open and the
