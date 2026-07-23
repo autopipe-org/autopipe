@@ -804,11 +804,13 @@ async fn browse_open_handler(Query(query): Query<BrowseQuery>) -> Json<serde_jso
 
 /// Index files that sit next to a data file, by the data file's extension.
 /// Both naming conventions are tried: `reads.bam.bai` and `reads.bai`.
-fn sidecar_index_exts(ext: &str) -> &'static [&'static str] {
+pub fn sidecar_index_exts(ext: &str) -> &'static [&'static str] {
     match ext {
         "bam" => &["bai", "csi"],
         "cram" => &["crai"],
-        "gz" | "bgz" => &["tbi", "csi"],
+        // bgzipped text — matched whether the caller passes the last segment
+        // ("gz") or the compound viewer extension ("vcf.gz").
+        "gz" | "bgz" | "vcf.gz" | "bed.gz" | "gff.gz" | "gff3.gz" | "gtf.gz" => &["tbi", "csi"],
         "fa" | "fasta" | "fna" => &["fai"],
         _ => &[],
     }
@@ -816,7 +818,7 @@ fn sidecar_index_exts(ext: &str) -> &'static [&'static str] {
 
 /// Locate the index files belonging to `path`, in a single SSH round trip.
 /// Returns (filename, remote_path, size) for each one that exists.
-async fn find_sidecar_indexes(
+pub async fn find_sidecar_indexes(
     ssh_cfg: &AppConfig,
     path: &str,
     ext: &str,
@@ -1679,7 +1681,7 @@ function selectFileWithMode(name, mode) {{
     el.classList.toggle('active', el.dataset.name === name);
   }});
 
-  var ext = name.split('.').pop().toLowerCase();
+  var ext = viewerExt(name);
   var toolbar = document.getElementById('toolbar');
   var title = document.getElementById('toolbarTitle');
   var actions = document.getElementById('toolbarActions');
@@ -1697,6 +1699,18 @@ function selectFileWithMode(name, mode) {{
   }} else {{
     renderNoPreview(name, ext, actions, content);
   }}
+}}
+
+// Effective viewer extension: recognise bgzipped text (.vcf.gz etc.) so it
+// routes to the same plugin as the uncompressed form instead of matching a
+// nonexistent "gz" plugin. Mirrors viewer_ext() on the Rust side.
+function viewerExt(name) {{
+  var lower = name.toLowerCase();
+  var compound = ['vcf.gz','bed.gz','gff.gz','gff3.gz','gtf.gz'];
+  for (var i = 0; i < compound.length; i++) {{
+    if (lower.slice(-(compound[i].length + 1)) === '.' + compound[i]) return compound[i];
+  }}
+  return lower.split('.').pop();
 }}
 
 // ── Plugin Viewer ──

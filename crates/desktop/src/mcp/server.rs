@@ -280,6 +280,21 @@ pub struct AutoPipeServer {
 /// Escape a string for safe use inside single-quoted shell arguments.
 /// Rejects null bytes and newlines (which can break out of commands),
 /// then replaces each `'` with `'\''` (end quote, escaped quote, start quote).
+/// Effective viewer extension for a filename, recognising the compound forms
+/// produced by bgzip (`.vcf.gz`, `.bed.gz`, `.gff.gz`, `.gtf.gz`). A plain
+/// `rsplit('.')` would see only `gz` and route these nowhere; here the whole
+/// two-part suffix is returned so it matches a plugin's declared extension.
+/// Everything else falls back to the last dotted segment.
+fn viewer_ext(name: &str) -> String {
+    let lower = name.to_lowercase();
+    for compound in ["vcf.gz", "bed.gz", "gff.gz", "gff3.gz", "gtf.gz"] {
+        if lower.ends_with(&format!(".{}", compound)) {
+            return compound.to_string();
+        }
+    }
+    lower.rsplit('.').next().unwrap_or_default().to_string()
+}
+
 fn shell_escape(s: &str) -> String {
     // Strip characters that can break shell command boundaries
     let sanitized: String = s.chars()
@@ -3451,6 +3466,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
         // Separate genomics files (remote, server-side pagination) from other files (local transfer)
         let genomics_remote_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf",
+                                     "vcf.gz", "bed.gz", "gff.gz", "gff3.gz", "gtf.gz",
                                      "fasta", "fa", "fastq", "fq",
                                      "csv", "tsv", "tab",
                                      "txt", "log", "json", "yaml", "yml", "xml", "md",
@@ -3505,8 +3521,13 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 .unwrap_or("file")
                 .to_string();
 
-            // Genomics files: register as remote (server-side pagination + Range proxy)
-            if genomics_remote_exts.contains(&ext.as_str()) {
+            // Genomics files: register as remote (server-side pagination + Range proxy).
+            // Match on the compound-aware extension so bgzipped text (.vcf.gz etc.)
+            // is served through /file/ for the plugin to stream, not treated as an
+            // opaque .gz.
+            let route_ext = viewer_ext(path);
+            if genomics_remote_exts.contains(&ext.as_str())
+                || genomics_remote_exts.contains(&route_ext.as_str()) {
                 let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", shell_escape(path), shell_escape(path));
                 let size: u64 = if let Ok((size_str, 0)) = self.ssh_run(&size_cmd).await {
                     clean_content(&size_str).trim().parse().unwrap_or(0)
@@ -3514,6 +3535,25 @@ are removed via Docker to handle permission issues. relative_path is relative to
                     0
                 };
                 remote_files.push((filename, path.clone(), size, mime.to_string(), true));
+
+                // Pull in the file's sidecar index (.bai/.crai/.tbi/.csi/.fai)
+                // explicitly, the same way the sidebar-open path does. Relying
+                // on the index merely happening to appear in the depth-1 scan
+                // breaks when it lives in a subfolder or the listing is capped.
+                for (idx_name, idx_path, idx_size) in
+                    viewer::find_sidecar_indexes(&self.config(), path, &route_ext).await
+                {
+                    if remote_files.iter().any(|(n, _, _, _, _)| *n == idx_name) {
+                        continue;
+                    }
+                    remote_files.push((
+                        idx_name,
+                        idx_path,
+                        idx_size,
+                        "application/octet-stream".to_string(),
+                        false, // served but hidden from the file list
+                    ));
+                }
                 continue;
             }
 
@@ -3599,7 +3639,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         // Index file extensions — kept in remote_files for IGV/plugin access, but hidden from viewer list
         let index_exts = ["bai", "tbi", "csi", "crai", "fai", "idx"];
         let has_viewer = |name: &str| -> bool {
-            let ext = name.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+            let ext = viewer_ext(name);
             ext.is_empty() || installed_plugin_exts.contains(&ext)
         };
         let is_index_file = |name: &str| -> bool {
