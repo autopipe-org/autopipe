@@ -285,9 +285,15 @@ pub struct AutoPipeServer {
 /// `rsplit('.')` would see only `gz` and route these nowhere; here the whole
 /// two-part suffix is returned so it matches a plugin's declared extension.
 /// Everything else falls back to the last dotted segment.
+const COMPOUND_GZ_EXTS: &[&str] = &[
+    "vcf.gz", "bed.gz", "gff.gz", "gff3.gz", "gtf.gz",
+    "fasta.gz", "fa.gz", "fastq.gz", "fq.gz",
+    "csv.gz", "tsv.gz", "txt.gz", "log.gz",
+];
+
 fn viewer_ext(name: &str) -> String {
     let lower = name.to_lowercase();
-    for compound in ["vcf.gz", "bed.gz", "gff.gz", "gff3.gz", "gtf.gz"] {
+    for compound in COMPOUND_GZ_EXTS {
         if lower.ends_with(&format!(".{}", compound)) {
             return compound.to_string();
         }
@@ -3467,6 +3473,8 @@ are removed via Docker to handle permission issues. relative_path is relative to
         // Separate genomics files (remote, server-side pagination) from other files (local transfer)
         let genomics_remote_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf",
                                      "vcf.gz", "bed.gz", "gff.gz", "gff3.gz", "gtf.gz",
+                                     "fasta.gz", "fa.gz", "fastq.gz", "fq.gz",
+                                     "csv.gz", "tsv.gz", "txt.gz", "log.gz",
                                      "fasta", "fa", "fastq", "fq",
                                      "csv", "tsv", "tab",
                                      "txt", "log", "json", "yaml", "yml", "xml", "md",

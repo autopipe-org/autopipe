@@ -358,22 +358,57 @@
 			<div class="step-number">6</div>
 			<div class="step-content">
 				<h2>Run your first pipeline</h2>
-				<p>You're done. Talk to your AI - for example, you can find a pipeline already published in the Autopipe registry:</p>
-				<div class="example-chat">
-					<div class="user-msg">Use Autopipe to find a single cell downstream analysis pipeline.</div>
+				<p>You're done. Talk to your AI to drive each step — expand the example prompt to see what to ask:</p>
+
+				<div class="run-pipeline-box">
+					<h3>- Find or generate a pipeline</h3>
+					<p>Search the <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> registry, or describe a new one from scratch and Autopipe generates the Snakefile and Dockerfile.</p>
+					<details class="example-toggle">
+						<summary>Example prompts</summary>
+						<div class="example-chat">
+							<div class="user-msg">Use Autopipe to find a single cell downstream analysis pipeline.</div>
+						</div>
+						<div class="example-chat">
+							<div class="user-msg">Use Autopipe to create a variant calling pipeline for paired-end WGS data using BWA-MEM2 and GATK HaplotypeCaller.</div>
+						</div>
+					</details>
+
+					<h3>- Build the Docker image</h3>
+					<p>Build the container that will run the pipeline.</p>
+					<details class="example-toggle">
+						<summary>Example prompt</summary>
+						<div class="example-chat">
+							<div class="user-msg">Build the Docker image for this pipeline.</div>
+						</div>
+					</details>
+
+					<h3>- Run on your data</h3>
+					<p>Point Autopipe at your input files — a dry-run validates the DAG first, then the full run executes.</p>
+					<details class="example-toggle">
+						<summary>Example prompt</summary>
+						<div class="example-chat">
+							<div class="user-msg">Run the pipeline on /home/me/data/sample.fastq.</div>
+						</div>
+					</details>
+
+					<h3>- See the results in the viewer</h3>
+					<p>When the run finishes, open the in-browser viewer (images, plots, tables, logs).</p>
+					<details class="example-toggle">
+						<summary>Example prompt</summary>
+						<div class="example-chat">
+							<div class="user-msg">Show me the results in the viewer.</div>
+						</div>
+					</details>
+
+					<h3>- Remove a pipeline from AutoPipeHub</h3>
+					<p>If you no longer want a pipeline you published to appear on the <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> registry, ask Autopipe to take it down — your local copy stays intact.</p>
+					<details class="example-toggle">
+						<summary>Example prompt</summary>
+						<div class="example-chat">
+							<div class="user-msg">Remove my variant calling pipeline from AutoPipeHub.</div>
+						</div>
+					</details>
 				</div>
-				<p>Or build a brand-new pipeline from a description:</p>
-				<div class="example-chat">
-					<div class="user-msg">Use Autopipe to create a variant calling pipeline for paired-end WGS data using BWA-MEM2 and GATK HaplotypeCaller.</div>
-				</div>
-				<p>Autopipe will:</p>
-				<ol>
-					<li>Search <a href={hubUrl} target="_blank" rel="noopener">AutoPipeHub</a> or generate a Snakemake pipeline.</li>
-					<li>Build the Docker image on the server.</li>
-					<li>Run a dry-run, then execute the full pipeline.</li>
-					<li>Show results in the in-browser viewer.</li>
-				</ol>
-				<p>When the run finishes, ask <em>"Show me the results"</em> - Autopipe summarizes the outputs and points you to the visual viewer.</p>
 			</div>
 		</section>
 
@@ -729,6 +764,20 @@ wsl --install -d Ubuntu`}</div>
 		border: 1px solid #e5e7eb; border-radius: 8px;
 		margin: 8px 0 12px 40px; background: #fff;
 	}
+
+	.run-pipeline-box {
+		background: #f8f9fa; border-radius: 8px;
+		padding: 4px 20px 16px; margin: 12px 0;
+	}
+	.run-pipeline-box h3:first-child { margin-top: 16px; }
+
+	.example-toggle { margin: 4px 0 16px; }
+	.example-toggle > summary {
+		cursor: pointer; color: #0f4c5c; font-size: 0.875rem; font-weight: 500;
+		user-select: none;
+	}
+	.example-toggle > summary:hover { color: #0d3d4a; text-decoration: underline; }
+	.example-toggle[open] > summary { margin-bottom: 4px; }
 
 	.example-chat { margin: 12px 0; }
 	.user-msg {

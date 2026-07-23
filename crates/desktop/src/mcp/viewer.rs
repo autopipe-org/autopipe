@@ -1478,17 +1478,24 @@ var pluginInstances = {{}};
 
 // File icon mapping
 function getFileIcon(name) {{
-  var ext = name.split('.').pop().toLowerCase();
+  // Use the compound-aware extension so ".gff3.gz" maps to the gff icon
+  // rather than falling through as "gz".
+  var ext = (typeof viewerExt === 'function') ? viewerExt(name) : name.split('.').pop().toLowerCase();
   var icons = {{
     'png':'🖼','jpg':'🖼','jpeg':'🖼','gif':'🖼','svg':'🖼','webp':'🖼',
     'pdf':'📕',
     'txt':'📄','log':'📄','csv':'📊','tsv':'📊','json':'📋',
     'bam':'🧬','cram':'🧬','vcf':'🧬','bcf':'🧬',
-    'bed':'🧬','gff':'🧬','gtf':'🧬',
+    'bed':'🧬','gff':'🧬','gtf':'🧬','gff3':'🧬',
+    'vcf.gz':'🧬','bed.gz':'🧬','gff.gz':'🧬','gff3.gz':'🧬','gtf.gz':'🧬',
+    'fasta.gz':'🧬','fa.gz':'🧬','fastq.gz':'🧬','fq.gz':'🧬',
+    'csv.gz':'📊','tsv.gz':'📊','txt.gz':'📄','log.gz':'📄',
     'fasta':'🧬','fa':'🧬','fastq':'🧬','fq':'🧬',
     'h5ad':'🔬'
   }};
-  return icons[ext] || '📁';
+  // Fall back to a generic file icon, never the folder icon — the sidebar
+  // uses 📁 for directories and the two must not collide.
+  return icons[ext] || '📄';
 }}
 
 function formatSize(bytes) {{
@@ -1706,7 +1713,7 @@ function selectFileWithMode(name, mode) {{
 // nonexistent "gz" plugin. Mirrors viewer_ext() on the Rust side.
 function viewerExt(name) {{
   var lower = name.toLowerCase();
-  var compound = ['vcf.gz','bed.gz','gff.gz','gff3.gz','gtf.gz'];
+  var compound = ['vcf.gz','bed.gz','gff.gz','gff3.gz','gtf.gz','fasta.gz','fa.gz','fastq.gz','fq.gz','csv.gz','tsv.gz','txt.gz','log.gz'];
   for (var i = 0; i < compound.length; i++) {{
     if (lower.slice(-(compound[i].length + 1)) === '.' + compound[i]) return compound[i];
   }}
