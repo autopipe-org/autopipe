@@ -38,8 +38,12 @@ dirs = "6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 tracing-appender = "0.2"
-reqwest = { version = "0.12", features = ["json"] }
-ssh2 = "0.9"
+# rustls (pure-Rust TLS) so HTTPS needs no system OpenSSL — the app runs on
+# machines without Homebrew/OpenSSL installed.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# libssh2 can't use rustls, so statically link a vendored OpenSSL into the
+# binary instead of dynamically linking the host's (often absent) one.
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 base64 = "0.22"
 open = "5"
 chrono = "0.4"
