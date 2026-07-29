@@ -41,9 +41,10 @@ tracing-appender = "0.2"
 # rustls (pure-Rust TLS) so HTTPS needs no system OpenSSL — the app runs on
 # machines without Homebrew/OpenSSL installed.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-# libssh2 can't use rustls, so statically link a vendored OpenSSL into the
-# binary instead of dynamically linking the host's (often absent) one.
-ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+# On Windows, libssh2 builds against the OS-native WinCNG backend, so OpenSSL
+# is not needed at all. On macOS/Linux it needs OpenSSL — vendored in below so
+# the app doesn't depend on a (often absent) system/Homebrew OpenSSL.
+ssh2 = "0.9"
 base64 = "0.22"
 open = "5"
 chrono = "0.4"
@@ -60,6 +61,12 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 tauri = { version = "2.11", features = ["tray-icon"], optional = true }
 tauri-plugin-shell = { version = "2", optional = true }
 tauri-plugin-dialog = { version = "2", optional = true }
+
+# Statically link a vendored OpenSSL for libssh2 on macOS/Linux only. Windows
+# uses WinCNG (see ssh2 above) and cannot build OpenSSL from source on the CI
+# runner (MSYS perl lacks the modules OpenSSL's Configure needs).
+[target.'cfg(not(windows))'.dependencies]
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
