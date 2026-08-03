@@ -1606,6 +1606,10 @@ async function renderPipelineDashboard() {{
   if (!plugin) {{ if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name); return; }}
   currentFile = null;
   document.querySelectorAll('.file-item').forEach(function(el) {{ el.classList.remove('active'); }});
+  // A pipeline viewer owns the whole pane — hide the file-tree sidebar so only
+  // the dashboard shows.
+  var sidebar = document.querySelector('.sidebar');
+  if (sidebar) sidebar.style.display = 'none';
   var toolbar = document.getElementById('toolbar');
   var title = document.getElementById('toolbarTitle');
   var actions = document.getElementById('toolbarActions');
@@ -1613,8 +1617,11 @@ async function renderPipelineDashboard() {{
   if (toolbar) toolbar.style.display = 'flex';
   if (title) title.textContent = plugin.description || plugin.name;
   content.style.padding = '0';
-  content.style.overflow = 'auto';
+  content.style.overflow = 'hidden';
   await renderPluginViewer(plugin.name, plugin, actions, content);
+  // Let the dashboard fill the pane (it manages its own internal scrolling).
+  var pc = document.getElementById('pluginContainer');
+  if (pc) {{ pc.style.height = '100%'; }}
 }}
 
 function renderSidebar() {{
