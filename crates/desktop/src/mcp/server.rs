@@ -3391,6 +3391,65 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
     // ── Browser viewer ─────────────────────────────────────────
 
+    /// Read the run marker's pipeline name (ro-crate name written at execute
+    /// time) from a result directory, if present.
+    async fn read_run_marker_pipeline(&self, dir: &str) -> Option<String> {
+        let mp = format!("{}/.autopipe-run.json", dir.trim_end_matches('/'));
+        match self.ssh_run(&format!("cat '{}' 2>/dev/null", shell_escape(&mp))).await {
+            Ok((content, 0)) => serde_json::from_str::<serde_json::Value>(&clean_content(&content))
+                .ok()
+                .and_then(|v| v["pipeline"].as_str().map(|s| s.to_string())),
+            _ => None,
+        }
+    }
+
+    /// Ask the registry whether a NOT-installed pipeline viewer claims this
+    /// pipeline name. Pipeline viewers declare no file extensions, so we only
+    /// fetch the manifest of registry entries with an empty `extensions` list,
+    /// then check their `pipeline_match.names`. Returns the viewer's name so the
+    /// user can be told to install it.
+    async fn registry_pipeline_viewer_for(&self, pipeline_name: &str) -> Option<String> {
+        let base = self.config().registry_url;
+        let base = base.trim_end_matches('/');
+        let client = reqwest::Client::new();
+        let list: serde_json::Value = client
+            .get(format!("{}/api/plugins", base))
+            .send().await.ok()?
+            .json().await.ok()?;
+        let arr = list.as_array()?;
+        for p in arr {
+            let ext_empty = p["extensions"].as_array().map(|a| a.is_empty()).unwrap_or(true);
+            if !ext_empty {
+                continue; // extension viewer, not a pipeline viewer
+            }
+            let gh = p["github_url"].as_str().unwrap_or("");
+            // https://github.com/O/R/tree/REF → https://raw.githubusercontent.com/O/R/REF/manifest.json
+            let raw = match gh.strip_prefix("https://github.com/") {
+                Some(rest) => {
+                    let parts: Vec<&str> = rest.split('/').collect();
+                    if parts.len() >= 2 {
+                        let reff = if parts.len() >= 4 && parts[2] == "tree" { parts[3] } else { "main" };
+                        Some(format!("https://raw.githubusercontent.com/{}/{}/{}/manifest.json", parts[0], parts[1], reff))
+                    } else { None }
+                }
+                None => None,
+            };
+            let Some(raw) = raw else { continue };
+            if let Ok(resp) = client.get(&raw).send().await {
+                if let Ok(m) = resp.json::<serde_json::Value>().await {
+                    if m["plugin_type"].as_str() == Some("pipeline") {
+                        if let Some(names) = m["pipeline_match"]["names"].as_array() {
+                            if names.iter().any(|n| n.as_str().map(|s| s.eq_ignore_ascii_case(pipeline_name)).unwrap_or(false)) {
+                                return p["name"].as_str().map(|s| s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Recognise a directory as a known pipeline's output and return the name of
     /// an INSTALLED pipeline-viewer plugin that claims it — matched first by the
     /// run marker's ro-crate pipeline name, then (fallback) by required-file
@@ -3427,15 +3486,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         }
 
         // Marker's pipeline name (ro-crate name written at execute time).
-        let marker_name: Option<String> = {
-            let mp = format!("{}/.autopipe-run.json", dir.trim_end_matches('/'));
-            match self.ssh_run(&format!("cat '{}' 2>/dev/null", shell_escape(&mp))).await {
-                Ok((content, 0)) => serde_json::from_str::<serde_json::Value>(&clean_content(&content))
-                    .ok()
-                    .and_then(|v| v["pipeline"].as_str().map(|s| s.to_string())),
-                _ => None,
-            }
-        };
+        let marker_name = self.read_run_marker_pipeline(dir).await;
 
         let basenames: std::collections::HashSet<String> = file_paths
             .iter()
@@ -3568,6 +3619,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         let mut pipeline_viewer_active: Option<String> = None;
         if is_dir && params.filter.is_none() {
             if let Some(pv_name) = self.match_pipeline_viewer(&path, &file_paths).await {
+                // An installed pipeline viewer claims this directory — confirm first.
                 match params.pipeline_viewer.as_deref() {
                     Some("yes") | Some("Yes") | Some("true") => {
                         pipeline_viewer_active = Some(pv_name);
@@ -3581,6 +3633,21 @@ are removed via Docker to handle permission issues. relative_path is relative to
                              Then call show_results AGAIN on the SAME path with pipeline_viewer=\"yes\" to use the {pv} \
                              viewer, or pipeline_viewer=\"no\" to open files by extension as usual.",
                             pv = pv_name
+                        ))]));
+                    }
+                }
+            } else if !matches!(params.pipeline_viewer.as_deref(), Some("no") | Some("No") | Some("false")) {
+                // No matching viewer is installed. If the registry has a pipeline
+                // viewer for this run's pipeline, tell the user to install it.
+                if let Some(mname) = self.read_run_marker_pipeline(&path).await {
+                    if let Some(reg_viewer) = self.registry_pipeline_viewer_for(&mname).await {
+                        return Ok(CallToolResult::success(vec![Content::text(format!(
+                            "[Pipeline viewer available] This is output from the '{pipe}' pipeline, which has a dedicated \
+                             viewer ('{viewer}') in the AutoPipe registry — but it is NOT installed locally.\n\n\
+                             Tell the user: to see this result as a combined dashboard, open the AutoPipe desktop app, \
+                             click the Plugins button, search for '{viewer}', install it, then reopen this folder. \
+                             Or call show_results again with pipeline_viewer=\"no\" to open the files by type for now.",
+                            pipe = mname, viewer = reg_viewer
                         ))]));
                     }
                 }
