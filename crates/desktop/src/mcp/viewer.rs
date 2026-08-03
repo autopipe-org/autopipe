@@ -1610,12 +1610,13 @@ async function renderPipelineDashboard() {{
   // the dashboard shows.
   var sidebar = document.querySelector('.sidebar');
   if (sidebar) sidebar.style.display = 'none';
-  var toolbar = document.getElementById('toolbar');
-  var title = document.getElementById('toolbarTitle');
   var actions = document.getElementById('toolbarActions');
   var content = document.getElementById('viewerContent');
-  if (toolbar) toolbar.style.display = 'flex';
-  if (title) title.textContent = plugin.description || plugin.name;
+  // Keep the toolbar hidden: its title and the generic Download (which pointed
+  // at the wrong file) are redundant — the dashboard has its own header and a
+  // "Download all (.zip)" button.
+  var toolbar = document.getElementById('toolbar');
+  if (toolbar) toolbar.style.display = 'none';
   content.style.padding = '0';
   content.style.overflow = 'hidden';
   await renderPluginViewer(plugin.name, plugin, actions, content);
@@ -1867,9 +1868,11 @@ function renderNoPreview(name, ext, actions, content) {{
     '</div>';
 }}
 
-// Auto-refresh file list when tab gets focus (e.g. after new show_results call)
+// Auto-refresh file list when tab gets focus (e.g. after new show_results call).
+// A pipeline dashboard owns its own state and refetches on demand, so reloading
+// on every focus (window switch, fullscreen toggle) would needlessly rebuild it.
 window.addEventListener('focus', function() {{
-  loadFiles();
+  if (!PIPELINE_VIEWER) loadFiles();
 }});
 
 // Initialize
