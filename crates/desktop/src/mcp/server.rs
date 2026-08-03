@@ -209,6 +209,13 @@ struct ShowResultsParams {
     /// Otherwise, determine the organism from context and pass the appropriate genome ID.
     #[serde(default)]
     reference: Option<String>,
+    /// Pipeline-viewer confirmation. When a directory is recognised as a known
+    /// pipeline's output, show_results does NOT open — it returns a prompt to
+    /// ask the user. Then call again with "yes" (open the dedicated pipeline
+    /// viewer) or "no" (open files by extension as usual). Leave unset on the
+    /// first call.
+    #[serde(default)]
+    pipeline_viewer: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2409,10 +2416,29 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         let _ = self.ssh_run(&format!("docker rm -f '{}' 2>/dev/null", shell_escape(&container_name))).await;
         let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
 
+        // Resolve the pipeline's identity from its ro-crate so a pipeline viewer
+        // can later recognise this run's output by name (image_name is user-chosen
+        // and unreliable; the ro-crate `name` is the real identity).
+        let (pipeline_name, based_on): (Option<String>, Option<String>) =
+            if let Some(ref dir) = pipeline_dir {
+                let rc = format!("{}/ro-crate-metadata.json", dir.trim_end_matches('/'));
+                match self.ssh_run(&format!("cat '{}'", shell_escape(&rc))).await {
+                    Ok((content, 0)) => match parse_ro_crate_metadata(&clean_content(&content)) {
+                        Ok(md) => (Some(md.name), md.based_on_url),
+                        Err(_) => (None, None),
+                    },
+                    _ => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+
         // Write run metadata for list_running_pipelines (use base64 to avoid heredoc injection)
         let run_meta = serde_json::json!({
             "run_name": params.run_name,
             "image_name": params.image_name,
+            "pipeline": pipeline_name,
+            "based_on": based_on,
             "container_name": container_name,
             "input_dir": input_dir,
             "started_at": chrono::Utc::now().to_rfc3339()
@@ -3365,6 +3391,70 @@ are removed via Docker to handle permission issues. relative_path is relative to
 
     // ── Browser viewer ─────────────────────────────────────────
 
+    /// Recognise a directory as a known pipeline's output and return the name of
+    /// an INSTALLED pipeline-viewer plugin that claims it — matched first by the
+    /// run marker's ro-crate pipeline name, then (fallback) by required-file
+    /// signature for older results with no marker. None if nothing matches.
+    async fn match_pipeline_viewer(&self, dir: &str, file_paths: &[String]) -> Option<String> {
+        let plugins_dir = self.config().full_plugins_dir();
+        // (viewer_name, names, required_files)
+        let mut pipeline_plugins: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
+            for entry in entries.flatten() {
+                let mpath = entry.path().join("manifest.json");
+                if let Ok(text) = std::fs::read_to_string(&mpath) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                        if v["plugin_type"].as_str() != Some("pipeline") {
+                            continue;
+                        }
+                        let vname = v["name"].as_str().unwrap_or_default().to_string();
+                        if vname.is_empty() {
+                            continue;
+                        }
+                        let names = v["pipeline_match"]["names"].as_array().map(|a| {
+                            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                        }).unwrap_or_default();
+                        let req = v["pipeline_match"]["required_files"].as_array().map(|a| {
+                            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
+                        }).unwrap_or_default();
+                        pipeline_plugins.push((vname, names, req));
+                    }
+                }
+            }
+        }
+        if pipeline_plugins.is_empty() {
+            return None;
+        }
+
+        // Marker's pipeline name (ro-crate name written at execute time).
+        let marker_name: Option<String> = {
+            let mp = format!("{}/.autopipe-run.json", dir.trim_end_matches('/'));
+            match self.ssh_run(&format!("cat '{}' 2>/dev/null", shell_escape(&mp))).await {
+                Ok((content, 0)) => serde_json::from_str::<serde_json::Value>(&clean_content(&content))
+                    .ok()
+                    .and_then(|v| v["pipeline"].as_str().map(|s| s.to_string())),
+                _ => None,
+            }
+        };
+
+        let basenames: std::collections::HashSet<String> = file_paths
+            .iter()
+            .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+            .collect();
+
+        for (vname, names, req) in &pipeline_plugins {
+            if let Some(ref m) = marker_name {
+                if names.iter().any(|n| n.eq_ignore_ascii_case(m)) {
+                    return Some(vname.clone());
+                }
+            }
+            if !req.is_empty() && req.iter().all(|f| basenames.contains(f)) {
+                return Some(vname.clone());
+            }
+        }
+        None
+    }
+
     #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. The viewer includes a sidebar file browser: from the opened file (or directory) the user can navigate the output directory tree — including parent folders, up to the run's output directory — and open other files on demand, each loaded lazily. So passing a single file is enough; the user can explore sibling and nearby files themselves without you calling show_results again. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
     async fn show_results(
         &self,
@@ -3470,6 +3560,33 @@ are removed via Docker to handle permission issues. relative_path is relative to
             ))]));
         }
 
+        // ── Pipeline-viewer routing (consent-gated) ──────────────────────
+        // If this directory is a known pipeline's output and a matching pipeline
+        // viewer is installed, don't open yet — ask the user first. On the second
+        // call pipeline_viewer="yes" routes the whole folder to that viewer;
+        // "no" falls through to ordinary per-extension routing.
+        let mut pipeline_viewer_active: Option<String> = None;
+        if is_dir && params.filter.is_none() {
+            if let Some(pv_name) = self.match_pipeline_viewer(&path, &file_paths).await {
+                match params.pipeline_viewer.as_deref() {
+                    Some("yes") | Some("Yes") | Some("true") => {
+                        pipeline_viewer_active = Some(pv_name);
+                    }
+                    Some("no") | Some("No") | Some("false") => {}
+                    _ => {
+                        return Ok(CallToolResult::success(vec![Content::text(format!(
+                            "[Pipeline viewer] This directory looks like output that the '{pv}' viewer handles. \
+                             Ask the user whether to open it with the dedicated {pv} viewer (one combined dashboard) \
+                             instead of opening each file by type.\n\n\
+                             Then call show_results AGAIN on the SAME path with pipeline_viewer=\"yes\" to use the {pv} \
+                             viewer, or pipeline_viewer=\"no\" to open files by extension as usual.",
+                            pv = pv_name
+                        ))]));
+                    }
+                }
+            }
+        }
+
         // Separate genomics files (remote, server-side pagination) from other files (local transfer)
         let genomics_remote_exts = ["bam", "vcf", "bed", "gff", "gtf", "gff3", "cram", "bcf",
                                      "vcf.gz", "bed.gz", "gff.gz", "gff3.gz", "gtf.gz",
@@ -3497,7 +3614,24 @@ are removed via Docker to handle permission issues. relative_path is relative to
         let mut remote_files: Vec<(String, String, u64, String, bool)> = Vec::new(); // (filename, remote_path, size, mime, listed)
         let mut errors: Vec<String> = Vec::new();
 
-        if !list_only {
+        // Pipeline viewer: register every file in the directory as a streamable
+        // remote file (served raw via /file/), so the viewer reads them itself.
+        // This bypasses per-file extension handling and the has_viewer filter.
+        if pipeline_viewer_active.is_some() {
+            for p in &file_paths {
+                let filename = p.rsplit('/').next().unwrap_or(p).to_string();
+                let size_cmd = format!(
+                    "stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null",
+                    shell_escape(p), shell_escape(p)
+                );
+                let size: u64 = self.ssh_run(&size_cmd).await.ok()
+                    .and_then(|(s, _)| clean_content(&s).trim().parse().ok())
+                    .unwrap_or(0);
+                remote_files.push((filename, p.clone(), size, "text/plain".to_string(), true));
+            }
+        }
+
+        if !list_only && pipeline_viewer_active.is_none() {
         for path in &file_paths {
             let ext = path
                 .rsplit('.')
@@ -3667,9 +3801,13 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 errors.push(format!("Skipped files with no viewer plugin: {}", ext_list));
             }
         }
-        files.retain(|(name, _, _)| has_viewer(name));
-        // Keep index files in remote_files (accessible via /file/ endpoint) but filter non-viewable, non-index files
-        remote_files.retain(|(name, _, _, _, _)| has_viewer(name) || is_index_file(name));
+        // A pipeline viewer consumes the whole directory, so keep every file it
+        // registered instead of filtering by extension.
+        if pipeline_viewer_active.is_none() {
+            files.retain(|(name, _, _)| has_viewer(name));
+            // Keep index files in remote_files (accessible via /file/ endpoint) but filter non-viewable, non-index files
+            remote_files.retain(|(name, _, _, _, _)| has_viewer(name) || is_index_file(name));
+        }
         // In list-only mode files/remote_files are intentionally empty (the
         // browse sidebar loads each file lazily on click), so this emptiness
         // guard must NOT fire — otherwise opening a directory fails with
@@ -3910,6 +4048,10 @@ are removed via Docker to handle permission issues. relative_path is relative to
             }
         }
 
+        // A pipeline-routed view is never list-only, even when the directory has
+        // no genomics files: the viewer renders the whole folder as a dashboard.
+        let list_only = list_only && pipeline_viewer_active.is_none();
+
         match viewer::show_files(
             files.clone(),
             remote_files.clone(),
@@ -3918,8 +4060,16 @@ are removed via Docker to handle permission issues. relative_path is relative to
             Some(self.config()),
             browse_root,
             initial_dir,
+            pipeline_viewer_active.clone(),
         ).await {
             Ok(url) => {
+                if let Some(ref pv) = pipeline_viewer_active {
+                    let msg = format!(
+                        "Opened the '{}' pipeline viewer in your browser: {}\n\nThe whole result folder is shown as one dashboard. The sidebar still lists individual files if you want to open one directly.",
+                        pv, url
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(msg)]));
+                }
                 if list_only {
                     // Directory opened in list-only mode: nothing is preloaded.
                     // The sidebar shows the directory; the user clicks a file to

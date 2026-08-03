@@ -64,6 +64,18 @@ fn default_meta_parse() -> String {
     "none".to_string()
 }
 
+/// How a "pipeline" plugin claims a whole result directory (vs an extension
+/// plugin claiming a single file). A directory matches when its marker's
+/// pipeline name is in `names`, OR — for older results with no marker — every
+/// file in `required_files` is present.
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct PipelineMatch {
+    #[serde(default)]
+    names: Vec<String>,
+    #[serde(default)]
+    required_files: Vec<String>,
+}
+
 #[derive(Clone, Serialize)]
 struct PluginManifest {
     name: String,
@@ -75,6 +87,12 @@ struct PluginManifest {
     style: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     data_source: Option<DataSource>,
+    /// "pipeline" for directory-level viewers; None (treated as "file") for
+    /// ordinary extension viewers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pipeline_match: Option<PipelineMatch>,
 }
 
 /// A running viewer server handle.
@@ -139,6 +157,18 @@ static REFERENCE: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
 
 async fn get_reference_lock() -> &'static Arc<Mutex<Option<String>>> {
     REFERENCE
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
+/// Name of the pipeline viewer plugin to render for this directory, when
+/// show_results routed a whole result folder to a pipeline viewer. None for
+/// ordinary (extension-routed) views.
+static PIPELINE_VIEWER: tokio::sync::OnceCell<Arc<Mutex<Option<String>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_pipeline_viewer_lock() -> &'static Arc<Mutex<Option<String>>> {
+    PIPELINE_VIEWER
         .get_or_init(|| async { Arc::new(Mutex::new(None)) })
         .await
 }
@@ -278,6 +308,9 @@ fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
                     }
                     let data_source: Option<DataSource> = v.get("data_source")
                         .and_then(|ds| serde_json::from_value(ds.clone()).ok());
+                    let plugin_type = v["plugin_type"].as_str().map(|s| s.to_string());
+                    let pipeline_match: Option<PipelineMatch> = v.get("pipeline_match")
+                        .and_then(|pm| serde_json::from_value(pm.clone()).ok());
                     plugins.push(PluginManifest {
                         name,
                         version: v["version"].as_str().unwrap_or("0.0.0").to_string(),
@@ -293,6 +326,8 @@ fn scan_plugins(plugins_dir: &str) -> Vec<PluginManifest> {
                         entry: v["entry"].as_str().unwrap_or("index.js").to_string(),
                         style: v["style"].as_str().map(|s| s.to_string()),
                         data_source,
+                        plugin_type,
+                        pipeline_match,
                     });
                 }
             }
@@ -375,6 +410,7 @@ pub async fn show_files(
     ssh_config: Option<AppConfig>,
     browse_root: Option<String>,
     initial_dir: Option<String>,
+    pipeline_viewer: Option<String>,
 ) -> Result<String, String> {
     // Update file store
     let store = get_file_store().await;
@@ -433,6 +469,12 @@ pub async fn show_files(
     {
         let mut r = get_reference_lock().await.lock().await;
         *r = reference;
+    }
+
+    // Store the active pipeline viewer (if this is a pipeline-routed view)
+    {
+        let mut pv = get_pipeline_viewer_lock().await.lock().await;
+        *pv = pipeline_viewer;
     }
 
     let port = ensure_server(&plugins_dir).await?;
@@ -1390,6 +1432,13 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
     // Read plugins dynamically so updates are visible without server restart
     let plugins = state.plugins.lock().await.clone();
     let plugins_json = serde_json::to_string(&*plugins).unwrap_or_else(|_| "[]".into());
+    let pipeline_viewer_json = {
+        let pv = get_pipeline_viewer_lock().await.lock().await;
+        match &*pv {
+            Some(name) => serde_json::to_string(name).unwrap_or_else(|_| "null".into()),
+            None => "null".into(),
+        }
+    };
 
     Html(format!(
         r##"<!DOCTYPE html>
@@ -1470,6 +1519,7 @@ async fn index_handler(State(state): State<ViewerState>) -> Html<String> {
 
 <script>
 var PLUGINS = {plugins_json};
+var PIPELINE_VIEWER = {pipeline_viewer_json};
 var FILES = [];
 var REFERENCE = null;
 var currentFile = null;
@@ -1536,13 +1586,35 @@ async function loadFiles() {{
     if (listing && listing.enabled) {{
       BROWSE = listing;
       renderBrowseSidebar(listing);
+      if (PIPELINE_VIEWER && !currentFile) {{ renderPipelineDashboard(); return; }}
       if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name);
       return;
     }}
   }} catch(e) {{ /* fall through to flat list */ }}
 
   renderSidebar();
+  if (PIPELINE_VIEWER && !currentFile) {{ renderPipelineDashboard(); return; }}
   if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name);
+}}
+
+// Render a whole result directory through a pipeline viewer (one dashboard for
+// the folder, not per-file). The sidebar stays usable so the user can still
+// open individual files; picking one switches to the ordinary file view.
+async function renderPipelineDashboard() {{
+  var plugin = null;
+  for (var i = 0; i < PLUGINS.length; i++) {{ if (PLUGINS[i].name === PIPELINE_VIEWER) {{ plugin = PLUGINS[i]; break; }} }}
+  if (!plugin) {{ if (FILES.length > 0 && !currentFile) selectFile(FILES[0].name); return; }}
+  currentFile = null;
+  document.querySelectorAll('.file-item').forEach(function(el) {{ el.classList.remove('active'); }});
+  var toolbar = document.getElementById('toolbar');
+  var title = document.getElementById('toolbarTitle');
+  var actions = document.getElementById('toolbarActions');
+  var content = document.getElementById('viewerContent');
+  if (toolbar) toolbar.style.display = 'flex';
+  if (title) title.textContent = plugin.description || plugin.name;
+  content.style.padding = '0';
+  content.style.overflow = 'auto';
+  await renderPluginViewer(plugin.name, plugin, actions, content);
 }}
 
 function renderSidebar() {{
@@ -1798,7 +1870,8 @@ loadFiles();
 </script>
 </body>
 </html>"##,
-        plugins_json = plugins_json
+        plugins_json = plugins_json,
+        pipeline_viewer_json = pipeline_viewer_json
     ))
 }
 
