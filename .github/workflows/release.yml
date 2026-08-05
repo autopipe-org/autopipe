@@ -171,13 +171,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code signing + notarization (ignored on the Windows build).
-          # When these secrets are unset, tauri-action produces an unsigned build.
+          # macOS code signing only (ignored on the Windows build). Notarization
+          # is done locally on a Mac afterwards (notarytool + stapler), because
+          # the GitHub runner intermittently can't reach Apple's notary service
+          # (-1009). Signing needs the cert + identity; notarization (APPLE_ID /
+          # APPLE_PASSWORD) is deliberately left out so the build doesn't hang.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           projectPath: frontend
