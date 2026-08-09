@@ -364,8 +364,11 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
         .route("/api/reference", get(reference_handler))
         .route("/api/browse", get(browse_handler))
         .route("/api/browse-open", get(browse_open_handler))
-        .route("/file/{filename}", get(file_handler))
-        .route("/data/{filename}", get(data_handler))
+        // Wildcard ({*filename}, not {filename}) so nested paths like
+        // meme_out/meme.xml reach the handler; a single-segment capture 404s on
+        // any '/' in the name, which broke pipeline viewers serving subfolders.
+        .route("/file/{*filename}", get(file_handler))
+        .route("/data/{*filename}", get(data_handler))
         .route("/plugin/{name}/{*path}", get(plugin_asset_handler))
         .with_state(state);
 
