@@ -3075,7 +3075,7 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
 
         if is_dir {
             // List files in the remote directory
-            let files = match self.ssh_run(&format!("find '{}' -type f -not -path '*/.snakemake/*' -printf '%P\\n'", shell_escape(&remote_path))).await {
+            let files = match self.ssh_run(&format!("find '{}' -maxdepth 1 -type f -printf '%f\\n'", shell_escape(&remote_path))).await {
                 Ok((output, 0)) => output.trim().to_string(),
                 Ok((output, _)) => return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Cannot list directory '{}': {}", remote_path, output.trim()
@@ -3456,8 +3456,16 @@ are removed via Docker to handle permission issues. relative_path is relative to
     /// signature for older results with no marker. None if nothing matches.
     async fn match_pipeline_viewer(&self, dir: &str, file_paths: &[String]) -> Option<String> {
         let plugins_dir = self.config().full_plugins_dir();
-        // (viewer_name, names, required_files)
-        let mut pipeline_plugins: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+        // (viewer_name, rules) where each rule is (names, required_files). A dir
+        // matches the viewer if ANY rule matches, so one viewer can claim several
+        // folder shapes — e.g. the run folder (by marker name) AND the meme_out
+        // subfolder (by the presence of meme.xml).
+        let mut pipeline_plugins: Vec<(String, Vec<(Vec<String>, Vec<String>)>)> = Vec::new();
+        let as_str_vec = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default()
+        };
         if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
             for entry in entries.flatten() {
                 let mpath = entry.path().join("manifest.json");
@@ -3470,13 +3478,22 @@ are removed via Docker to handle permission issues. relative_path is relative to
                         if vname.is_empty() {
                             continue;
                         }
-                        let names = v["pipeline_match"]["names"].as_array().map(|a| {
-                            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
-                        }).unwrap_or_default();
-                        let req = v["pipeline_match"]["required_files"].as_array().map(|a| {
-                            a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect()
-                        }).unwrap_or_default();
-                        pipeline_plugins.push((vname, names, req));
+                        let mut rules: Vec<(Vec<String>, Vec<String>)> = Vec::new();
+                        // New: pipeline_match.rules = [ { names?, required_files? }, ... ]
+                        if let Some(rule_arr) = v["pipeline_match"]["rules"].as_array() {
+                            for r in rule_arr {
+                                rules.push((as_str_vec(&r["names"]), as_str_vec(&r["required_files"])));
+                            }
+                        }
+                        // Legacy: top-level names / required_files as a single rule.
+                        let top_names = as_str_vec(&v["pipeline_match"]["names"]);
+                        let top_req = as_str_vec(&v["pipeline_match"]["required_files"]);
+                        if !top_names.is_empty() || !top_req.is_empty() {
+                            rules.push((top_names, top_req));
+                        }
+                        if !rules.is_empty() {
+                            pipeline_plugins.push((vname, rules));
+                        }
                     }
                 }
             }
@@ -3493,20 +3510,22 @@ are removed via Docker to handle permission issues. relative_path is relative to
             .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
             .collect();
 
-        for (vname, names, req) in &pipeline_plugins {
-            if let Some(ref m) = marker_name {
-                if names.iter().any(|n| n.eq_ignore_ascii_case(m)) {
+        for (vname, rules) in &pipeline_plugins {
+            for (names, req) in rules {
+                if let Some(ref m) = marker_name {
+                    if names.iter().any(|n| n.eq_ignore_ascii_case(m)) {
+                        return Some(vname.clone());
+                    }
+                }
+                if !req.is_empty() && req.iter().all(|f| basenames.contains(f)) {
                     return Some(vname.clone());
                 }
-            }
-            if !req.is_empty() && req.iter().all(|f| basenames.contains(f)) {
-                return Some(vname.clone());
             }
         }
         None
     }
 
-    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. The viewer includes a sidebar file browser: from the opened file (or directory) the user can navigate the output directory tree — including parent folders, up to the run's output directory — and open other files on demand, each loaded lazily. So passing a single file is enough; the user can explore sibling and nearby files themselves without you calling show_results again. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables.")]
+    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. The viewer includes a sidebar file browser: from the opened file (or directory) the user can navigate the output directory tree — including parent folders, up to the run's output directory — and open other files on demand, each loaded lazily. So passing a single file is enough; the user can explore sibling and nearby files themselves without you calling show_results again. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables. PIPELINE OUTPUT — ALWAYS ASK FIRST: when a folder is a pipeline's result folder (a pipeline viewer claims it — this applies to BOTH the sorting-result run folder AND a meme_out subfolder), this tool does NOT open immediately; it returns a message telling you to ask the user first. You MUST ask the user (dedicated combined viewer vs. opening files one by one), then re-call show_results on the SAME path with pipeline_viewer=\"yes\" or \"no\". Never open a pipeline result silently — this holds for sorting results and MEME results alike. MEME RESULTS — ASK SCOPE: to show motif analysis, ask the user whether they want it together with the sorting results (open the RUN folder → Sequences + Motif tabs) or MEME only (open the meme_out folder → a Motif-only view), then call show_results on the folder they chose.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
@@ -3531,7 +3550,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
             // List files in directory (non-recursive, max 50)
             match self
                 .ssh_run(&format!(
-                    "find '{}' -maxdepth 1 -type f ! -name '.*' ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -50",
+                    "find '{}' -type f ! -path '*/.snakemake/*' ! -name '.*' ! -name 'Dockerfile' ! -name 'Snakefile*' ! -name '*.py' ! -name '*.sh' | head -200",
                     shell_escape(&path)
                 ))
                 .await
@@ -3685,8 +3704,12 @@ are removed via Docker to handle permission issues. relative_path is relative to
         // remote file (served raw via /file/), so the viewer reads them itself.
         // This bypasses per-file extension handling and the has_viewer filter.
         if pipeline_viewer_active.is_some() {
+            let dir_prefix = format!("{}/", path.trim_end_matches('/'));
             for p in &file_paths {
-                let filename = p.rsplit('/').next().unwrap_or(p).to_string();
+                // Register with a path RELATIVE to the opened dir so nested files
+                // (e.g. meme_out/meme.xml) are served at /file/meme_out/meme.xml,
+                // which is exactly what the pipeline viewer requests.
+                let filename = p.strip_prefix(&dir_prefix).unwrap_or(p).to_string();
                 let size_cmd = format!(
                     "stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null",
                     shell_escape(p), shell_escape(p)
