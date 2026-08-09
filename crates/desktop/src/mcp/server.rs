@@ -3075,7 +3075,7 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
 
         if is_dir {
             // List files in the remote directory
-            let files = match self.ssh_run(&format!("find '{}' -maxdepth 1 -type f -printf '%f\\n'", shell_escape(&remote_path))).await {
+            let files = match self.ssh_run(&format!("find '{}' -type f -not -path '*/.snakemake/*' -printf '%P\\n'", shell_escape(&remote_path))).await {
                 Ok((output, 0)) => output.trim().to_string(),
                 Ok((output, _)) => return Ok(CallToolResult::error(vec![Content::text(format!(
                     "Cannot list directory '{}': {}", remote_path, output.trim()
