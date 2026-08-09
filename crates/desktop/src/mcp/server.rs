@@ -3505,8 +3505,18 @@ are removed via Docker to handle permission issues. relative_path is relative to
         // Marker's pipeline name (ro-crate name written at execute time).
         let marker_name = self.read_run_marker_pipeline(dir).await;
 
+        // Match required_files on TOP-LEVEL files only (dir/<name>, no further
+        // '/'). file_paths is recursive so nested files can be *served*, but
+        // required_files matching must stay shallow — otherwise a nested file
+        // (e.g. meme_out/meme.xml inside a run folder, or any subfolder file)
+        // could make an unrelated pipeline viewer claim someone else's output.
+        let dir_prefix = format!("{}/", dir.trim_end_matches('/'));
         let basenames: std::collections::HashSet<String> = file_paths
             .iter()
+            .filter(|p| {
+                let rel = p.strip_prefix(&dir_prefix).unwrap_or(p.as_str());
+                !rel.contains('/')
+            })
             .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
             .collect();
 
