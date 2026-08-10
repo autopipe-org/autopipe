@@ -171,11 +171,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS code signing only (ignored on the Windows build). Notarization
-          # is done locally on a Mac afterwards (notarytool + stapler), because
-          # the GitHub runner intermittently can't reach Apple's notary service
-          # (-1009). Signing needs the cert + identity; notarization (APPLE_ID /
-          # APPLE_PASSWORD) is deliberately left out so the build doesn't hang.
+          # macOS code signing only here (ignored on Windows/Linux). Notarization
+          # runs in the next step via notarytool with --no-s3-acceleration, which
+          # dodges the intermittent -1009 (notary endpoint unreachable) that made
+          # tauri-action's built-in notarization hang. So APPLE_ID / APPLE_PASSWORD
+          # are intentionally NOT passed here — the next step uses them instead.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -188,6 +188,45 @@ jobs:
           prerelease: false
           includeUpdaterJson: false
           args: ${{ matrix.args }}
+
+      # Notarize the freshly-signed dmg, staple the ticket, then replace the
+      # signed-but-unstapled dmg that tauri-action already uploaded to the
+      # release. --no-s3-acceleration + retries dodge the intermittent -1009
+      # that previously forced notarization to be done by hand.
+      - name: Notarize, staple, and replace release dmg (macOS)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DMG=$(find . -path "*${{ matrix.target }}*" -name '*.dmg' 2>/dev/null | head -1 || true)
+          if [ -z "$DMG" ]; then
+            echo "::error::No .dmg found for ${{ matrix.target }}"; exit 1
+          fi
+          echo "Notarizing: $DMG"
+          ok=0
+          for i in 1 2 3; do
+            if xcrun notarytool submit "$DMG" \
+                 --apple-id "$APPLE_ID" \
+                 --team-id "$APPLE_TEAM_ID" \
+                 --password "$APPLE_PASSWORD" \
+                 --no-s3-acceleration \
+                 --wait; then
+              ok=1; break
+            fi
+            echo "notarize attempt $i failed (possibly -1009); retrying in 30s..."
+            sleep 30
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::notarization failed after 3 attempts"; exit 1
+          fi
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          # Overwrite the non-stapled dmg tauri-action uploaded for this tag.
+          gh release upload "${{ github.ref_name }}" "$DMG" --clobber
 
   # Attach the CLI artifacts to the GitHub release that tauri-action
   # already created (or will create). Run as long as build-cli succeeded,
