@@ -3727,7 +3727,23 @@ are removed via Docker to handle permission issues. relative_path is relative to
                 let size: u64 = self.ssh_run(&size_cmd).await.ok()
                     .and_then(|(s, _)| clean_content(&s).trim().parse().ok())
                     .unwrap_or(0);
-                remote_files.push((filename, p.clone(), size, "text/plain".to_string(), true));
+                // Serve with the right Content-Type so the browser renders
+                // meme.html as a page (not raw source) and images inline.
+                let ext = p.rsplit('.').next().map(|e| e.to_lowercase()).unwrap_or_default();
+                let mime = match ext.as_str() {
+                    "html" | "htm" => "text/html",
+                    "xml" => "text/xml",
+                    "svg" => "image/svg+xml",
+                    "png" => "image/png",
+                    "jpg" | "jpeg" => "image/jpeg",
+                    "gif" => "image/gif",
+                    "pdf" => "application/pdf",
+                    "json" => "application/json",
+                    "csv" | "tsv" => "text/csv",
+                    "eps" | "ps" => "application/postscript",
+                    _ => "text/plain",
+                };
+                remote_files.push((filename, p.clone(), size, mime.to_string(), true));
             }
         }
 
