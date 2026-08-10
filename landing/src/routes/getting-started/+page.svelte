@@ -8,6 +8,7 @@
 	const versionBare = version.replace(/^v/, '');
 
 	let showModal = $state(false);
+	let showMsModal = $state(false);
 	let menuOpen = $state(false);
 
 	// Section 2 (server) and Section 3 (AI app machine) keep independent
@@ -277,14 +278,17 @@
 							<div class="code-block">xattr -cr /Applications/AutoPipe.app</div>
 						</div>
 					{:else if clientOs === 'windows'}
-						<p>Download the Windows installer:</p>
-						<a href="{downloadUrl}/windows/AutoPipe-Setup-{version}.exe" class="btn-sm">Download for Windows</a>
-						<p class="hint">Run the installer. If SmartScreen blocks it, click <strong>More info → Run anyway</strong>.</p>
-
-						<div class="security-note">
-							<p>If Windows still blocks the file, unblock it once in PowerShell:</p>
-							<div class="code-block">{`Unblock-File -Path "$HOME\\Downloads\\AutoPipe-Setup.exe"`}</div>
-						</div>
+						<p>Install the Autopipe desktop app from the <strong>Microsoft Store</strong>.</p>
+						<!-- svelte-ignore a11y_click_events_have_key_events -->
+						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+						<img src="/microsoft.png" alt="Autopipe on the Microsoft Store" class="guide-img" onclick={() => showMsModal = true} />
+						{#if showMsModal}
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_static_element_interactions -->
+							<div class="modal-overlay" onclick={() => showMsModal = false}>
+								<img src="/microsoft.png" alt="Autopipe on the Microsoft Store" class="modal-img" />
+							</div>
+						{/if}
 					{:else if clientOs === 'linux'}
 						<p>Download the Linux <code>.deb</code> package (Debian / Ubuntu):</p>
 						<a href="{downloadUrl}/linux/autopipe_{versionBare}_amd64.deb" class="btn-sm">Download for Linux (.deb)</a>
