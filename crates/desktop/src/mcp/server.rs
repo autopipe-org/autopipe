@@ -650,18 +650,43 @@ impl AutoPipeServer {
     }
 
     async fn ssh_write_file(&self, path: &str, content: &str) -> Result<(), String> {
-        // Use base64 encoding to safely transfer arbitrary content without heredoc injection
+        // Use base64 encoding to safely transfer arbitrary content without heredoc injection.
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
-        let cmd = format!(
-            "echo '{}' | base64 -d > '{}'",
-            shell_escape(&encoded), shell_escape(path)
-        );
-        match self.ssh_run(&cmd).await {
-            Ok((_, 0)) => Ok(()),
-            Ok((output, _)) => Err(format!("Write failed: {}", output.trim())),
-            Err(e) => Err(e),
+
+        // The whole payload can't ride in a single exec command: an SSH channel
+        // packet is ~32KB, which caps the original file at ~24.5KB (base64 is
+        // 4/3 the size). Beyond that the write failed with a misleading
+        // "transient" channel error that never recovered on retry. So split the
+        // base64 into chunks and append-decode each one. base64 output length is
+        // always a multiple of 4 and we cut on a multiple-of-4 boundary, so every
+        // chunk is a valid standalone base64 unit that `base64 -d` decodes to
+        // whole bytes — concatenating the pieces reconstructs the file exactly.
+        const CHUNK: usize = 16_384; // multiple of 4; leaves headroom for the wrapper
+        let bytes = encoded.as_bytes();
+        let mut i = 0usize;
+        let mut first = true;
+        loop {
+            let end = std::cmp::min(i + CHUNK, bytes.len());
+            let chunk = std::str::from_utf8(&bytes[i..end])
+                .map_err(|e| format!("internal base64 encoding error: {}", e))?;
+            let redirect = if first { ">" } else { ">>" }; // first truncates, rest append
+            let cmd = format!(
+                "printf '%s' '{}' | base64 -d {} '{}'",
+                shell_escape(chunk), redirect, shell_escape(path)
+            );
+            match self.ssh_run(&cmd).await {
+                Ok((_, 0)) => {}
+                Ok((output, _)) => return Err(format!("Write failed: {}", output.trim())),
+                Err(e) => return Err(e),
+            }
+            first = false;
+            i = end;
+            if i >= bytes.len() {
+                break; // empty content still performs one truncating write
+            }
         }
+        Ok(())
     }
 
     /// Resolve the output directory for a run. Always uses {configured_output_dir}/{run_name}.
@@ -1111,7 +1136,9 @@ impl AutoPipeServer {
                     }
                 }
                 if let Ok(updated) = serde_json::to_string_pretty(&data) {
-                    let _ = self.ssh_write_file(&meta_path, &updated).await;
+                    if let Err(e) = self.ssh_write_file(&meta_path, &updated).await {
+                        tracing::warn!(path = %meta_path, "failed to write metadata: {}", e);
+                    }
                 }
             }
         }
@@ -2445,7 +2472,9 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             "started_at": chrono::Utc::now().to_rfc3339()
         }).to_string();
         let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
-        let _ = self.ssh_write_file(&meta_path, &run_meta).await;
+        if let Err(e) = self.ssh_write_file(&meta_path, &run_meta).await {
+            tracing::warn!(path = %meta_path, "failed to write run metadata: {}", e);
+        }
 
         let cmd = format!(
             "nohup docker run --entrypoint snakemake --name '{}' {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
@@ -2665,7 +2694,9 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                     meta["oom_killed"] = serde_json::json!(oom_killed);
                     meta["finished_at"] = serde_json::json!(finished_at);
                     meta["termination_reason"] = serde_json::json!(termination_reason);
-                    let _ = self.ssh_write_file(&meta_path, &meta.to_string()).await;
+                    if let Err(e) = self.ssh_write_file(&meta_path, &meta.to_string()).await {
+                        tracing::warn!(path = %meta_path, "failed to write metadata: {}", e);
+                    }
 
                     // Remove stopped container to avoid accumulation
                     let _ = self.ssh_run(&format!("docker rm '{}' 2>/dev/null", shell_escape(&container_name))).await;
