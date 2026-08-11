@@ -117,6 +117,8 @@ struct CleanupFailedParams {
     run_name: String,
     /// Whether to remove the output directory (default: false). Only set to true when you want a completely fresh start. Completed intermediate results are preserved by default so Snakemake can resume from where it left off.
     remove_output: Option<bool>,
+    /// Whether to stop running containers before cleaning up (default: false). When false, cleanup aborts if the image has a running container. Set to true to stop the run first (docker stop) — use this when the user asks to stop/abort a run, or when a run is hung.
+    stop_running: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2741,7 +2743,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
 
     // ── Cleanup tools ────────────────────────────────────────────
 
-    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. Uses Docker to handle root-owned files when normal rm fails due to permissions. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool. Multi-client note: do NOT call this on a run_name that another AI client may currently be executing — coordinate with the user first.")]
+    #[tool(description = "Clean up artifacts from a failed pipeline. By default, preserves the output directory (so Snakemake can resume from completed steps) and only removes the Docker image. Set remove_output=true ONLY when you want a completely fresh start. STOPPING A RUN: by default this aborts if the pipeline is still running. When the user asks to stop/abort a run, or a run is hung and needs to be killed, call with stop_running=true — it stops the container(s) first (docker stop), then cleans up. Uses Docker to handle root-owned files when normal rm fails due to permissions. For execution failures, prefer fixing the Snakefile and re-running execute_pipeline with the same run_name instead of calling this tool. Multi-client note: do NOT call this (especially with stop_running=true) on a run_name that another AI client may currently be executing — coordinate with the user first.")]
     async fn cleanup_failed(
         &self,
         Parameters(params): Parameters<CleanupFailedParams>,
@@ -2756,10 +2758,34 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         );
         if let Ok((output, 0)) = self.ssh_run(&running_check).await {
             if !output.trim().is_empty() {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot clean up: image '{}' has running containers. Stop them first.",
-                    params.image_name
-                ))]));
+                if params.stop_running.unwrap_or(false) {
+                    // The user asked to stop the run (or it is hung): stop the
+                    // running container(s) for this image, then clean up. docker
+                    // stop is graceful (SIGTERM, then SIGKILL after a grace period).
+                    let stop_cmd = format!(
+                        "docker ps -q --filter ancestor='{}' 2>/dev/null | xargs -r docker stop",
+                        shell_escape(&params.image_name)
+                    );
+                    match self.ssh_run(&stop_cmd).await {
+                        Ok((_, 0)) => results.push(format!(
+                            "Stopped running containers for image: {}",
+                            params.image_name
+                        )),
+                        Ok((err, _)) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Failed to stop running containers for '{}': {}",
+                            params.image_name, err.trim()
+                        ))])),
+                        Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "Error stopping running containers for '{}': {}",
+                            params.image_name, e
+                        ))])),
+                    }
+                } else {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot clean up: image '{}' has running containers. Pass stop_running=true to stop them first, or stop them manually.",
+                        params.image_name
+                    ))]));
+                }
             }
         }
 
