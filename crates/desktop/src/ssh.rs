@@ -1,11 +1,36 @@
 use crate::config::{AppConfig, SshAuth};
 use ssh2::Session;
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-// ── SSH session for remote commands ─────────────────────────────────
+// ── Reused SSH sessions ─────────────────────────────────────────────
+//
+// Opening a fresh TCP + handshake + auth for every command is the dominant
+// per-command cost and a source of transient "hiccup" failures under load. So
+// we keep one live session per SSH target and reuse it: each command just opens
+// a new channel on the shared session. ssh2's `Session` is a cheap
+// `Arc<Mutex<..>>` clone and serializes its own inner access, so sharing/reusing
+// it across threads is safe.
+//
+// Reconnect safety:
+//   * If the stored session has died (idle timeout, dropped TCP), that surfaces
+//     when we open a channel — BEFORE the command runs — so we discard it,
+//     reconnect, and retry safely (the command had no chance to take effect).
+//   * A failure AFTER the command was exec'd is NOT retried (it may already have
+//     had side effects); we just drop the session so the next command reconnects.
+
+fn sessions() -> &'static Mutex<HashMap<String, Session>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<String, Session>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn session_key(config: &AppConfig) -> String {
+    format!("{}@{}:{}", config.ssh_user, config.ssh_host, config.ssh_port)
+}
 
 fn create_session(config: &AppConfig) -> Result<Session, String> {
     let addr = format!("{}:{}", config.ssh_host, config.ssh_port);
@@ -43,31 +68,45 @@ fn create_session(config: &AppConfig) -> Result<Session, String> {
         }
     }
 
+    // Keep idle sessions alive so they aren't dropped between commands.
+    sess.set_keepalive(true, 30);
     Ok(sess)
 }
 
-fn ssh_exec_once(config: &AppConfig, command: &str) -> Result<(String, i32), String> {
-    let sess = create_session(config)?;
+/// Outcome of trying to run a command on a (reused) session.
+enum RunOutcome {
+    /// Command executed; carries (combined output, exit status).
+    Ran(String, i32),
+    /// The session was dead at channel-open (before the command ran). Safe to
+    /// reconnect and retry — the command had no chance to take effect.
+    Reconnect(String),
+    /// The transport failed after the command was exec'd. NOT safe to retry
+    /// (side effects may have happened); the session is discarded.
+    Failed(String),
+}
 
-    let mut channel = sess
-        .channel_session()
-        .map_err(|e| format!("Channel error: {}", e))?;
+fn run_on_session(sess: &Session, command: &str) -> RunOutcome {
+    // A dead session fails here, before the command is delivered → safe to retry.
+    let mut channel = match sess.channel_session() {
+        Ok(c) => c,
+        Err(e) => return RunOutcome::Reconnect(format!("Channel error: {}", e)),
+    };
 
-    channel
-        .exec(command)
-        .map_err(|e| format!("Exec error: {}", e))?;
+    // From this point the command has been delivered to the shell → do NOT retry.
+    if let Err(e) = channel.exec(command) {
+        return RunOutcome::Failed(format!("Exec error: {}", e));
+    }
 
     let mut stdout_bytes = Vec::new();
-    channel
-        .read_to_end(&mut stdout_bytes)
-        .map_err(|e| format!("Read stdout error: {}", e))?;
+    if let Err(e) = channel.read_to_end(&mut stdout_bytes) {
+        return RunOutcome::Failed(format!("Read stdout error: {}", e));
+    }
     let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
 
     let mut stderr_bytes = Vec::new();
-    channel
-        .stderr()
-        .read_to_end(&mut stderr_bytes)
-        .map_err(|e| format!("Read stderr error: {}", e))?;
+    if let Err(e) = channel.stderr().read_to_end(&mut stderr_bytes) {
+        return RunOutcome::Failed(format!("Read stderr error: {}", e));
+    }
     let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
 
     channel.wait_close().ok();
@@ -81,38 +120,63 @@ fn ssh_exec_once(config: &AppConfig, command: &str) -> Result<(String, i32), Str
     } else {
         format!("{}\n{}", stdout, stderr)
     };
-
-    Ok((output, exit_status))
+    RunOutcome::Ran(output, exit_status)
 }
 
-/// Execute a command on the remote server via SSH.
-/// Retries up to 3 times on connection/auth failures.
+/// Execute a command on the remote server via SSH, reusing a live session when
+/// possible and reconnecting on connection failures. Retries up to 3 times, but
+/// only reconnects-and-retries when the failure happened before the command ran.
 pub fn ssh_exec(config: &AppConfig, command: &str) -> Result<(String, i32), String> {
-    let max_retries = 3;
+    let key = session_key(config);
+    let max_attempts: usize = 3;
     let mut last_err = String::new();
 
-    for attempt in 0..max_retries {
-        match ssh_exec_once(config, command) {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                last_err = e;
-                // Only retry on connection/auth errors, not exec errors
-                if last_err.contains("auth failed")
-                    || last_err.contains("TCP connect")
-                    || last_err.contains("handshake")
-                {
-                    if attempt < max_retries - 1 {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+    for attempt in 0..max_attempts {
+        // Reuse the stored session if present, else connect a new one.
+        let sess = {
+            let mut store = match sessions().lock() {
+                Ok(g) => g,
+                Err(_) => return Err("SSH session store poisoned".to_string()),
+            };
+            match store.get(&key).cloned() {
+                Some(s) => s,
+                None => match create_session(config) {
+                    Ok(s) => {
+                        store.insert(key.clone(), s.clone());
+                        s
+                    }
+                    Err(e) => {
+                        drop(store);
+                        last_err = e;
+                        std::thread::sleep(Duration::from_millis(300u64 << attempt));
                         continue;
                     }
-                } else {
-                    return Err(last_err);
+                },
+            }
+        };
+
+        match run_on_session(&sess, command) {
+            RunOutcome::Ran(output, status) => return Ok((output, status)),
+            RunOutcome::Reconnect(e) => {
+                // Dead before the command ran → drop the session and retry.
+                last_err = e;
+                if let Ok(mut store) = sessions().lock() {
+                    store.remove(&key);
                 }
+                std::thread::sleep(Duration::from_millis(300u64 << attempt));
+            }
+            RunOutcome::Failed(e) => {
+                // Failed after exec → don't retry (possible side effects). Drop
+                // the suspect session so the next command reconnects.
+                if let Ok(mut store) = sessions().lock() {
+                    store.remove(&key);
+                }
+                return Err(e);
             }
         }
     }
 
-    Err(format!("{} (after {} retries)", last_err, max_retries))
+    Err(format!("{} (after {} attempts)", last_err, max_attempts))
 }
 
 /// Test SSH connection.
