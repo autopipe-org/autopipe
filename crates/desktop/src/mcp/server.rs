@@ -652,34 +652,63 @@ impl AutoPipeServer {
     }
 
     async fn ssh_write_file(&self, path: &str, content: &str) -> Result<(), String> {
-        // Use base64 encoding to safely transfer arbitrary content without heredoc injection.
+        // Base64 so arbitrary content transfers without heredoc/shell injection.
         use base64::Engine;
         let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
-
-        // The whole payload can't ride in a single exec command: an SSH channel
-        // packet is ~32KB, which caps the original file at ~24.5KB (base64 is
-        // 4/3 the size). Beyond that the write failed with a misleading
-        // "transient" channel error that never recovered on retry. So split the
-        // base64 into chunks and append-decode each one. base64 output length is
-        // always a multiple of 4 and we cut on a multiple-of-4 boundary, so every
-        // chunk is a valid standalone base64 unit that `base64 -d` decodes to
-        // whole bytes — concatenating the pieces reconstructs the file exactly.
-        const CHUNK: usize = 16_384; // multiple of 4; leaves headroom for the wrapper
         let bytes = encoded.as_bytes();
+        const CHUNK: usize = 16_384; // multiple of 4; leaves headroom for the wrapper
+
+        // Write to a temp file, then atomically `mv` it into place. If any chunk
+        // transfer fails we restart the WHOLE write (re-truncating the temp), so
+        // a partial or failed transfer never leaves a corrupt / half-written
+        // file — the real path only ever changes via the final atomic rename.
+        // Retries are bounded with backoff so a genuinely-down connection fails
+        // cleanly (with the original file untouched) instead of looping forever.
+        let tmp = format!("{}.autopipe-tmp", path);
+        const MAX_ATTEMPTS: usize = 3;
+        let mut last_err = String::new();
+        for attempt in 0..MAX_ATTEMPTS {
+            match self.ssh_write_chunks(&tmp, bytes, CHUNK).await {
+                Ok(()) => {
+                    let mv = format!("mv -f '{}' '{}'", shell_escape(&tmp), shell_escape(path));
+                    match self.ssh_run(&mv).await {
+                        Ok((_, 0)) => return Ok(()),
+                        Ok((out, _)) => last_err = format!("atomic move failed: {}", out.trim()),
+                        Err(e) => last_err = e,
+                    }
+                }
+                Err(e) => last_err = e,
+            }
+            if attempt + 1 < MAX_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(300u64 << attempt)).await;
+            }
+        }
+        // Best-effort cleanup so a failed write leaves no stray temp file behind.
+        let _ = self.ssh_run(&format!("rm -f '{}'", shell_escape(&tmp))).await;
+        Err(format!("Write failed after {} attempts: {}", MAX_ATTEMPTS, last_err))
+    }
+
+    /// Stream already-base64 `bytes` to `path` in `chunk`-sized pieces: the
+    /// first piece truncates the file, the rest append. base64 output length is
+    /// always a multiple of 4 and we cut on a multiple-of-4 boundary, so each
+    /// piece is a valid standalone base64 unit that `base64 -d` decodes to whole
+    /// bytes — the concatenation reconstructs the content exactly. The whole call
+    /// is safe to re-run: it always re-truncates on the first piece.
+    async fn ssh_write_chunks(&self, path: &str, bytes: &[u8], chunk: usize) -> Result<(), String> {
         let mut i = 0usize;
         let mut first = true;
         loop {
-            let end = std::cmp::min(i + CHUNK, bytes.len());
-            let chunk = std::str::from_utf8(&bytes[i..end])
+            let end = std::cmp::min(i + chunk, bytes.len());
+            let piece = std::str::from_utf8(&bytes[i..end])
                 .map_err(|e| format!("internal base64 encoding error: {}", e))?;
-            let redirect = if first { ">" } else { ">>" }; // first truncates, rest append
+            let redirect = if first { ">" } else { ">>" };
             let cmd = format!(
                 "printf '%s' '{}' | base64 -d {} '{}'",
-                shell_escape(chunk), redirect, shell_escape(path)
+                shell_escape(piece), redirect, shell_escape(path)
             );
             match self.ssh_run(&cmd).await {
                 Ok((_, 0)) => {}
-                Ok((output, _)) => return Err(format!("Write failed: {}", output.trim())),
+                Ok((output, _)) => return Err(format!("chunk write failed: {}", output.trim())),
                 Err(e) => return Err(e),
             }
             first = false;
