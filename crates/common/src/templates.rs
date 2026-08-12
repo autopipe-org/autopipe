@@ -36,8 +36,12 @@ rule step_2:
 /// Dockerfile template for new pipelines.
 pub const DOCKERFILE_TEMPLATE: &str = r#"FROM condaforge/miniforge3:latest
 
-# Install bioinformatics tools
-RUN conda install -y -c bioconda -c conda-forge \
+# Install bioinformatics tools with the fastest available solver
+# (micromamba > mamba > conda; all resolve the same conda packages).
+RUN INSTALL="conda install -y"; \
+    command -v mamba >/dev/null 2>&1 && INSTALL="mamba install -y"; \
+    command -v micromamba >/dev/null 2>&1 && INSTALL="micromamba install -y -n base"; \
+    $INSTALL -c bioconda -c conda-forge \
     snakemake-minimal \
     bash \
     curl \
@@ -185,7 +189,10 @@ Every pipeline is a directory with 5 required files:
 
 ## Dockerfile Rules
 - Base image: `condaforge/miniforge3:latest`
-- Install bioconda/conda-forge tools via `conda install -c bioconda -c conda-forge`
+- Install bioconda/conda-forge tools with the fastest available solver, preferring
+  `micromamba` > `mamba` > `conda` (all resolve the same packages). Pick the first
+  that exists at build time, e.g.:
+  `RUN INSTALL="conda install -y"; command -v mamba >/dev/null 2>&1 && INSTALL="mamba install -y"; command -v micromamba >/dev/null 2>&1 && INSTALL="micromamba install -y -n base"; $INSTALL -c bioconda -c conda-forge ...`
 - Always install `snakemake-minimal` and `bash` via conda
 - After installing, replace system bash with conda bash to prevent GLIBC mismatch:
   `RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && ln -sf /opt/conda/bin/bash /bin/sh`
