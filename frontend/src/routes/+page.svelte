@@ -12,17 +12,35 @@
     host: string;
     port: number;
     user: string;
+    auth_method: string; // 'password' | 'key'
     password: string;
+    key_path: string;
     repo_path: string;
+    connection_type: string; // 'ssh' | 'cloud'
+    cloud_provider: string; // 'aws' | 'gcp' | 'azure'
   };
 
   let sshConfig = $state<SshConfig>({
     host: '',
     port: 22,
     user: '',
+    auth_method: 'password',
     password: '',
+    key_path: '',
     repo_path: '',
+    connection_type: 'ssh',
+    cloud_provider: 'aws',
   });
+
+  // Switching to Cloud defaults to key auth (cloud VMs are key-based) and
+  // ensures a provider is selected; switching back to SSH is left as-is.
+  function setConnectionType(kind: 'ssh' | 'cloud') {
+    sshConfig.connection_type = kind;
+    if (kind === 'cloud') {
+      if (!sshConfig.cloud_provider) sshConfig.cloud_provider = 'aws';
+      if (sshConfig.auth_method !== 'key') sshConfig.auth_method = 'key';
+    }
+  }
 
   let githubUsername = $state<string | null>(null);
   let busy = $state(false);
@@ -67,6 +85,11 @@
       const port = Number(String(sshConfig.port).trim());
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
         showToast('err', 'SSH port must be a number between 1 and 65535.');
+        busy = false;
+        return;
+      }
+      if (sshConfig.auth_method === 'key' && !sshConfig.key_path.trim()) {
+        showToast('err', 'Key file path is required when using SSH key auth.');
         busy = false;
         return;
       }
@@ -153,13 +176,45 @@
     <section class="step">
       <header class="step-head">
         <span class="num">1</span>
-        <h2>SSH server</h2>
+        <h2>Analysis machine</h2>
         <span class="badge required">Required</span>
       </header>
       <p class="step-desc">
-        The machine where AutoPipe runs your analyses. This can be the same
-        computer you're running this app on, or a separate Linux server.
+        The machine where AutoPipe runs your analyses. Connect a self-managed
+        Linux server over SSH, or a VM in a cloud provider.
       </p>
+
+      <div class="conn-toggle" role="tablist" aria-label="Connection type">
+        <button
+          role="tab"
+          class="conn-tab"
+          class:active={sshConfig.connection_type !== 'cloud'}
+          aria-selected={sshConfig.connection_type !== 'cloud'}
+          onclick={() => setConnectionType('ssh')}
+        >SSH server</button>
+        <button
+          role="tab"
+          class="conn-tab"
+          class:active={sshConfig.connection_type === 'cloud'}
+          aria-selected={sshConfig.connection_type === 'cloud'}
+          onclick={() => setConnectionType('cloud')}
+        >Cloud VM</button>
+      </div>
+
+      {#if sshConfig.connection_type === 'cloud'}
+        <div class="provider-row">
+          <span class="provider-label">Provider</span>
+          <select bind:value={sshConfig.cloud_provider}>
+            <option value="aws">Amazon Web Services (EC2)</option>
+            <option value="gcp">Google Cloud (Compute Engine)</option>
+            <option value="azure">Microsoft Azure (VM)</option>
+          </select>
+        </div>
+        <p class="conn-hint">
+          Create a VM in your cloud, then paste its public IP, login user, and
+          key file (.pem) below. Cloud VMs use key authentication.
+        </p>
+      {/if}
 
       <button
         class="verify-toggle"
@@ -433,6 +488,68 @@
   .badge.optional {
     color: var(--text-faint);
     border-color: var(--border-strong);
+  }
+
+  /* ── Connection type toggle (SSH vs Cloud) ─────────── */
+  .conn-toggle {
+    display: inline-flex;
+    gap: 4px;
+    margin: 0 0 14px 34px;
+    padding: 3px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .conn-tab {
+    padding: 6px 16px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    font-weight: 500;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s, color 0.15s;
+  }
+  .conn-tab:hover { color: var(--accent); }
+  .conn-tab.active {
+    background: var(--bg-card);
+    color: var(--accent);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  .provider-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 0 0 10px 34px;
+  }
+  .provider-label {
+    width: 100px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .provider-row select {
+    flex: 1;
+    padding: 7px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    font-size: 0.9rem;
+    background: var(--bg-card);
+    color: var(--text);
+    font-family: inherit;
+  }
+  .provider-row select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-light);
+  }
+  .conn-hint {
+    margin: 0 0 12px 34px;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    line-height: 1.5;
   }
 
   /* ── Verify toggle + command callout (inside SSH step) ─ */

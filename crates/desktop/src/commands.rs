@@ -90,8 +90,30 @@ pub struct SshConfigDto {
     #[serde(deserialize_with = "deserialize_port")]
     pub port: u16,
     pub user: String,
+    /// "password" | "key" | "agent". Defaults to "password" for backward
+    /// compatibility with older frontends that only sent a password.
+    #[serde(default = "default_auth_method")]
+    pub auth_method: String,
+    #[serde(default)]
     pub password: String,
+    /// Path to a private key file (e.g. a cloud VM's .pem) when auth_method is "key".
+    #[serde(default)]
+    pub key_path: String,
     pub repo_path: String,
+    /// "ssh" (self-managed server) or "cloud" (a cloud VM). UI-only; both use SSH.
+    #[serde(default = "default_connection_type")]
+    pub connection_type: String,
+    /// "aws" | "gcp" | "azure" when connection_type is "cloud".
+    #[serde(default)]
+    pub cloud_provider: String,
+}
+
+fn default_auth_method() -> String {
+    "password".to_string()
+}
+
+fn default_connection_type() -> String {
+    "ssh".to_string()
 }
 
 #[derive(Serialize)]
@@ -236,16 +258,26 @@ pub fn set_registry_url(url: String) -> Result<(), String> {
 #[tauri::command]
 pub fn get_ssh_config() -> SshConfigDto {
     let cfg = AppConfig::load();
-    let password = match &cfg.ssh_auth {
-        SshAuth::Password { password } => password.clone(),
-        _ => String::new(),
+    let (auth_method, password, key_path) = match &cfg.ssh_auth {
+        SshAuth::Password { password } => ("password".to_string(), password.clone(), String::new()),
+        SshAuth::Key { key_path } => ("key".to_string(), String::new(), key_path.clone()),
+        SshAuth::Agent => ("agent".to_string(), String::new(), String::new()),
+    };
+    let connection_type = if cfg.connection_type.is_empty() {
+        "ssh".to_string()
+    } else {
+        cfg.connection_type
     };
     SshConfigDto {
         host: cfg.ssh_host,
         port: cfg.ssh_port,
         user: cfg.ssh_user,
+        auth_method,
         password,
+        key_path,
         repo_path: cfg.repo_path,
+        connection_type,
+        cloud_provider: cfg.cloud_provider,
     }
 }
 
@@ -256,9 +288,17 @@ pub fn save_ssh_config(config: SshConfigDto) -> Result<(), String> {
     cfg.ssh_port = config.port;
     cfg.ssh_user = config.user;
     cfg.repo_path = config.repo_path;
-    cfg.ssh_auth = SshAuth::Password {
-        password: config.password,
+    cfg.ssh_auth = match config.auth_method.as_str() {
+        "key" => SshAuth::Key {
+            key_path: config.key_path,
+        },
+        "agent" => SshAuth::Agent,
+        _ => SshAuth::Password {
+            password: config.password,
+        },
     };
+    cfg.connection_type = config.connection_type;
+    cfg.cloud_provider = config.cloud_provider;
     cfg.save().map_err(|e| e.to_string())
 }
 

@@ -72,6 +72,14 @@ pub struct AppConfig {
     /// `mcp_port` when the preferred port was occupied.
     #[serde(default)]
     pub mcp_actual_port: Option<u16>,
+    /// How the analysis machine is reached: "ssh" (self-managed server) or
+    /// "cloud" (a VM in a cloud provider). Both use SSH under the hood; this
+    /// only drives the setup UI. Empty is treated as "ssh".
+    #[serde(default)]
+    pub connection_type: String,
+    /// Cloud provider when connection_type is "cloud": "aws" | "gcp" | "azure".
+    #[serde(default)]
+    pub cloud_provider: String,
 }
 
 fn default_registry_url() -> String {
@@ -134,6 +142,8 @@ impl Default for AppConfig {
             plugins_dir: default_plugins_dir(),
             mcp_port: DEFAULT_MCP_PORT,
             mcp_actual_port: None,
+            connection_type: String::new(),
+            cloud_provider: String::new(),
         }
     }
 }

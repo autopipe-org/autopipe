@@ -3,8 +3,12 @@
     host: string;
     port: number;
     user: string;
+    auth_method: string; // 'password' | 'key'
     password: string;
+    key_path: string;
     repo_path: string;
+    connection_type: string;
+    cloud_provider: string;
   };
 
   let { config = $bindable() }: { config: SshConfig } = $props();
@@ -13,7 +17,7 @@
 <div class="form">
   <label>
     <span>Host</span>
-    <input bind:value={config.host} placeholder="e.g. 127.0.0.1" />
+    <input bind:value={config.host} placeholder="e.g. 127.0.0.1 or a cloud VM public IP" />
   </label>
   <label>
     <span>Port</span>
@@ -26,12 +30,32 @@
   </label>
   <label>
     <span>User</span>
-    <input bind:value={config.user} />
+    <input bind:value={config.user} placeholder="e.g. ubuntu, ec2-user" />
   </label>
   <label>
-    <span>Password</span>
-    <input type="password" bind:value={config.password} />
+    <span>Auth</span>
+    <div class="auth-choice">
+      <label class="radio">
+        <input type="radio" bind:group={config.auth_method} value="password" />
+        Password
+      </label>
+      <label class="radio">
+        <input type="radio" bind:group={config.auth_method} value="key" />
+        SSH key
+      </label>
+    </div>
   </label>
+  {#if config.auth_method === 'key'}
+    <label>
+      <span>Key file</span>
+      <input bind:value={config.key_path} placeholder="e.g. ~/.ssh/my-vm.pem" />
+    </label>
+  {:else}
+    <label>
+      <span>Password</span>
+      <input type="password" bind:value={config.password} />
+    </label>
+  {/if}
   <label>
     <span>Repo path</span>
     <input bind:value={config.repo_path} placeholder="/home/<user>/autopipe" />
@@ -65,5 +89,24 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-light);
+  }
+  .auth-choice {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+  .radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.88rem;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .radio > input {
+    width: auto;
+    padding: 0;
+    margin: 0;
+    accent-color: var(--accent);
   }
 </style>

@@ -272,11 +272,6 @@
 							<a href="{downloadUrl}/macOS/AutoPipe-{version}-macos-x64.dmg" class="btn-sm">Download for Intel</a>
 						</div>
 						<p class="hint">Drag <strong>AutoPipe.app</strong> into the Applications folder.</p>
-
-						<div class="security-note">
-							<p>macOS may block the app the first time you open it ("unidentified developer"). Allow it once with this Terminal command:</p>
-							<div class="code-block">xattr -cr /Applications/AutoPipe.app</div>
-						</div>
 					{:else if clientOs === 'windows'}
 						<p>Install the Autopipe desktop app from the <strong>Microsoft Store</strong>.</p>
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
