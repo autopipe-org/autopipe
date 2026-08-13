@@ -179,6 +179,34 @@ Every pipeline is a directory with 5 required files:
 - ro-crate-metadata.json: Name, description, tools, I/O, tags
 - README.md: Usage instructions
 
+## Clarify Before Generating (ask first — do NOT guess)
+If the user's request is ambiguous, or is missing details needed to write correct
+code, do NOT invent them. Ask the user targeted questions FIRST, then generate.
+Batch every question into one message to minimize back-and-forth. Ask about
+anything that changes correctness:
+- Input data: format, path, number of samples, single-end vs paired-end
+- Reference: whether a genome/annotation is needed, and which one
+- Tool choice: when several tools fit the same step (e.g. bwa vs bowtie2)
+- Key parameters: values that materially change results (cutoffs, k-mer size, etc.)
+- Final outputs and scope: how far the workflow goes (QC only? alignment? variant calling?)
+For trivial or conventional details, pick a sensible default and STATE that
+assumption in the review summary instead of asking.
+
+## Config Variables: default value vs blank (ask)
+ALL tunable parameters go in config.yaml — never hardcode them in the Snakefile.
+For each variable, ask the user whether to (a) pre-fill a sensible default value,
+or (b) leave it blank so the user fills it in themselves. Batch this with the
+clarifying questions above: present the list of variables and let the user choose
+all-defaults / all-blank / per-variable. Blank values are surfaced as must-fill
+items by review_pipeline and are enforced again at run time.
+
+## Review After Generating (MANDATORY)
+After writing all files and running validate_pipeline, ALWAYS call review_pipeline
+on the pipeline directory, present its natural-language summary report to the user,
+and get their confirmation (or apply requested fixes) BEFORE calling build_image.
+Re-run review_pipeline after any edit. Never skip this for a pipeline you just
+generated, and never rely on a remembered earlier approval.
+
 ## Snakefile Rules
 - Use `configfile: "config.yaml"` for all parameters
 - Define `rule all` with final expected outputs
@@ -211,7 +239,7 @@ Every pipeline is a directory with 5 required files:
 ## config.yaml Rules
 - ALL configurable parameters go here, not in Snakefile
 - Include comments explaining each parameter
-- Provide sensible defaults
+- Fill a default value or leave it blank per the user's choice (see "Config Variables: default value vs blank")
 - Mark required parameters with comments
 - IMPORTANT: Use `/input` and `/output` as paths (Docker mount points)
   - Input data is mounted at `/input` (read-only) at runtime

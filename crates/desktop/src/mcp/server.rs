@@ -8,6 +8,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use crate::config::{AppConfig, DEFAULT_MCP_PORT, MCP_PORT_FALLBACK_RANGE};
@@ -430,6 +431,239 @@ pub(crate) fn is_code_review_target(path: &str) -> bool {
     ];
     EXTS.iter().any(|e| lower.ends_with(e))
 }
+
+// ── Deterministic pipeline-review checks ────────────────────────────
+//
+// These produce *factual* anchors (with file:line where possible) that the
+// calling AI must cite in its natural-language summary. They are intentionally
+// conservative: high-signal, low-false-positive checks only. Semantic/logic
+// review is left to the AI reading the full source.
+
+/// A single deterministic finding with an optional file:line anchor.
+pub(crate) struct ReviewFinding {
+    /// "issue" (likely wrong), "to-fill" (blank value the user must set),
+    /// or "note" (advisory).
+    pub severity: &'static str,
+    pub file: String,
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+/// Parse a simple `key: value` YAML line. Returns (indent, key, value) or None
+/// for blank lines, comments, and list items. Naive on purpose — enough to
+/// enumerate top-level/nested scalar keys and spot blank values.
+pub(crate) fn parse_yaml_line(line: &str) -> Option<(usize, String, String)> {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('-') {
+        return None;
+    }
+    let indent = line.len() - trimmed.len();
+    let colon = trimmed.find(':')?;
+    let key = trimmed[..colon].trim();
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return None;
+    }
+    let mut val = trimmed[colon + 1..].trim().to_string();
+    // Strip a trailing " # comment" (naive; good enough for scalars).
+    if let Some(pos) = val.find(" #") {
+        val = val[..pos].trim().to_string();
+    }
+    Some((indent, key.to_string(), val))
+}
+
+/// Extract config keys referenced as `config["X"]` / `config.get("X"` on a
+/// single line (top-level key only — nested `["a"]["b"]` yields "a").
+pub(crate) fn scan_config_refs(line: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for pat in ["config[", "config.get("] {
+        let mut start = 0usize;
+        while let Some(idx) = line[start..].find(pat) {
+            let after = start + idx + pat.len();
+            let rest = &line[after..];
+            if let Some(qpos) = rest.find(['"', '\'']) {
+                let q = rest.as_bytes()[qpos] as char;
+                let key_start = qpos + 1;
+                if let Some(qend) = rest[key_start..].find(q) {
+                    let key = &rest[key_start..key_start + qend];
+                    if !key.is_empty() {
+                        keys.push(key.to_string());
+                    }
+                }
+            }
+            start = after;
+        }
+    }
+    keys
+}
+
+/// Detect a hardcoded absolute host path prefix at a real path boundary.
+/// Only flags user/home roots that should never appear in a containerized
+/// pipeline (mount points /input, /output, /pipeline are the correct forms).
+pub(crate) fn hardcoded_host_prefix(line: &str) -> Option<&'static str> {
+    const PREFIXES: &[&str] = &["/home/", "/Users/", "/root/"];
+    for p in PREFIXES {
+        if let Some(pos) = line.find(p) {
+            let ok_before = pos == 0
+                || line[..pos]
+                    .chars()
+                    .last()
+                    .map(|c| !(c.is_ascii_alphanumeric() || c == '/'))
+                    .unwrap_or(true);
+            if ok_before {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// Run all deterministic checks over the pipeline's (relpath, content) files.
+pub(crate) fn review_checks(files: &[(String, String, bool)]) -> Vec<ReviewFinding> {
+    let mut findings = Vec::new();
+    let get = |name: &str| {
+        files
+            .iter()
+            .find(|(r, _, _)| r.eq_ignore_ascii_case(name))
+            .map(|(_, c, _)| c.as_str())
+    };
+
+    // 1. Required files present.
+    for req in [
+        "Snakefile",
+        "Dockerfile",
+        "config.yaml",
+        "ro-crate-metadata.json",
+        "README.md",
+    ] {
+        if !files.iter().any(|(r, _, _)| r.eq_ignore_ascii_case(req)) {
+            findings.push(ReviewFinding {
+                severity: "issue",
+                file: req.to_string(),
+                line: None,
+                message: format!("Required file '{}' is missing.", req),
+            });
+        }
+    }
+
+    // 2. Snakefile has a target rule.
+    if let Some(snake) = get("Snakefile") {
+        if !snake.contains("rule all") {
+            findings.push(ReviewFinding {
+                severity: "issue",
+                file: "Snakefile".into(),
+                line: None,
+                message: "No `rule all` found — Snakemake needs a target rule defining final outputs.".into(),
+            });
+        }
+    }
+
+    // 3. config.yaml: collect defined keys + flag blank scalar values.
+    let mut defined: HashSet<String> = HashSet::new();
+    if let Some(cfg) = get("config.yaml") {
+        let lines: Vec<&str> = cfg.lines().collect();
+        for (i, l) in lines.iter().enumerate() {
+            if let Some((indent, key, val)) = parse_yaml_line(l) {
+                defined.insert(key.clone());
+                let is_blank = matches!(val.as_str(), "" | "\"\"" | "''" | "null" | "~");
+                if is_blank {
+                    // A blank value with more-indented children is a parent
+                    // mapping, not a missing scalar — skip those.
+                    let mut is_parent = false;
+                    for nxt in lines.iter().skip(i + 1) {
+                        let t = nxt.trim();
+                        if t.is_empty() || t.starts_with('#') {
+                            continue;
+                        }
+                        let ni = nxt.len() - nxt.trim_start().len();
+                        if ni > indent || t.starts_with('-') {
+                            is_parent = true;
+                        }
+                        break;
+                    }
+                    if !is_parent {
+                        findings.push(ReviewFinding {
+                            severity: "to-fill",
+                            file: "config.yaml".into(),
+                            line: Some(i + 1),
+                            message: format!(
+                                "`{}` has no value — the user must fill this before running.",
+                                key
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Snakefile references a config key that config.yaml never defines.
+    if let Some(snake) = get("Snakefile") {
+        for (i, line) in snake.lines().enumerate() {
+            for key in scan_config_refs(line) {
+                if !defined.contains(&key) {
+                    findings.push(ReviewFinding {
+                        severity: "issue",
+                        file: "Snakefile".into(),
+                        line: Some(i + 1),
+                        message: format!(
+                            "References config[\"{}\"] but config.yaml has no `{}` key.",
+                            key, key
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    // 5. Hardcoded absolute host paths in code files (advisory).
+    for (rel, content, _) in files {
+        let low = rel.to_lowercase();
+        let is_code = low.ends_with("snakefile")
+            || low.ends_with("dockerfile")
+            || low.ends_with(".py")
+            || low.ends_with(".sh")
+            || low.ends_with(".r");
+        if !is_code {
+            continue;
+        }
+        for (i, line) in content.lines().enumerate() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            if let Some(p) = hardcoded_host_prefix(line) {
+                findings.push(ReviewFinding {
+                    severity: "note",
+                    file: rel.clone(),
+                    line: Some(i + 1),
+                    message: format!(
+                        "Hardcoded host path starting `{}` — pipelines should use /input, /output, /pipeline mount points.",
+                        p
+                    ),
+                });
+            }
+        }
+    }
+
+    findings
+}
+
+/// Instruction footer appended to `review_pipeline` output. Tells the calling
+/// AI exactly how to turn the code dump + checks into a user-facing summary.
+pub(crate) const REVIEW_INSTRUCTIONS: &str = "\n=== INSTRUCTIONS FOR AI ===\n\
+Produce a natural-language PIPELINE SUMMARY REPORT for the user, in THEIR chat language, using exactly this skeleton:\n\
+1. One-line summary — what the pipeline does.\n\
+2. Inputs — data/files it needs (from config.yaml and rule inputs).\n\
+3. Steps (in order) — for each rule: what tool runs, input -> output.\n\
+4. Outputs — final products (rule all targets).\n\
+5. Tools & versions — from the Dockerfile.\n\
+6. Config values — each key and its current value; mark blank ones the user must fill.\n\
+7. Checks — list EVERY deterministic finding above, plus any logic problems you find yourself in the code. For each item you MUST cite file:line and quote the offending snippet.\n\
+Rules: describe ONLY what is present in the code above — do not invent rules, tools, or files. If something is unclear, or a file was truncated or omitted, say so explicitly instead of guessing. Every finding in section 7 must point to a real file:line.\n\
+After presenting the report, ask the user to confirm or request changes BEFORE building or executing (e.g. 'Proceed to build, or should I fix anything?'). For a freshly GENERATED pipeline, always show this report and get confirmation before build_image. Re-run this review after any edit — never rely on a remembered earlier approval.";
 
 /// Fetch every reviewable source/config file (see `is_code_review_target`)
 /// from the pipeline's GitHub directory and assemble a single textual dump
@@ -1176,8 +1410,11 @@ impl AutoPipeServer {
 
         let file_count = file_list.lines().count();
         Ok(CallToolResult::success(vec![Content::text(format!(
-            "Downloaded pipeline '{}' to {} (remote server)\nFiles ({}):\n{}",
-            pipeline.name, dir, file_count, file_list
+            "Downloaded pipeline '{}' to {} (remote server)\nFiles ({}):\n{}\n\n\
+             NEXT — offer a summary (optional): ask the user, in their language, whether they want a detailed summary of what this pipeline does and how it is structured. \
+             If yes, call review_pipeline with pipeline_dir='{}' and present the summary per that tool's instructions. \
+             If no, continue without it. (The mandatory security review already ran before download; this summary is a separate, optional correctness/understanding aid.)",
+            pipeline.name, dir, file_count, file_list, dir
         ))]))
     }
 
@@ -2250,9 +2487,146 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
+    #[tool(description = "Read a pipeline's FULL source on the remote server (line-numbered) plus deterministic consistency checks, so you can give the user a natural-language SUMMARY REPORT of what the pipeline does and whether the code looks correct. The summary is written by YOU from the returned code — this tool does not call an LLM; it just gathers every code/config file and runs static checks so your summary is complete and grounded. WHEN TO USE: (1) after GENERATING a pipeline (once files are written and validate_pipeline passes) — ALWAYS call this, present the summary, and get the user's confirmation before build_image; (2) after DOWNLOADING a pipeline — only when the user asked for a detailed summary. Follow the INSTRUCTIONS block in the result exactly: cite file:line for every issue, describe only what is in the code, note any assumptions, and ask the user to confirm or request fixes before proceeding.")]
+    async fn review_pipeline(
+        &self,
+        Parameters(params): Parameters<PipelineDirParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let dir = windows_to_wsl(&params.pipeline_dir);
+        let dir = dir.trim_end_matches('/').to_string();
+
+        // 1. List every file under the pipeline dir (skip .git internals).
+        let list_cmd = format!(
+            "find '{}' -type f -not -path '*/.git/*'",
+            shell_escape(&dir)
+        );
+        let listing = match self.ssh_run(&list_cmd).await {
+            Ok((out, 0)) => out,
+            Ok((out, _)) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot list pipeline directory '{}': {}",
+                    dir,
+                    out.trim()
+                ))]));
+            }
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "SSH error while listing '{}': {}",
+                    dir, e
+                ))]));
+            }
+        };
+
+        // 2. Keep only reviewable source/config files, as relative paths.
+        let prefix = format!("{}/", dir);
+        let mut rel_paths: Vec<String> = listing
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .filter_map(|abs| abs.strip_prefix(&prefix).map(|r| r.to_string()))
+            .filter(|rel| is_code_review_target(rel))
+            .collect();
+        rel_paths.sort();
+
+        if rel_paths.is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "No reviewable source files found in '{}'. Check the path is a pipeline directory.",
+                dir
+            ))]));
+        }
+
+        // 3. Read each file, enforcing per-file and total size caps so a huge
+        //    script can't blow up the context. (relpath, content, truncated)
+        const PER_FILE_CAP: usize = 40_000;
+        const TOTAL_CAP: usize = 200_000;
+        let mut total: usize = 0;
+        let mut files: Vec<(String, String, bool)> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for rel in &rel_paths {
+            if total >= TOTAL_CAP {
+                skipped.push(rel.clone());
+                continue;
+            }
+            let abs = format!("{}/{}", dir, rel);
+            let content = match self.ssh_read_file(&abs).await {
+                Ok(c) => c,
+                Err(_) => {
+                    skipped.push(rel.clone());
+                    continue;
+                }
+            };
+            let mut truncated = false;
+            let mut body = content;
+            if body.len() > PER_FILE_CAP {
+                let mut cut = PER_FILE_CAP;
+                while cut > 0 && !body.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                body.truncate(cut);
+                truncated = true;
+            }
+            total += body.len();
+            files.push((rel.clone(), body, truncated));
+        }
+
+        // 4. Deterministic checks (facts with file:line anchors).
+        let findings = review_checks(&files);
+
+        // 5. Assemble: checks summary + line-numbered source dump + instructions.
+        let mut out = String::new();
+        out.push_str(&format!(
+            "PIPELINE REVIEW — {} ({} file{})\n\n",
+            dir,
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        ));
+
+        out.push_str("=== DETERMINISTIC CHECKS (facts to anchor your report; cite these with file:line) ===\n");
+        if findings.is_empty() {
+            out.push_str("No structural problems found by static checks. Still read the code below and summarize the actual logic.\n");
+        } else {
+            for f in &findings {
+                let loc = match f.line {
+                    Some(n) => format!("{}:{}", f.file, n),
+                    None => f.file.clone(),
+                };
+                let tag = match f.severity {
+                    "issue" => "ISSUE",
+                    "to-fill" => "TO-FILL",
+                    _ => "NOTE",
+                };
+                out.push_str(&format!("[{}] {} — {}\n", tag, loc, f.message));
+            }
+        }
+        out.push('\n');
+
+        if !skipped.is_empty() {
+            out.push_str(&format!(
+                "NOTE: {} file(s) not shown (unreadable or size cap reached): {}\n\n",
+                skipped.len(),
+                skipped.join(", ")
+            ));
+        }
+
+        out.push_str("=== SOURCE CODE (line-numbered) ===\n");
+        for (rel, content, truncated) in &files {
+            out.push_str(&format!("\n----- {} -----\n", rel));
+            for (i, line) in content.lines().enumerate() {
+                out.push_str(&format!("{:>4}  {}\n", i + 1, line));
+            }
+            if *truncated {
+                out.push_str("... [truncated — file exceeds the per-file size cap] ...\n");
+            }
+        }
+
+        out.push_str(REVIEW_INSTRUCTIONS);
+
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry. Multi-client note: do not start two builds for the same image_name from different AI clients at once.")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry. Multi-client note: do not start two builds for the same image_name from different AI clients at once. REVIEW GATE: if this pipeline was just GENERATED, you MUST have already run review_pipeline, presented the summary, and gotten the user's confirmation before building — if you have not, do that first.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
@@ -2423,7 +2797,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         result
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. BEFORE running, briefly recap the config.yaml values relevant to the step the user is about to run (one short line each: current value plus a few words). If the pipeline runs in stages and the user is running only a later or optional stage, recap ONLY that stage's values, not the ones already used by earlier stages; if the stages are not clearly separable, recap all configurable values. Then check required values: if any required config value is still blank, do NOT run. If you can derive a sensible value from the config or context, propose it, explain where it comes from, and ask whether to fill it in and run; if you cannot derive one, ask the user to provide it. Never fill a required value on your own without the user's confirmation — run only after the user confirms.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. BEFORE running, briefly recap the config.yaml values relevant to the step the user is about to run (one short line each: current value plus a few words). If the pipeline runs in stages and the user is running only a later or optional stage, recap ONLY that stage's values, not the ones already used by earlier stages; if the stages are not clearly separable, recap all configurable values. Then check required values: if any required config value is still blank, do NOT run. If you can derive a sensible value from the config or context, propose it, explain where it comes from, and ask whether to fill it in and run; if you cannot derive one, ask the user to provide it. Never fill a required value on your own without the user's confirmation — run only after the user confirms. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
