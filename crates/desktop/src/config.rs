@@ -90,6 +90,15 @@ pub struct AppConfig {
     /// Selected S3 bucket for pipeline input/output.
     #[serde(default)]
     pub aws_bucket: String,
+    /// AutoPipe-managed EC2 VM state (Phase 2).
+    #[serde(default)]
+    pub aws_instance_id: String,
+    #[serde(default)]
+    pub aws_sg_id: String,
+    #[serde(default)]
+    pub aws_key_name: String,
+    #[serde(default)]
+    pub aws_instance_type: String,
 }
 
 fn default_registry_url() -> String {
@@ -158,6 +167,10 @@ impl Default for AppConfig {
             aws_secret_key: String::new(),
             aws_region: String::new(),
             aws_bucket: String::new(),
+            aws_instance_id: String::new(),
+            aws_sg_id: String::new(),
+            aws_key_name: String::new(),
+            aws_instance_type: String::new(),
         }
     }
 }

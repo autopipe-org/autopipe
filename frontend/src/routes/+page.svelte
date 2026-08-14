@@ -104,6 +104,40 @@
     }
   }
 
+  // ── AWS VM provisioning (Phase 2) ──
+  let awsVm = $state<{ provisioned: boolean; instance_id: string; host: string }>({
+    provisioned: false,
+    instance_id: '',
+    host: '',
+  });
+  let awsVmBusy = $state(false);
+
+  async function awsProvision() {
+    awsVmBusy = true;
+    try {
+      const r = await invoke<{ instance_id: string; public_ip: string }>('aws_provision');
+      awsVm = { provisioned: true, instance_id: r.instance_id, host: r.public_ip };
+      showToast('ok', `VM ready: ${r.instance_id} (${r.public_ip}). Click Save and Register to use it.`);
+    } catch (e) {
+      showToast('err', `Provision failed: ${e}`);
+    } finally {
+      awsVmBusy = false;
+    }
+  }
+
+  async function awsTerminate() {
+    awsVmBusy = true;
+    try {
+      await invoke('aws_teardown');
+      awsVm = { provisioned: false, instance_id: '', host: '' };
+      showToast('ok', 'VM terminated.');
+    } catch (e) {
+      showToast('err', `Terminate failed: ${e}`);
+    } finally {
+      awsVmBusy = false;
+    }
+  }
+
   let githubUsername = $state<string | null>(null);
   let busy = $state(false);
   let toast = $state<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
@@ -129,6 +163,9 @@
       if (a.region) awsRegion = a.region;
       awsBucket = a.bucket ?? '';
       awsHasCreds = a.has_credentials;
+    } catch {}
+    try {
+      awsVm = await invoke<{ provisioned: boolean; instance_id: string; host: string }>('aws_vm_status');
     } catch {}
     try { githubUsername = await invoke<string | null>('get_github_username'); } catch {}
     await listen<string | null>('github-login-complete', (event) => {
@@ -272,54 +309,64 @@
       {#if sshConfig.connection_type === 'cloud'}
         <div class="provider-row">
           <span class="provider-label">Provider</span>
-          <select bind:value={sshConfig.cloud_provider}>
+          <select class="ap-select" bind:value={sshConfig.cloud_provider}>
             <option value="aws">Amazon Web Services (EC2)</option>
             <option value="gcp">Google Cloud (Compute Engine)</option>
             <option value="azure">Microsoft Azure (VM)</option>
           </select>
         </div>
-        {#if sshConfig.cloud_provider === 'aws'}
-          <div class="aws-card">
-            <div class="aws-head">
-              <span class="aws-title">AWS account</span>
-              {#if awsAccount}
-                <span class="aws-badge ok">Connected · {awsAccount}</span>
-              {:else if awsHasCreds}
-                <span class="aws-badge">Saved — click Connect to verify</span>
-              {/if}
-            </div>
-            <div class="aws-form">
-              <label><span>Access Key ID</span><input bind:value={awsAccessKey} placeholder="AKIA…" /></label>
-              <label>
-                <span>Secret Access Key</span>
-                <input type="password" bind:value={awsSecretKey} placeholder={awsHasCreds ? '•••••• (saved)' : ''} />
-              </label>
-              <label>
-                <span>Region</span>
-                <select class="aws-select" bind:value={awsRegion}>
-                  {#each AWS_REGIONS as g}
-                    <optgroup label={g.group}>
-                      {#each g.items as [code, name]}
-                        <option value={code}>{name} ({code})</option>
-                      {/each}
-                    </optgroup>
-                  {/each}
-                </select>
-              </label>
-            </div>
-            <div class="aws-row">
-              <button class="btn-outline small" disabled={awsBusy} onclick={awsConnect}>
-                {awsBusy ? 'Connecting…' : 'Connect'}
-              </button>
-              <span class="aws-bucket-label">S3 bucket</span>
+      {/if}
+
+      {#if sshConfig.connection_type === 'cloud' && sshConfig.cloud_provider === 'aws'}
+        <div class="aws-card">
+          <div class="aws-head">
+            <span class="aws-title">AWS account</span>
+            {#if awsAccount}
+              <span class="aws-badge ok">Connected · {awsAccount}</span>
+            {:else if awsHasCreds}
+              <span class="aws-badge">Saved — click Connect to verify</span>
+            {/if}
+          </div>
+          <div class="aws-form">
+            <label><span>Access Key ID</span><input bind:value={awsAccessKey} placeholder="AKIA…" /></label>
+            <label>
+              <span>Secret Access Key</span>
+              <input type="password" bind:value={awsSecretKey} placeholder={awsHasCreds ? '•••••• (saved)' : ''} />
+            </label>
+            <label>
+              <span>Region</span>
+              <select class="ap-select" bind:value={awsRegion}>
+                {#each AWS_REGIONS as g}
+                  <optgroup label={g.group}>
+                    {#each g.items as [code, name]}
+                      <option value={code}>{name} ({code})</option>
+                    {/each}
+                  </optgroup>
+                {/each}
+              </select>
+            </label>
+          </div>
+          <p class="aws-hint">Pick the same region as your S3 bucket — your VM is created there.</p>
+          <div class="aws-actions">
+            <button class="btn-outline small" disabled={awsBusy} onclick={awsConnect}>
+              {awsBusy ? 'Connecting…' : 'Connect'}
+            </button>
+          </div>
+        </div>
+
+        <div class="aws-card">
+          <div class="aws-head"><span class="aws-title">S3 bucket</span></div>
+          <div class="aws-form">
+            <label>
+              <span>Bucket</span>
               <select
-                class="aws-select"
+                class="ap-select"
                 bind:value={awsBucket}
                 onchange={(e) => awsSelectBucket((e.currentTarget as HTMLSelectElement).value)}
                 disabled={awsBuckets.length === 0}
               >
                 {#if awsBuckets.length === 0}
-                  <option value={awsBucket}>{awsBucket || (awsAccount ? '(no buckets — create one in S3, then Refresh)' : '(connect to list buckets)')}</option>
+                  <option value={awsBucket}>{awsBucket || (awsAccount ? '(no buckets — create one in S3, then Refresh)' : '(connect first to list buckets)')}</option>
                 {:else}
                   <option value="">— select —</option>
                   {#each awsBuckets as b}
@@ -327,53 +374,86 @@
                   {/each}
                 {/if}
               </select>
-              <button class="btn-outline small" disabled={awsBusy} onclick={awsLoadBuckets}>Refresh</button>
-            </div>
-            <p class="aws-note">
-              Phase 1: verifies your AWS credentials and lists your S3 buckets.
-              Automatic VM provisioning &amp; S3-mounted execution come in the next update.
-            </p>
+            </label>
           </div>
-        {:else}
+          <div class="aws-actions">
+            <button class="btn-outline small" disabled={awsBusy} onclick={awsLoadBuckets}>Refresh</button>
+          </div>
+        </div>
+
+        <div class="aws-card">
+          <div class="aws-head">
+            <span class="aws-title">VM (EC2)</span>
+            {#if awsVm.provisioned}
+              <span class="aws-badge ok">Running · {awsVm.host}</span>
+            {/if}
+          </div>
+          {#if awsVm.provisioned}
+            <p class="aws-hint">
+              Instance {awsVm.instance_id} at {awsVm.host}. The SSH connection is auto-filled —
+              click <strong>Save and Register</strong> below, then use it from your AI app.
+            </p>
+            <div class="aws-actions">
+              <button class="btn-outline small" disabled={awsVmBusy} onclick={awsTerminate}>
+                {awsVmBusy ? 'Working…' : 'Terminate VM'}
+              </button>
+            </div>
+          {:else}
+            <p class="aws-hint">
+              Creates an EC2 VM in your account, auto-installs Docker/Git/rclone, and fills in
+              the SSH connection. Takes ~2–4 min. ⚠️ Incurs AWS charges while running — terminate when done.
+            </p>
+            <div class="aws-actions">
+              <button
+                class="btn-primary small"
+                disabled={awsVmBusy || (!awsAccount && !awsHasCreds)}
+                onclick={awsProvision}
+              >
+                {awsVmBusy ? 'Provisioning… (2–4 min)' : 'Provision VM'}
+              </button>
+            </div>
+          {/if}
+        </div>
+      {:else}
+        {#if sshConfig.connection_type === 'cloud'}
           <p class="conn-hint">
             Create a VM in your cloud, then paste its public IP, login user, and
             key file (.pem) below. Cloud VMs use key authentication.
           </p>
         {/if}
-      {/if}
-
-      <button
-        class="verify-toggle"
-        onclick={() => (showVerify = !showVerify)}
-        aria-expanded={showVerify}
-      >
-        <span class="chevron" class:open={showVerify}>▸</span>
-        To install everything AutoPipe needs on that machine, or if you're
-        not sure what values to enter below, click here.
-      </button>
-      {#if showVerify}
-        <div class="cmd-box">
-          <p>
-            Run this on the analysis machine (per-OS instructions:
-            <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
-              autopipe.org/getting-started</a>):
-          </p>
-          <div class="cmd-row">
-            <code>curl -fsSL https://download.autopipe.org/setup.sh | bash</code>
-            <button
-              class="ghost small"
-              onclick={() => {
-                navigator.clipboard.writeText(
-                  'curl -fsSL https://download.autopipe.org/setup.sh | bash'
-                );
-                showToast('ok', 'Command copied.');
-              }}
-            >Copy</button>
+        <button
+          class="verify-toggle"
+          onclick={() => (showVerify = !showVerify)}
+          aria-expanded={showVerify}
+        >
+          <span class="chevron" class:open={showVerify}>▸</span>
+          To install everything AutoPipe needs on that machine, or if you're
+          not sure what values to enter below, click here.
+        </button>
+        {#if showVerify}
+          <div class="cmd-box">
+            <p>
+              Run this on the analysis machine (per-OS instructions:
+              <a href="#" onclick={(e) => { e.preventDefault(); openDocs(); }}>
+                autopipe.org/getting-started</a>):
+            </p>
+            <div class="cmd-row">
+              <code>curl -fsSL https://download.autopipe.org/setup.sh | bash</code>
+              <button
+                class="ghost small"
+                onclick={() => {
+                  navigator.clipboard.writeText(
+                    'curl -fsSL https://download.autopipe.org/setup.sh | bash'
+                  );
+                  showToast('ok', 'Command copied.');
+                }}
+              >Copy</button>
+            </div>
           </div>
-        </div>
-      {/if}
+        {/if}
 
-      <SshSection bind:config={sshConfig} />
+        <SshSection bind:config={sshConfig} />
+      {/if}
     </section>
 
     <section class="step">
@@ -656,21 +736,32 @@
     color: var(--text-muted);
     font-weight: 500;
   }
-  .provider-row select {
-    flex: 1;
-    padding: 7px 10px;
+  .provider-row .ap-select { flex: 1; }
+
+  /* App-styled dropdown: custom chevron, matches the text inputs. */
+  .ap-select {
+    box-sizing: border-box;
+    width: 100%;
+    appearance: none;
+    -webkit-appearance: none;
+    padding: 7px 32px 7px 10px;
     border: 1px solid var(--border-strong);
     border-radius: 5px;
     font-size: 0.9rem;
-    background: var(--bg-card);
+    background-color: var(--bg-card);
     color: var(--text);
     font-family: inherit;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    cursor: pointer;
   }
-  .provider-row select:focus {
+  .ap-select:focus {
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-light);
   }
+  .ap-select:disabled { opacity: 0.6; cursor: default; }
   .conn-hint {
     margin: 0 0 12px 34px;
     font-size: 0.82rem;
@@ -722,8 +813,9 @@
     color: var(--text-muted);
     font-weight: 500;
   }
-  .aws-form input,
-  .aws-select {
+  .aws-form input {
+    box-sizing: border-box;
+    width: 100%;
     padding: 7px 10px;
     border: 1px solid var(--border-strong);
     border-radius: 5px;
@@ -732,35 +824,28 @@
     color: var(--text);
     font-family: inherit;
   }
-  .aws-form input:focus,
-  .aws-select:focus {
+  .aws-form input:focus {
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-light);
   }
-  .aws-row {
+  .aws-hint {
+    margin: 8px 0 0;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .aws-actions {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-top: 12px;
     flex-wrap: wrap;
+    margin-top: 12px;
   }
-  .aws-bucket-label {
-    font-size: 0.83rem;
-    color: var(--text-muted);
-    font-weight: 500;
-    margin-left: 6px;
-  }
-  .aws-select { flex: 1; min-width: 160px; }
-  .btn-outline.small {
+  .btn-outline.small,
+  .btn-primary.small {
     padding: 6px 14px;
     font-size: 0.82rem;
-  }
-  .aws-note {
-    margin: 12px 0 0;
-    font-size: 0.78rem;
-    color: var(--text-faint);
-    line-height: 1.5;
   }
 
   /* ── Verify toggle + command callout (inside SSH step) ─ */

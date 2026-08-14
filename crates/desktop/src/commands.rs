@@ -364,6 +364,103 @@ pub fn aws_get_config() -> AwsConfigDto {
     }
 }
 
+#[derive(Serialize)]
+pub struct AwsVmDto {
+    pub instance_id: String,
+    pub public_ip: String,
+}
+
+/// Provision an EC2 VM in the user's account (Phase 2): create it with the
+/// install user-data, wait until reachable, then auto-fill the SSH connection.
+#[tauri::command]
+pub async fn aws_provision() -> Result<AwsVmDto, String> {
+    let cfg = AppConfig::load();
+    if cfg.aws_access_key.is_empty() {
+        return Err("Connect your AWS account first.".into());
+    }
+    let instance_type = if cfg.aws_instance_type.is_empty() {
+        "t3.small".to_string()
+    } else {
+        cfg.aws_instance_type.clone()
+    };
+    let key_dir = AppConfig::config_path()
+        .parent()
+        .map(|p| p.join("keys").to_string_lossy().to_string())
+        .unwrap_or_else(|| "keys".to_string());
+
+    let res = crate::aws::provision_vm(
+        &cfg.aws_access_key,
+        &cfg.aws_secret_key,
+        &cfg.aws_region,
+        &instance_type,
+        &key_dir,
+    )
+    .await?;
+
+    // Persist managed state and auto-fill the SSH connection to the new VM.
+    let mut cfg = AppConfig::load();
+    cfg.aws_instance_id = res.instance_id.clone();
+    cfg.aws_sg_id = res.sg_id.clone();
+    cfg.aws_key_name = res.key_name.clone();
+    cfg.aws_instance_type = instance_type;
+    cfg.ssh_host = res.public_ip.clone();
+    cfg.ssh_port = 22;
+    cfg.ssh_user = "ubuntu".to_string();
+    cfg.ssh_auth = SshAuth::Key {
+        key_path: res.key_path.clone(),
+    };
+    if cfg.repo_path.trim().is_empty() {
+        cfg.repo_path = "/home/ubuntu/autopipe".to_string();
+    }
+    cfg.save().map_err(|e| e.to_string())?;
+
+    Ok(AwsVmDto {
+        instance_id: res.instance_id,
+        public_ip: res.public_ip,
+    })
+}
+
+/// Terminate the managed VM (deletes it + its disk) and clear its saved state.
+#[tauri::command]
+pub async fn aws_teardown() -> Result<(), String> {
+    let cfg = AppConfig::load();
+    if cfg.aws_instance_id.is_empty() {
+        return Err("No AutoPipe-managed VM to terminate.".into());
+    }
+    crate::aws::terminate_vm(
+        &cfg.aws_access_key,
+        &cfg.aws_secret_key,
+        &cfg.aws_region,
+        &cfg.aws_instance_id,
+        &cfg.aws_sg_id,
+        &cfg.aws_key_name,
+    )
+    .await?;
+    let mut cfg = AppConfig::load();
+    cfg.aws_instance_id = String::new();
+    cfg.aws_sg_id = String::new();
+    cfg.aws_key_name = String::new();
+    cfg.save().map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct AwsVmStatusDto {
+    pub provisioned: bool,
+    pub instance_id: String,
+    pub host: String,
+}
+
+/// Whether an AutoPipe-managed VM currently exists (for restoring UI state).
+#[tauri::command]
+pub fn aws_vm_status() -> AwsVmStatusDto {
+    let cfg = AppConfig::load();
+    AwsVmStatusDto {
+        provisioned: !cfg.aws_instance_id.is_empty(),
+        instance_id: cfg.aws_instance_id,
+        host: cfg.ssh_host,
+    }
+}
+
 // ── GitHub commands ──────────────────────────────────────────────────────
 
 #[tauri::command]

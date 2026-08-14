@@ -58,6 +58,7 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-sts = "1"
 aws-sdk-s3 = "1"
+aws-sdk-ec2 = "1"
 # reqwest (rustls-ring) and the AWS SDK's rustls connector can both want a
 # process-default CryptoProvider; we install ring's once so neither panics.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
