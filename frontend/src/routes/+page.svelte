@@ -221,25 +221,31 @@
   async function saveAndRegister() {
     busy = true;
     try {
-      if (!sshConfig.host.trim() || !sshConfig.user.trim()) {
-        showToast('err', 'SSH host and user are required.');
-        busy = false;
-        return;
-      }
       // The port field is a text input, so its bound value is a string.
       // Normalise here rather than relying on the backend to coerce it.
       const port = Number(String(sshConfig.port).trim());
-      if (!Number.isInteger(port) || port < 1 || port > 65535) {
-        showToast('err', 'SSH port must be a number between 1 and 65535.');
-        busy = false;
-        return;
+      // On the Cloud VM tab the connection target is the provisioned AWS VM
+      // (stored separately), so the manual SSH fields are not required here.
+      const isCloud = sshConfig.connection_type === 'cloud';
+      if (!isCloud) {
+        if (!sshConfig.host.trim() || !sshConfig.user.trim()) {
+          showToast('err', 'SSH host and user are required.');
+          busy = false;
+          return;
+        }
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          showToast('err', 'SSH port must be a number between 1 and 65535.');
+          busy = false;
+          return;
+        }
+        if (sshConfig.auth_method === 'key' && !sshConfig.key_path.trim()) {
+          showToast('err', 'Key file path is required when using SSH key auth.');
+          busy = false;
+          return;
+        }
       }
-      if (sshConfig.auth_method === 'key' && !sshConfig.key_path.trim()) {
-        showToast('err', 'Key file path is required when using SSH key auth.');
-        busy = false;
-        return;
-      }
-      await invoke('save_ssh_config', { config: { ...sshConfig, port } });
+      const safePort = Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 22;
+      await invoke('save_ssh_config', { config: { ...sshConfig, port: safePort } });
       await invoke<string[]>('register_mcp');
       const ghMsg = githubUsername
         ? ''

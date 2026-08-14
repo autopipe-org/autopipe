@@ -103,6 +103,15 @@ pub struct AppConfig {
     pub aws_key_name: String,
     #[serde(default)]
     pub aws_instance_type: String,
+    /// SSH target of the AutoPipe-managed VM, kept SEPARATE from the manual
+    /// ssh_host/ssh_auth so that choosing the SSH vs Cloud VM tab switches the
+    /// connection target at runtime without clobbering the user's self-managed
+    /// server settings. The MCP runtime routes to these when connection_type
+    /// is "cloud" (see McpServer::config).
+    #[serde(default)]
+    pub aws_vm_host: String,
+    #[serde(default)]
+    pub aws_vm_key_path: String,
 }
 
 fn default_registry_url() -> String {
@@ -176,6 +185,8 @@ impl Default for AppConfig {
             aws_sg_id: String::new(),
             aws_key_name: String::new(),
             aws_instance_type: String::new(),
+            aws_vm_host: String::new(),
+            aws_vm_key_path: String::new(),
         }
     }
 }

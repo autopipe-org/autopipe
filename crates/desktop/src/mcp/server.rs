@@ -11,7 +11,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use crate::config::{AppConfig, DEFAULT_MCP_PORT, MCP_PORT_FALLBACK_RANGE};
+use crate::config::{AppConfig, SshAuth, DEFAULT_MCP_PORT, MCP_PORT_FALLBACK_RANGE};
 use crate::mcp::path_translate::windows_to_wsl;
 use crate::mcp::viewer;
 use crate::ssh;
@@ -840,7 +840,29 @@ impl AutoPipeServer {
     /// Reload config from disk on every call so that changes made in the
     /// desktop app are picked up immediately without restarting the MCP server.
     fn config(&self) -> AppConfig {
-        AppConfig::load()
+        let mut c = AppConfig::load();
+        // Tab-based routing. Only AutoPipe-managed AWS provisioning uses separate
+        // VM fields; on that path route SSH to the VM and leave the user's manual
+        // SSH server config untouched on disk. The SSH tab — and manual GCP/Azure
+        // cloud entry, where the user pastes host/user/key into the normal ssh
+        // fields — keep using the manual config exactly as before.
+        if c.connection_type == "cloud" && c.cloud_provider == "aws" {
+            if c.aws_vm_host.trim().is_empty() {
+                // AWS cloud mode but no VM provisioned yet: blank the host so any
+                // SSH operation fails clearly rather than silently falling back to
+                // a stale manual SSH host (the previous confusing behavior).
+                c.ssh_host = String::new();
+            } else {
+                c.ssh_host = c.aws_vm_host.clone();
+                c.ssh_port = 22;
+                c.ssh_user = "ubuntu".to_string();
+                c.ssh_auth = SshAuth::Key {
+                    key_path: c.aws_vm_key_path.clone(),
+                };
+                c.repo_path = "/home/ubuntu/autopipe".to_string();
+            }
+        }
+        c
     }
 
 
@@ -2814,14 +2836,15 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
     ) -> Result<CallToolResult, ErrorData> {
         let config = self.config();
         // S3 mounts on an AutoPipe-provisioned AWS VM (it carries the IAM instance
-        // role for keyless access). Without one, ssh_host may still point at an
-        // unrelated server, so fail with a clear instruction instead.
-        if config.aws_instance_id.trim().is_empty() {
+        // role for keyless access). This only makes sense on the Cloud VM tab with
+        // a live VM; on the SSH tab we'd be on a self-managed server with no role.
+        if config.connection_type != "cloud" || config.aws_vm_host.trim().is_empty() {
             return Ok(CallToolResult::error(vec![Content::text(
-                "No AutoPipe AWS VM is provisioned yet, so there is nothing to mount S3 on. \
-                 Open AutoPipe → Cloud VM, connect your AWS account, and click 'Provision VM'. \
-                 That VM gets an IAM role for keyless S3 access, and AutoPipe automatically points \
-                 the SSH connection at it. (The current SSH host is a different, non-AWS server.)"
+                "No AutoPipe AWS VM is active, so there is nothing to mount S3 on. \
+                 In AutoPipe, choose the 'Cloud VM' tab, connect your AWS account, and click \
+                 'Provision VM'. That VM gets an IAM role for keyless S3 access and AutoPipe \
+                 routes the connection to it automatically. (The 'SSH server' tab connects to \
+                 your own server, which has no S3 access.)"
                     .to_string(),
             )]));
         }

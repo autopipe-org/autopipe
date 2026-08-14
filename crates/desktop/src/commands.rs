@@ -407,15 +407,14 @@ pub async fn aws_provision() -> Result<AwsVmDto, String> {
     cfg.aws_sg_id = res.sg_id.clone();
     cfg.aws_key_name = res.key_name.clone();
     cfg.aws_instance_type = instance_type;
-    cfg.ssh_host = res.public_ip.clone();
-    cfg.ssh_port = 22;
-    cfg.ssh_user = "ubuntu".to_string();
-    cfg.ssh_auth = SshAuth::Key {
-        key_path: res.key_path.clone(),
-    };
-    if cfg.repo_path.trim().is_empty() {
-        cfg.repo_path = "/home/ubuntu/autopipe".to_string();
-    }
+    // Store the VM's SSH target in AWS-specific fields (NOT ssh_host/ssh_auth), so
+    // the user's manual SSH server config is preserved. The MCP runtime routes to
+    // this VM only while connection_type is "cloud" (see McpServer::config), so
+    // selecting the SSH vs Cloud VM tab switches targets without losing either.
+    cfg.aws_vm_host = res.public_ip.clone();
+    cfg.aws_vm_key_path = res.key_path.clone();
+    cfg.connection_type = "cloud".to_string();
+    cfg.cloud_provider = "aws".to_string();
     cfg.save().map_err(|e| e.to_string())?;
 
     Ok(AwsVmDto {
@@ -444,6 +443,8 @@ pub async fn aws_teardown() -> Result<(), String> {
     cfg.aws_instance_id = String::new();
     cfg.aws_sg_id = String::new();
     cfg.aws_key_name = String::new();
+    cfg.aws_vm_host = String::new();
+    cfg.aws_vm_key_path = String::new();
     cfg.save().map_err(|e| e.to_string())
 }
 
