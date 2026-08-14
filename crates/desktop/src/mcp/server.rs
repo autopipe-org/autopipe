@@ -1051,7 +1051,14 @@ impl AutoPipeServer {
 
 
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
+        // Derive the pipeline (directory) name from the Docker image name by
+        // stripping BOTH the "autopipe-" prefix AND any ":tag" suffix. Images are
+        // typically built as "autopipe-<name>:latest", but the pipeline directory
+        // is just "<name>" — without dropping the tag, the lookup (and therefore
+        // the ro-crate name written into the run marker that a pipeline viewer
+        // matches on) silently fails and no viewer prompt fires.
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
+        let pipeline_name = pipeline_name.split(':').next().unwrap_or(pipeline_name);
 
         let pipelines_base = self.config().full_pipelines_dir();
         let candidate = format!(
