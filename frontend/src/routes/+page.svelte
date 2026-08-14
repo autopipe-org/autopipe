@@ -138,19 +138,39 @@
     }
   }
 
-  // ── AWS VM provisioning (Phase 2) ──
+  // ── AWS VM provisioning + lifecycle (Phase 2 + Phase 4) ──
   let awsVm = $state<{ provisioned: boolean; instance_id: string; host: string }>({
     provisioned: false,
     instance_id: '',
     host: '',
   });
   let awsVmBusy = $state(false);
+  // Live AWS lifecycle state: 'none' | 'running' | 'stopped' | 'pending' | 'stopping' | 'unknown'.
+  let awsVmState = $state('none');
+  // Confirm modal for impactful VM actions (stop / terminate), so the user sees
+  // the cost/data consequences before it happens.
+  let vmConfirm = $state<null | {
+    title: string;
+    lines: string[];
+    okLabel: string;
+    danger: boolean;
+    run: () => Promise<void>;
+  }>(null);
+
+  async function refreshVmState() {
+    try {
+      awsVmState = await invoke<string>('aws_vm_state');
+    } catch {
+      awsVmState = 'unknown';
+    }
+  }
 
   async function awsProvision() {
     awsVmBusy = true;
     try {
       const r = await invoke<{ instance_id: string; public_ip: string }>('aws_provision');
       awsVm = { provisioned: true, instance_id: r.instance_id, host: r.public_ip };
+      awsVmState = 'running';
       showToast('ok', `VM ready: ${r.instance_id} (${r.public_ip}). Click Save and Register to use it.`);
     } catch (e) {
       const msg = String(e);
@@ -165,17 +185,77 @@
     }
   }
 
-  async function awsTerminate() {
+  async function awsStart() {
     awsVmBusy = true;
     try {
-      await invoke('aws_teardown');
-      awsVm = { provisioned: false, instance_id: '', host: '' };
-      showToast('ok', 'VM terminated.');
+      const ip = await invoke<string>('aws_start_vm');
+      awsVm = { ...awsVm, host: ip };
+      awsVmState = 'running';
+      showToast('ok', `VM started (${ip}). Its IP changed and AutoPipe updated it automatically.`);
     } catch (e) {
-      showToast('err', `Terminate failed: ${e}`);
+      showToast('err', `Start failed: ${e}`);
     } finally {
       awsVmBusy = false;
     }
+  }
+
+  function confirmStop() {
+    vmConfirm = {
+      title: 'Stop the VM?',
+      okLabel: 'Stop VM',
+      danger: false,
+      lines: [
+        'Stopping pauses the VM. Its disk and everything installed on it are kept,',
+        'so next time you Start it, your setup is exactly as you left it.',
+        'While stopped you are billed only for disk storage (a few $/month), not compute.',
+        'Note: the public IP changes on restart — AutoPipe updates it for you.',
+      ],
+      run: async () => {
+        awsVmBusy = true;
+        try {
+          await invoke('aws_stop_vm');
+          awsVmState = 'stopped';
+          showToast('ok', 'VM stopped. Compute billing paused; disk is kept. Start it anytime.');
+        } catch (e) {
+          showToast('err', `Stop failed: ${e}`);
+        } finally {
+          awsVmBusy = false;
+        }
+      },
+    };
+  }
+
+  function confirmTerminate() {
+    vmConfirm = {
+      title: 'Terminate (delete) the VM?',
+      okLabel: 'Terminate VM',
+      danger: true,
+      lines: [
+        'Terminating permanently deletes the VM and its disk — all installed tools',
+        'and data on it are gone. Billing stops completely.',
+        'You would have to Provision a fresh VM and set it up again to use cloud runs.',
+        'If you just want to pause billing and keep your setup, choose Stop instead.',
+      ],
+      run: async () => {
+        awsVmBusy = true;
+        try {
+          await invoke('aws_teardown');
+          awsVm = { provisioned: false, instance_id: '', host: '' };
+          awsVmState = 'none';
+          showToast('ok', 'VM terminated and cleaned up.');
+        } catch (e) {
+          showToast('err', `Terminate failed: ${e}`);
+        } finally {
+          awsVmBusy = false;
+        }
+      },
+    };
+  }
+
+  async function runVmConfirm() {
+    const c = vmConfirm;
+    vmConfirm = null;
+    if (c) await c.run();
   }
 
   let githubUsername = $state<string | null>(null);
@@ -207,6 +287,7 @@
     } catch {}
     try {
       awsVm = await invoke<{ provisioned: boolean; instance_id: string; host: string }>('aws_vm_status');
+      if (awsVm.provisioned) await refreshVmState();
     } catch {}
     try { githubUsername = await invoke<string | null>('get_github_username'); } catch {}
     await listen<string | null>('github-login-complete', (event) => {
@@ -440,23 +521,55 @@
           <div class="aws-head">
             <span class="aws-title">VM (EC2)</span>
             {#if awsVm.provisioned}
-              <span class="aws-badge ok">Running · {awsVm.host}</span>
+              {#if awsVmState === 'running'}
+                <span class="aws-badge ok">Running · {awsVm.host}</span>
+              {:else if awsVmState === 'stopped'}
+                <span class="aws-badge warn">Stopped</span>
+              {:else if awsVmState === 'pending' || awsVmState === 'stopping'}
+                <span class="aws-badge warn">{awsVmState}…</span>
+              {:else}
+                <span class="aws-badge">Provisioned</span>
+              {/if}
             {/if}
           </div>
           {#if awsVm.provisioned}
-            <p class="aws-hint">
-              Instance {awsVm.instance_id} at {awsVm.host}. The SSH connection is auto-filled —
-              click <strong>Save and Register</strong> below, then use it from your AI app.
-            </p>
-            <div class="aws-actions">
-              <button class="btn-outline small" disabled={awsVmBusy} onclick={awsTerminate}>
-                {awsVmBusy ? 'Working…' : 'Terminate VM'}
-              </button>
-            </div>
+            {#if awsVmState === 'stopped'}
+              <p class="aws-hint">
+                Instance {awsVm.instance_id} is <strong>stopped</strong> — disk and installed tools
+                are kept, and you're billed only for storage. Start it to run pipelines again.
+              </p>
+              <div class="aws-actions">
+                <button class="btn-primary small" disabled={awsVmBusy} onclick={awsStart}>
+                  {awsVmBusy ? 'Starting…' : 'Start VM'}
+                </button>
+                <button class="btn-outline small danger" disabled={awsVmBusy} onclick={confirmTerminate}>
+                  Terminate VM
+                </button>
+              </div>
+            {:else}
+              <p class="aws-hint">
+                Instance {awsVm.instance_id} at {awsVm.host}. The SSH connection routes here on the
+                Cloud VM tab — click <strong>Save and Register</strong> below, then use it from your AI app.
+                <br />⚠️ Billed per hour while running. <strong>Stop</strong> to pause billing (keeps your
+                setup); <strong>Terminate</strong> to delete it entirely.
+              </p>
+              <div class="aws-actions">
+                <button class="btn-outline small" disabled={awsVmBusy} onclick={confirmStop}>
+                  {awsVmBusy ? 'Working…' : 'Stop VM'}
+                </button>
+                <button class="btn-outline small danger" disabled={awsVmBusy} onclick={confirmTerminate}>
+                  Terminate VM
+                </button>
+                <button class="btn-outline small" disabled={awsVmBusy} onclick={refreshVmState}>
+                  Refresh
+                </button>
+              </div>
+            {/if}
           {:else}
             <p class="aws-hint">
-              Creates an EC2 VM in your account, auto-installs Docker/Git/rclone, and fills in
-              the SSH connection. Takes ~2–4 min. ⚠️ Incurs AWS charges while running — terminate when done.
+              Creates an EC2 VM in your account, auto-installs Docker/Git/rclone, and routes the
+              SSH connection here. Takes ~2–4 min. ⚠️ Incurs AWS charges while running — stop or
+              terminate when done.
             </p>
             <div class="aws-actions">
               <button
@@ -583,6 +696,25 @@
         <div class="aws-modal-actions">
           <button class="btn-outline small" onclick={() => (awsSetupModal = false)}>Cancel</button>
           <button class="btn-primary small" onclick={awsSetupOpenCloudShell}>Open CloudShell</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if vmConfirm}
+    <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="vm-confirm-title">
+      <div class="aws-modal">
+        <h2 id="vm-confirm-title">{vmConfirm.title}</h2>
+        {#each vmConfirm.lines as line}
+          <p>{line}</p>
+        {/each}
+        <div class="aws-modal-actions">
+          <button class="btn-outline small" onclick={() => (vmConfirm = null)}>Cancel</button>
+          <button
+            class="btn-primary small"
+            class:danger={vmConfirm.danger}
+            onclick={runVmConfirm}
+          >{vmConfirm.okLabel}</button>
         </div>
       </div>
     </div>
@@ -874,6 +1006,23 @@
     color: var(--accent);
     border-color: var(--accent);
     background: var(--accent-light);
+  }
+  .aws-badge.warn {
+    color: #b45309;
+    border-color: #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+  }
+  .btn-outline.small.danger {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+  .btn-primary.small.danger {
+    background: var(--danger);
+    border-color: var(--danger);
+  }
+  .btn-primary.small.danger:hover {
+    background: #b91c1c;
+    border-color: #b91c1c;
   }
   .aws-form {
     display: grid;

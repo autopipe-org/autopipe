@@ -395,3 +395,101 @@ pub async fn terminate_vm(
     }
     Ok(())
 }
+
+/// Stop (halt) the managed VM. The EBS root disk and everything installed on it
+/// persist; only that storage is billed while stopped (no compute charge).
+pub async fn stop_vm(
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    instance_id: &str,
+) -> Result<(), String> {
+    ensure_crypto();
+    let client = ec2_client(access_key, secret_key, region);
+    client
+        .stop_instances()
+        .instance_ids(instance_id)
+        .send()
+        .await
+        .map_err(fmt_err)?;
+    Ok(())
+}
+
+/// Start a previously stopped VM and wait for it to be running again. The public
+/// IP changes across a stop/start cycle (there is no Elastic IP), so the new IP
+/// is returned and must replace aws_vm_host.
+pub async fn start_vm(
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    instance_id: &str,
+) -> Result<String, String> {
+    use aws_sdk_ec2::types::InstanceStateName;
+
+    ensure_crypto();
+    let client = ec2_client(access_key, secret_key, region);
+    client
+        .start_instances()
+        .instance_ids(instance_id)
+        .send()
+        .await
+        .map_err(fmt_err)?;
+
+    let mut public_ip = String::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        let d = client
+            .describe_instances()
+            .instance_ids(instance_id)
+            .send()
+            .await
+            .map_err(fmt_err)?;
+        if let Some(inst) = d
+            .reservations()
+            .first()
+            .and_then(|r| r.instances().first())
+        {
+            let running =
+                inst.state().and_then(|s| s.name()) == Some(&InstanceStateName::Running);
+            if running {
+                if let Some(ip) = inst.public_ip_address() {
+                    public_ip = ip.to_string();
+                    break;
+                }
+            }
+        }
+    }
+    if public_ip.is_empty() {
+        return Err(
+            "The VM was started but didn't become reachable in time. Check the EC2 console.".into(),
+        );
+    }
+    Ok(public_ip)
+}
+
+/// Current lifecycle state of the managed VM: "running", "stopped", "pending",
+/// "stopping", "shutting-down", "terminated", or "unknown".
+pub async fn vm_state(
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    instance_id: &str,
+) -> Result<String, String> {
+    ensure_crypto();
+    let client = ec2_client(access_key, secret_key, region);
+    let d = client
+        .describe_instances()
+        .instance_ids(instance_id)
+        .send()
+        .await
+        .map_err(fmt_err)?;
+    let state = d
+        .reservations()
+        .first()
+        .and_then(|r| r.instances().first())
+        .and_then(|i| i.state())
+        .and_then(|s| s.name())
+        .map(|n| n.as_str().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    Ok(state)
+}

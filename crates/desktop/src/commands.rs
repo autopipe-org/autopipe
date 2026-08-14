@@ -461,9 +461,63 @@ pub fn aws_vm_status() -> AwsVmStatusDto {
     let cfg = AppConfig::load();
     AwsVmStatusDto {
         provisioned: !cfg.aws_instance_id.is_empty(),
-        instance_id: cfg.aws_instance_id,
-        host: cfg.ssh_host,
+        instance_id: cfg.aws_instance_id.clone(),
+        host: cfg.aws_vm_host,
     }
+}
+
+/// Live lifecycle state of the managed VM from AWS ("running", "stopped", …),
+/// or "none" when no VM is provisioned. Drives which Stop/Start button shows.
+#[tauri::command]
+pub async fn aws_vm_state() -> Result<String, String> {
+    let cfg = AppConfig::load();
+    if cfg.aws_instance_id.is_empty() {
+        return Ok("none".into());
+    }
+    crate::aws::vm_state(
+        &cfg.aws_access_key,
+        &cfg.aws_secret_key,
+        &cfg.aws_region,
+        &cfg.aws_instance_id,
+    )
+    .await
+}
+
+/// Stop the managed VM (keeps the disk + installed tools; pauses compute billing).
+#[tauri::command]
+pub async fn aws_stop_vm() -> Result<(), String> {
+    let cfg = AppConfig::load();
+    if cfg.aws_instance_id.is_empty() {
+        return Err("No AutoPipe-managed VM to stop.".into());
+    }
+    crate::aws::stop_vm(
+        &cfg.aws_access_key,
+        &cfg.aws_secret_key,
+        &cfg.aws_region,
+        &cfg.aws_instance_id,
+    )
+    .await
+}
+
+/// Start a stopped VM. The public IP changes on restart, so update the routing
+/// target (aws_vm_host) with the new IP.
+#[tauri::command]
+pub async fn aws_start_vm() -> Result<String, String> {
+    let cfg = AppConfig::load();
+    if cfg.aws_instance_id.is_empty() {
+        return Err("No AutoPipe-managed VM to start.".into());
+    }
+    let ip = crate::aws::start_vm(
+        &cfg.aws_access_key,
+        &cfg.aws_secret_key,
+        &cfg.aws_region,
+        &cfg.aws_instance_id,
+    )
+    .await?;
+    let mut cfg = AppConfig::load();
+    cfg.aws_vm_host = ip.clone();
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(ip)
 }
 
 // ── GitHub commands ──────────────────────────────────────────────────────
