@@ -302,6 +302,68 @@ pub fn save_ssh_config(config: SshConfigDto) -> Result<(), String> {
     cfg.save().map_err(|e| e.to_string())
 }
 
+// ── AWS commands (cloud auto-provisioning, Phase 1) ──────────────────────
+
+/// Verify AWS credentials (STS GetCallerIdentity) and, on success, save them.
+/// Returns the AWS account ID so the UI can show "Connected as <account>".
+#[tauri::command]
+pub async fn aws_connect(
+    access_key: String,
+    secret_key: String,
+    region: String,
+) -> Result<String, String> {
+    let region = if region.trim().is_empty() {
+        "us-east-1".to_string()
+    } else {
+        region.trim().to_string()
+    };
+    let account = crate::aws::verify_credentials(&access_key, &secret_key, &region).await?;
+    let mut cfg = AppConfig::load();
+    cfg.aws_access_key = access_key.trim().to_string();
+    cfg.aws_secret_key = secret_key.trim().to_string();
+    cfg.aws_region = region;
+    cfg.save().map_err(|e| e.to_string())?;
+    Ok(account)
+}
+
+/// List the connected account's S3 buckets (for the bucket picker).
+#[tauri::command]
+pub async fn aws_list_buckets() -> Result<Vec<String>, String> {
+    let cfg = AppConfig::load();
+    if cfg.aws_access_key.is_empty() {
+        return Err("AWS is not connected. Enter your access key and click Connect first.".into());
+    }
+    crate::aws::list_buckets(&cfg.aws_access_key, &cfg.aws_secret_key, &cfg.aws_region).await
+}
+
+/// Persist the selected S3 bucket.
+#[tauri::command]
+pub fn aws_set_bucket(bucket: String) -> Result<(), String> {
+    let mut cfg = AppConfig::load();
+    cfg.aws_bucket = bucket.trim().to_string();
+    cfg.save().map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct AwsConfigDto {
+    pub region: String,
+    pub bucket: String,
+    /// Whether credentials are already saved (secret is never returned to the UI).
+    pub has_credentials: bool,
+}
+
+/// Return saved AWS region/bucket + whether credentials exist, so the setup UI
+/// can restore state without ever exposing the secret access key.
+#[tauri::command]
+pub fn aws_get_config() -> AwsConfigDto {
+    let cfg = AppConfig::load();
+    AwsConfigDto {
+        region: cfg.aws_region,
+        bucket: cfg.aws_bucket,
+        has_credentials: !cfg.aws_access_key.is_empty(),
+    }
+}
+
 // ── GitHub commands ──────────────────────────────────────────────────────
 
 #[tauri::command]

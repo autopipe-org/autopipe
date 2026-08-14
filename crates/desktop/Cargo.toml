@@ -54,6 +54,13 @@ uuid = { version = "1", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 openssl = { version = "0.10", features = ["vendored"], optional = true }
+# AWS SDK for cloud auto-provisioning (Phase 1: STS identity check + S3 bucket list).
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-sts = "1"
+aws-sdk-s3 = "1"
+# reqwest (rustls-ring) and the AWS SDK's rustls connector can both want a
+# process-default CryptoProvider; we install ring's once so neither panics.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 # Tauri-based UI dependencies (optional). Pin tauri to the same minor
 # version as the npm @tauri-apps/api so tauri-action's package check

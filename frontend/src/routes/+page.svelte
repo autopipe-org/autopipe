@@ -42,6 +42,60 @@
     }
   }
 
+  // ── AWS account connection (Phase 1: verify credentials + list buckets) ──
+  let awsAccessKey = $state('');
+  let awsSecretKey = $state('');
+  let awsRegion = $state('us-east-1');
+  let awsBucket = $state('');
+  let awsAccount = $state<string | null>(null);
+  let awsBuckets = $state<string[]>([]);
+  let awsBusy = $state(false);
+  let awsHasCreds = $state(false);
+
+  async function awsConnect() {
+    if (!awsAccessKey.trim() || !awsSecretKey.trim()) {
+      showToast('err', 'Enter your AWS access key and secret.');
+      return;
+    }
+    awsBusy = true;
+    try {
+      const account = await invoke<string>('aws_connect', {
+        accessKey: awsAccessKey.trim(),
+        secretKey: awsSecretKey.trim(),
+        region: awsRegion.trim() || 'us-east-1',
+      });
+      awsAccount = account;
+      awsHasCreds = true;
+      showToast('ok', `AWS connected (account ${account}).`);
+      await awsLoadBuckets();
+    } catch (e) {
+      awsAccount = null;
+      showToast('err', `AWS connect failed: ${e}`);
+    } finally {
+      awsBusy = false;
+    }
+  }
+
+  async function awsLoadBuckets() {
+    awsBusy = true;
+    try {
+      awsBuckets = await invoke<string[]>('aws_list_buckets');
+    } catch (e) {
+      showToast('err', `List buckets failed: ${e}`);
+    } finally {
+      awsBusy = false;
+    }
+  }
+
+  async function awsSelectBucket(b: string) {
+    awsBucket = b;
+    try {
+      await invoke('aws_set_bucket', { bucket: b });
+    } catch (e) {
+      showToast('err', `${e}`);
+    }
+  }
+
   let githubUsername = $state<string | null>(null);
   let busy = $state(false);
   let toast = $state<{ kind: 'ok' | 'err' | 'info'; text: string } | null>(null);
@@ -62,6 +116,12 @@
 
   onMount(async () => {
     try { sshConfig = await invoke<SshConfig>('get_ssh_config'); } catch {}
+    try {
+      const a = await invoke<{ region: string; bucket: string; has_credentials: boolean }>('aws_get_config');
+      if (a.region) awsRegion = a.region;
+      awsBucket = a.bucket ?? '';
+      awsHasCreds = a.has_credentials;
+    } catch {}
     try { githubUsername = await invoke<string | null>('get_github_username'); } catch {}
     await listen<string | null>('github-login-complete', (event) => {
       githubUsername = event.payload;
@@ -210,10 +270,57 @@
             <option value="azure">Microsoft Azure (VM)</option>
           </select>
         </div>
-        <p class="conn-hint">
-          Create a VM in your cloud, then paste its public IP, login user, and
-          key file (.pem) below. Cloud VMs use key authentication.
-        </p>
+        {#if sshConfig.cloud_provider === 'aws'}
+          <div class="aws-card">
+            <div class="aws-head">
+              <span class="aws-title">AWS account</span>
+              {#if awsAccount}
+                <span class="aws-badge ok">Connected · {awsAccount}</span>
+              {:else if awsHasCreds}
+                <span class="aws-badge">Saved — click Connect to verify</span>
+              {/if}
+            </div>
+            <div class="aws-form">
+              <label><span>Access Key ID</span><input bind:value={awsAccessKey} placeholder="AKIA…" /></label>
+              <label>
+                <span>Secret Access Key</span>
+                <input type="password" bind:value={awsSecretKey} placeholder={awsHasCreds ? '•••••• (saved)' : ''} />
+              </label>
+              <label><span>Region</span><input bind:value={awsRegion} placeholder="us-east-1" /></label>
+            </div>
+            <div class="aws-row">
+              <button class="btn-outline small" disabled={awsBusy} onclick={awsConnect}>
+                {awsBusy ? 'Connecting…' : 'Connect'}
+              </button>
+              <span class="aws-bucket-label">S3 bucket</span>
+              <select
+                class="aws-select"
+                bind:value={awsBucket}
+                onchange={(e) => awsSelectBucket((e.currentTarget as HTMLSelectElement).value)}
+                disabled={awsBuckets.length === 0}
+              >
+                {#if awsBuckets.length === 0}
+                  <option value={awsBucket}>{awsBucket || '(connect to list buckets)'}</option>
+                {:else}
+                  <option value="">— select —</option>
+                  {#each awsBuckets as b}
+                    <option value={b}>{b}</option>
+                  {/each}
+                {/if}
+              </select>
+              <button class="btn-outline small" disabled={awsBusy} onclick={awsLoadBuckets}>Refresh</button>
+            </div>
+            <p class="aws-note">
+              Phase 1: verifies your AWS credentials and lists your S3 buckets.
+              Automatic VM provisioning &amp; S3-mounted execution come in the next update.
+            </p>
+          </div>
+        {:else}
+          <p class="conn-hint">
+            Create a VM in your cloud, then paste its public IP, login user, and
+            key file (.pem) below. Cloud VMs use key authentication.
+          </p>
+        {/if}
       {/if}
 
       <button
@@ -549,6 +656,91 @@
     margin: 0 0 12px 34px;
     font-size: 0.82rem;
     color: var(--text-muted);
+    line-height: 1.5;
+  }
+
+  /* ── AWS account card ──────────────────────────────── */
+  .aws-card {
+    margin: 0 0 14px 34px;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-soft);
+  }
+  .aws-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .aws-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .aws-badge {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-faint);
+  }
+  .aws-badge.ok {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-light);
+  }
+  .aws-form {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 8px 12px;
+    align-items: center;
+  }
+  .aws-form label { display: contents; }
+  .aws-form label > span {
+    font-size: 0.83rem;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+  .aws-form input,
+  .aws-select {
+    padding: 7px 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: 5px;
+    font-size: 0.9rem;
+    background: var(--bg-card);
+    color: var(--text);
+    font-family: inherit;
+  }
+  .aws-form input:focus,
+  .aws-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-light);
+  }
+  .aws-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+  .aws-bucket-label {
+    font-size: 0.83rem;
+    color: var(--text-muted);
+    font-weight: 500;
+    margin-left: 6px;
+  }
+  .aws-select { flex: 1; min-width: 160px; }
+  .btn-outline.small {
+    padding: 6px 14px;
+    font-size: 0.82rem;
+  }
+  .aws-note {
+    margin: 12px 0 0;
+    font-size: 0.78rem;
+    color: var(--text-faint);
     line-height: 1.5;
   }
 

@@ -159,6 +159,10 @@ fn run_gui() {
             // commands::registration_status,   // commented: no Svelte caller (was used by old egui Status tab)
             commands::get_ssh_config,
             commands::save_ssh_config,
+            commands::aws_connect,
+            commands::aws_list_buckets,
+            commands::aws_set_bucket,
+            commands::aws_get_config,
             commands::get_github_username,
             commands::get_github_repo,
             commands::set_github_repo,

@@ -80,6 +80,16 @@ pub struct AppConfig {
     /// Cloud provider when connection_type is "cloud": "aws" | "gcp" | "azure".
     #[serde(default)]
     pub cloud_provider: String,
+    /// AWS credentials for cloud auto-provisioning (Phase 1: identity + bucket list).
+    #[serde(default)]
+    pub aws_access_key: String,
+    #[serde(default)]
+    pub aws_secret_key: String,
+    #[serde(default)]
+    pub aws_region: String,
+    /// Selected S3 bucket for pipeline input/output.
+    #[serde(default)]
+    pub aws_bucket: String,
 }
 
 fn default_registry_url() -> String {
@@ -144,6 +154,10 @@ impl Default for AppConfig {
             mcp_actual_port: None,
             connection_type: String::new(),
             cloud_provider: String::new(),
+            aws_access_key: String::new(),
+            aws_secret_key: String::new(),
+            aws_region: String::new(),
+            aws_bucket: String::new(),
         }
     }
 }

@@ -9,6 +9,7 @@
 //! The original binary (`bin/autopipe`) still works exactly as before — it
 //! just `use`s these same modules from inside `main.rs`.
 
+pub mod aws;
 pub mod claude_config;
 #[cfg(feature = "tauri-ui")]
 pub mod commands;
