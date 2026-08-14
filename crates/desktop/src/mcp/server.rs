@@ -2873,13 +2873,18 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         let mount_path = "/home/ubuntu/s3input".to_string();
 
         // rclone on-the-fly S3 backend using the instance role (env_auth),
-        // mounted read-only as a background daemon. Ensure fuse3 first.
+        // mounted read-only as a background daemon. --allow-other + fuse.conf's
+        // user_allow_other are REQUIRED so the Docker daemon (root) can bind-mount
+        // this FUSE path into pipeline containers; without them Docker cannot
+        // traverse a mount owned by the ubuntu user and the run fails.
         let cmd = format!(
             "sudo apt-get install -y -qq fuse3 >/dev/null 2>&1 || true; \
+             grep -qxF 'user_allow_other' /etc/fuse.conf 2>/dev/null || \
+                 echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null; \
              mkdir -p '{mp}'; \
              fusermount -u '{mp}' >/dev/null 2>&1 || true; \
              rclone mount ':s3,provider=AWS,env_auth=true,region={region}:{remote}' '{mp}' \
-                 --read-only --daemon --dir-cache-time 10s --vfs-cache-mode minimal \
+                 --read-only --allow-other --daemon --dir-cache-time 10s --vfs-cache-mode minimal \
                  >/tmp/autopipe-rclone-mount.log 2>&1; \
              sleep 3; \
              if ls '{mp}' >/dev/null 2>&1; then echo MOUNT_OK; else echo MOUNT_FAIL; cat /tmp/autopipe-rclone-mount.log; fi",
