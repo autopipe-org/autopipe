@@ -61,16 +61,22 @@
   let awsHasCreds = $state(false);
   let awsUserName = $state('');
 
-  // Open the 1-click CloudFormation stack that grants this IAM user the
-  // permissions AutoPipe needs (username auto-filled from the connected identity).
-  function awsSetupPermissions() {
+  // Copy a 1-line setup command to the clipboard and open AWS CloudShell.
+  // The user pastes it there and presses Enter; the script grants this IAM user
+  // the permissions AutoPipe needs (username auto-filled from the connected identity).
+  async function awsSetupPermissions() {
+    if (!awsUserName) {
+      showToast('err', 'Connect your AWS account first.');
+      return;
+    }
     const region = awsRegion || 'us-east-1';
-    const templateUrl = 'https://download.autopipe.org/autopipe-aws.yaml';
-    const url =
-      `https://console.aws.amazon.com/cloudformation/home?region=${region}` +
-      `#/stacks/quickcreate?templateURL=${encodeURIComponent(templateUrl)}` +
-      `&stackName=autopipe-setup&param_IamUserName=${encodeURIComponent(awsUserName)}`;
+    const cmd = `curl -fsSL https://download.autopipe.org/autopipe-aws-setup.sh | bash -s -- ${awsUserName}`;
+    try {
+      await navigator.clipboard.writeText(cmd);
+    } catch {}
+    const url = `https://console.aws.amazon.com/cloudshell/home?region=${region}`;
     openExternal(url).catch(() => {});
+    showToast('ok', 'Command copied to clipboard. Paste it into the CloudShell window that just opened and press Enter. When it finishes, click Provision VM.');
   }
 
   async function awsConnect() {
@@ -138,7 +144,7 @@
     } catch (e) {
       const msg = String(e);
       if (msg.includes('UnauthorizedOperation') || msg.includes('not authorized') || msg.includes('AccessDenied') || msg.includes('InstanceProfile')) {
-        showToast('info', 'Missing AWS permissions — opening the 1-click setup. Approve it (Create stack), then click Provision VM again.');
+        showToast('info', 'Missing AWS permissions — copied a setup command and opened CloudShell. Paste it there, press Enter, then click Provision VM again.');
         awsSetupPermissions();
       } else {
         showToast('err', `Provision failed: ${e}`);
@@ -380,8 +386,9 @@
             </button>
           </div>
           <p class="aws-hint">
-            <strong>Set up AWS access</strong> opens a 1-click AWS page that grants the
-            permissions to provision VMs (do this once, after Connect).
+            <strong>Set up AWS access</strong> copies a 1-line command and opens AWS
+            CloudShell — paste it there and press Enter to grant the permissions to
+            provision VMs (do this once, after Connect).
           </p>
         </div>
 
