@@ -44,11 +44,11 @@
 
   // ── AWS account connection (Phase 1: verify credentials + list buckets) ──
   const AWS_REGIONS: { group: string; items: [string, string][] }[] = [
-    { group: '미국 US', items: [['us-east-1', '버지니아 북부'], ['us-east-2', '오하이오'], ['us-west-1', '캘리포니아 북부'], ['us-west-2', '오레곤']] },
-    { group: '아시아 태평양 Asia Pacific', items: [['ap-south-1', '뭄바이'], ['ap-northeast-3', '오사카'], ['ap-northeast-2', '서울'], ['ap-southeast-1', '싱가포르'], ['ap-southeast-2', '시드니'], ['ap-northeast-1', '도쿄']] },
-    { group: '캐나다 Canada', items: [['ca-central-1', '중부']] },
-    { group: '유럽 Europe', items: [['eu-central-1', '프랑크푸르트'], ['eu-west-1', '아일랜드'], ['eu-west-2', '런던'], ['eu-west-3', '파리'], ['eu-north-1', '스톡홀름']] },
-    { group: '남아메리카 South America', items: [['sa-east-1', '상파울루']] },
+    { group: 'US', items: [['us-east-1', 'N. Virginia'], ['us-east-2', 'Ohio'], ['us-west-1', 'N. California'], ['us-west-2', 'Oregon']] },
+    { group: 'Asia Pacific', items: [['ap-south-1', 'Mumbai'], ['ap-northeast-3', 'Osaka'], ['ap-northeast-2', 'Seoul'], ['ap-southeast-1', 'Singapore'], ['ap-southeast-2', 'Sydney'], ['ap-northeast-1', 'Tokyo']] },
+    { group: 'Canada', items: [['ca-central-1', 'Central']] },
+    { group: 'Europe', items: [['eu-central-1', 'Frankfurt'], ['eu-west-1', 'Ireland'], ['eu-west-2', 'London'], ['eu-west-3', 'Paris'], ['eu-north-1', 'Stockholm']] },
+    { group: 'South America', items: [['sa-east-1', 'São Paulo']] },
   ];
 
   let awsAccessKey = $state('');
@@ -59,6 +59,19 @@
   let awsBuckets = $state<string[]>([]);
   let awsBusy = $state(false);
   let awsHasCreds = $state(false);
+  let awsUserName = $state('');
+
+  // Open the 1-click CloudFormation stack that grants this IAM user the
+  // permissions AutoPipe needs (username auto-filled from the connected identity).
+  function awsSetupPermissions() {
+    const region = awsRegion || 'us-east-1';
+    const templateUrl = 'https://download.autopipe.org/autopipe-aws.yaml';
+    const url =
+      `https://console.aws.amazon.com/cloudformation/home?region=${region}` +
+      `#/stacks/quickcreate?templateURL=${encodeURIComponent(templateUrl)}` +
+      `&stackName=autopipe-setup&param_IamUserName=${encodeURIComponent(awsUserName)}`;
+    openExternal(url).catch(() => {});
+  }
 
   async function awsConnect() {
     if (!awsAccessKey.trim() || !awsSecretKey.trim()) {
@@ -74,6 +87,10 @@
       });
       awsAccount = account;
       awsHasCreds = true;
+      try {
+        const c = await invoke<{ user_name: string }>('aws_get_config');
+        awsUserName = c.user_name ?? '';
+      } catch {}
       showToast('ok', `AWS connected (account ${account}).`);
       await awsLoadBuckets();
     } catch (e) {
@@ -119,7 +136,13 @@
       awsVm = { provisioned: true, instance_id: r.instance_id, host: r.public_ip };
       showToast('ok', `VM ready: ${r.instance_id} (${r.public_ip}). Click Save and Register to use it.`);
     } catch (e) {
-      showToast('err', `Provision failed: ${e}`);
+      const msg = String(e);
+      if (msg.includes('UnauthorizedOperation') || msg.includes('not authorized') || msg.includes('AccessDenied') || msg.includes('InstanceProfile')) {
+        showToast('info', 'Missing AWS permissions — opening the 1-click setup. Approve it (Create stack), then click Provision VM again.');
+        awsSetupPermissions();
+      } else {
+        showToast('err', `Provision failed: ${e}`);
+      }
     } finally {
       awsVmBusy = false;
     }
@@ -159,9 +182,10 @@
   onMount(async () => {
     try { sshConfig = await invoke<SshConfig>('get_ssh_config'); } catch {}
     try {
-      const a = await invoke<{ region: string; bucket: string; has_credentials: boolean }>('aws_get_config');
+      const a = await invoke<{ region: string; bucket: string; user_name: string; has_credentials: boolean }>('aws_get_config');
       if (a.region) awsRegion = a.region;
       awsBucket = a.bucket ?? '';
+      awsUserName = a.user_name ?? '';
       awsHasCreds = a.has_credentials;
     } catch {}
     try {
@@ -351,7 +375,14 @@
             <button class="btn-outline small" disabled={awsBusy} onclick={awsConnect}>
               {awsBusy ? 'Connecting…' : 'Connect'}
             </button>
+            <button class="btn-outline small" disabled={!awsUserName} onclick={awsSetupPermissions}>
+              Set up AWS access
+            </button>
           </div>
+          <p class="aws-hint">
+            <strong>Set up AWS access</strong> opens a 1-click AWS page that grants the
+            permissions to provision VMs (do this once, after Connect).
+          </p>
         </div>
 
         <div class="aws-card">

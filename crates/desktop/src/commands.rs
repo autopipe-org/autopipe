@@ -317,11 +317,13 @@ pub async fn aws_connect(
     } else {
         region.trim().to_string()
     };
-    let account = crate::aws::verify_credentials(&access_key, &secret_key, &region).await?;
+    let (account, username) =
+        crate::aws::verify_credentials(&access_key, &secret_key, &region).await?;
     let mut cfg = AppConfig::load();
     cfg.aws_access_key = access_key.trim().to_string();
     cfg.aws_secret_key = secret_key.trim().to_string();
     cfg.aws_region = region;
+    cfg.aws_user_name = username;
     cfg.save().map_err(|e| e.to_string())?;
     Ok(account)
 }
@@ -348,18 +350,20 @@ pub fn aws_set_bucket(bucket: String) -> Result<(), String> {
 pub struct AwsConfigDto {
     pub region: String,
     pub bucket: String,
+    pub user_name: String,
     /// Whether credentials are already saved (secret is never returned to the UI).
     pub has_credentials: bool,
 }
 
-/// Return saved AWS region/bucket + whether credentials exist, so the setup UI
-/// can restore state without ever exposing the secret access key.
+/// Return saved AWS region/bucket/username + whether credentials exist, so the
+/// setup UI can restore state without ever exposing the secret access key.
 #[tauri::command]
 pub fn aws_get_config() -> AwsConfigDto {
     let cfg = AppConfig::load();
     AwsConfigDto {
         region: cfg.aws_region,
         bucket: cfg.aws_bucket,
+        user_name: cfg.aws_user_name,
         has_credentials: !cfg.aws_access_key.is_empty(),
     }
 }

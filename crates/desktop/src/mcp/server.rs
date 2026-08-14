@@ -96,6 +96,16 @@ struct ExecuteParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct MountS3Params {
+    /// S3 bucket to mount. If omitted, uses the bucket selected in the AutoPipe app.
+    #[serde(default)]
+    bucket: Option<String>,
+    /// Optional key prefix within the bucket to mount (e.g. "runs/2024/").
+    #[serde(default)]
+    prefix: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct StatusParams {
     /// Run name (matches the run_name used in execute_pipeline)
     run_name: String,
@@ -2795,6 +2805,73 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
 
         result
+    }
+
+    #[tool(description = "Mount an S3 bucket on the AutoPipe-provisioned VM as a local directory (via rclone using the VM's IAM instance role — no keys), so a pipeline can read it as input WITHOUT downloading. Returns the mount path; pass it as `input_dir` to execute_pipeline. REQUIRES a VM provisioned by AutoPipe (its instance profile grants keyless S3 access) with rclone + fuse installed (done automatically at provisioning). If `bucket` is omitted, uses the bucket selected in the AutoPipe app. Use this before execute_pipeline when the input data lives in the user's S3 bucket.")]
+    async fn mount_s3_bucket(
+        &self,
+        Parameters(params): Parameters<MountS3Params>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let config = self.config();
+        let bucket = params
+            .bucket
+            .filter(|b| !b.trim().is_empty())
+            .unwrap_or_else(|| config.aws_bucket.clone());
+        if bucket.trim().is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "No S3 bucket specified and none is selected in the AutoPipe app.".to_string(),
+            )]));
+        }
+        let region = if config.aws_region.trim().is_empty() {
+            "us-east-1".to_string()
+        } else {
+            config.aws_region.clone()
+        };
+        let prefix = params
+            .prefix
+            .map(|p| p.trim().trim_matches('/').to_string())
+            .filter(|p| !p.is_empty());
+        let remote_path = match &prefix {
+            Some(p) => format!("{}/{}", bucket.trim(), p),
+            None => bucket.trim().to_string(),
+        };
+        let mount_path = "/home/ubuntu/s3input".to_string();
+
+        // rclone on-the-fly S3 backend using the instance role (env_auth),
+        // mounted read-only as a background daemon. Ensure fuse3 first.
+        let cmd = format!(
+            "sudo apt-get install -y -qq fuse3 >/dev/null 2>&1 || true; \
+             mkdir -p '{mp}'; \
+             fusermount -u '{mp}' >/dev/null 2>&1 || true; \
+             rclone mount ':s3,provider=AWS,env_auth=true,region={region}:{remote}' '{mp}' \
+                 --read-only --daemon --dir-cache-time 10s --vfs-cache-mode minimal \
+                 >/tmp/autopipe-rclone-mount.log 2>&1; \
+             sleep 3; \
+             if ls '{mp}' >/dev/null 2>&1; then echo MOUNT_OK; else echo MOUNT_FAIL; cat /tmp/autopipe-rclone-mount.log; fi",
+            mp = mount_path,
+            region = shell_escape(&region),
+            remote = shell_escape(&remote_path),
+        );
+
+        match self.ssh_run(&cmd).await {
+            Ok((out, _)) if out.contains("MOUNT_OK") => Ok(CallToolResult::success(vec![
+                Content::text(format!(
+                    "Mounted s3://{} at {} on the VM (read-only, via the VM's IAM role — no keys).\n\
+                     Pass input_dir='{}' to execute_pipeline to run on this data without downloading it.",
+                    remote_path, mount_path, mount_path
+                )),
+            ])),
+            Ok((out, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to mount s3://{}: {}\n\
+                 Checklist: (1) the VM was provisioned by AutoPipe (has the instance role), \
+                 (2) rclone + fuse3 are installed, (3) the bucket name and region are correct.",
+                remote_path,
+                out.trim()
+            ))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "SSH error while mounting S3: {e}"
+            ))])),
+        }
     }
 
     #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. BEFORE running, briefly recap the config.yaml values relevant to the step the user is about to run (one short line each: current value plus a few words). If the pipeline runs in stages and the user is running only a later or optional stage, recap ONLY that stage's values, not the ones already used by earlier stages; if the stages are not clearly separable, recap all configurable values. Then check required values: if any required config value is still blank, do NOT run. If you can derive a sensible value from the config or context, propose it, explain where it comes from, and ask whether to fill it in and run; if you cannot derive one, ask the user to provide it. Never fill a required value on your own without the user's confirmation — run only after the user confirms. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first.")]

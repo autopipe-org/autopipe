@@ -46,12 +46,15 @@ fn fmt_err<E: std::error::Error>(e: E) -> String {
     msg
 }
 
-/// Verify AWS credentials via STS GetCallerIdentity. Returns the account ID.
+/// Verify AWS credentials via STS GetCallerIdentity. Returns (account_id,
+/// iam_user_name). The user name is parsed from the caller ARN (last path
+/// segment of `.../user/NAME`) and is used to pre-fill the CloudFormation
+/// permission-setup stack; it is empty for the root user.
 pub async fn verify_credentials(
     access_key: &str,
     secret_key: &str,
     region: &str,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     ensure_crypto();
     let conf = aws_sdk_sts::config::Builder::new()
         .behavior_version(aws_sdk_sts::config::BehaviorVersion::latest())
@@ -70,8 +73,20 @@ pub async fn verify_credentials(
         .send()
         .await
         .map_err(fmt_err)?;
-    Ok(out.account().unwrap_or_default().to_string())
+    let account = out.account().unwrap_or_default().to_string();
+    let arn = out.arn().unwrap_or_default();
+    // "arn:aws:iam::123:user/qoka" -> "qoka"; root ARN has no '/' -> empty.
+    let username = if arn.contains('/') {
+        arn.rsplit('/').next().unwrap_or_default().to_string()
+    } else {
+        String::new()
+    };
+    Ok((account, username))
 }
+
+/// Instance profile (created by the CloudFormation setup) that gives the VM
+/// keyless S3 access. Attached at launch so pipelines can mount S3 buckets.
+pub const INSTANCE_PROFILE_NAME: &str = "autopipe-vm-profile";
 
 /// List the account's S3 bucket names using the given credentials.
 pub async fn list_buckets(
@@ -167,8 +182,8 @@ pub async fn provision_vm(
     key_dir: &str,
 ) -> Result<ProvisionResult, String> {
     use aws_sdk_ec2::types::{
-        Filter, InstanceStateName, InstanceType, IpPermission, IpRange, ResourceType, Tag,
-        TagSpecification,
+        Filter, IamInstanceProfileSpecification, InstanceStateName, InstanceType, IpPermission,
+        IpRange, ResourceType, Tag, TagSpecification,
     };
 
     ensure_crypto();
@@ -267,6 +282,11 @@ pub async fn provision_vm(
         .key_name(&name)
         .security_group_ids(&sg_id)
         .user_data(user_data)
+        .iam_instance_profile(
+            IamInstanceProfileSpecification::builder()
+                .name(INSTANCE_PROFILE_NAME)
+                .build(),
+        )
         .tag_specifications(
             TagSpecification::builder()
                 .resource_type(ResourceType::Instance)

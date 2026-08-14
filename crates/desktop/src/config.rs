@@ -87,6 +87,10 @@ pub struct AppConfig {
     pub aws_secret_key: String,
     #[serde(default)]
     pub aws_region: String,
+    /// IAM user name of the connected key (parsed from STS), used to pre-fill
+    /// the CloudFormation permission-setup stack.
+    #[serde(default)]
+    pub aws_user_name: String,
     /// Selected S3 bucket for pipeline input/output.
     #[serde(default)]
     pub aws_bucket: String,
@@ -166,6 +170,7 @@ impl Default for AppConfig {
             aws_access_key: String::new(),
             aws_secret_key: String::new(),
             aws_region: String::new(),
+            aws_user_name: String::new(),
             aws_bucket: String::new(),
             aws_instance_id: String::new(),
             aws_sg_id: String::new(),
