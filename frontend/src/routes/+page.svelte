@@ -36,10 +36,10 @@
   // ensures a provider is selected; switching back to SSH is left as-is.
   function setConnectionType(kind: 'ssh' | 'cloud') {
     sshConfig.connection_type = kind;
-    if (kind === 'cloud') {
-      if (!sshConfig.cloud_provider) sshConfig.cloud_provider = 'aws';
-      if (sshConfig.auth_method !== 'key') sshConfig.auth_method = 'key';
-    }
+    // Manual SSH is password-only; the AWS VM uses its own key internally
+    // (aws_vm_key_path), independent of this field.
+    sshConfig.auth_method = 'password';
+    if (kind === 'cloud' && !sshConfig.cloud_provider) sshConfig.cloud_provider = 'aws';
   }
 
   // ── AWS account connection (Phase 1: verify credentials + list buckets) ──
@@ -66,6 +66,15 @@
   // so we render our own overlay and only open the browser when the user clicks OK.
   let awsSetupModal = $state(false);
   let awsSetupCmd = $state('');
+  let cmdCopied = $state(false);
+
+  async function copySetupCmd() {
+    try {
+      await navigator.clipboard.writeText(awsSetupCmd);
+      cmdCopied = true;
+      setTimeout(() => (cmdCopied = false), 2000);
+    } catch {}
+  }
 
   // Copy the 1-line setup command to the clipboard, then show the instruction modal.
   // The command grants this IAM user the permissions AutoPipe needs (username
@@ -319,11 +328,6 @@
           busy = false;
           return;
         }
-        if (sshConfig.auth_method === 'key' && !sshConfig.key_path.trim()) {
-          showToast('err', 'Key file path is required when using SSH key auth.');
-          busy = false;
-          return;
-        }
       }
       const safePort = Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 22;
       await invoke('save_ssh_config', { config: { ...sshConfig, port: safePort } });
@@ -483,11 +487,6 @@
               Set up AWS access
             </button>
           </div>
-          <p class="aws-hint">
-            <strong>Set up AWS access</strong> copies a 1-line command and opens AWS
-            CloudShell — paste it there and press Enter to grant the permissions to
-            provision VMs (do this once, after Connect).
-          </p>
         </div>
 
         <div class="aws-card">
@@ -686,13 +685,18 @@
     <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="aws-setup-title">
       <div class="aws-modal">
         <h2 id="aws-setup-title">Grant AWS access</h2>
-        <p>The setup command has been <strong>copied to your clipboard</strong>.</p>
         <ol>
           <li>Click <strong>Open CloudShell</strong> below — AWS CloudShell opens in your browser.</li>
-          <li>When the shell prompt appears, <strong>paste</strong> it (Ctrl+V, or Cmd+V on Mac) and press <strong>Enter</strong>.</li>
+          <li>
+            When the shell prompt appears, <strong>paste</strong> this command (Ctrl+V, or
+            Cmd+V on Mac) and press <strong>Enter</strong>:
+            <div class="aws-cmd-row">
+              <code class="aws-cmd">{awsSetupCmd}</code>
+              <button class="cmd-copy" onclick={copySetupCmd}>{cmdCopied ? 'Copied' : 'Copy'}</button>
+            </div>
+          </li>
           <li>When it finishes, come back here and click <strong>Provision VM</strong>.</li>
         </ol>
-        <pre class="aws-cmd">{awsSetupCmd}</pre>
         <div class="aws-modal-actions">
           <button class="btn-outline small" onclick={() => (awsSetupModal = false)}>Cancel</button>
           <button class="btn-primary small" onclick={awsSetupOpenCloudShell}>Open CloudShell</button>
@@ -1255,7 +1259,15 @@
     padding-left: 20px;
     line-height: 1.6;
   }
+  .aws-cmd-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    margin: 8px 0 4px;
+  }
   .aws-cmd {
+    flex: 1;
+    min-width: 0;
     background: var(--bg-soft);
     border: 1px solid var(--border);
     border-radius: 6px;
@@ -1264,7 +1276,21 @@
     white-space: pre-wrap;
     word-break: break-all;
     overflow-x: auto;
-    margin: 0 0 16px;
+  }
+  .cmd-copy {
+    flex: 0 0 auto;
+    padding: 0 14px;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text);
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .cmd-copy:hover {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .aws-modal-actions {
     display: flex;

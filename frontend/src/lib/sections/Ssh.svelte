@@ -33,29 +33,9 @@
     <input bind:value={config.user} placeholder="e.g. ubuntu, ec2-user" />
   </label>
   <label>
-    <span>Auth</span>
-    <div class="auth-choice">
-      <label class="radio">
-        <input type="radio" bind:group={config.auth_method} value="password" />
-        Password
-      </label>
-      <label class="radio">
-        <input type="radio" bind:group={config.auth_method} value="key" />
-        SSH key
-      </label>
-    </div>
+    <span>Password</span>
+    <input type="password" bind:value={config.password} />
   </label>
-  {#if config.auth_method === 'key'}
-    <label>
-      <span>Key file</span>
-      <input bind:value={config.key_path} placeholder="e.g. ~/.ssh/my-vm.pem" />
-    </label>
-  {:else}
-    <label>
-      <span>Password</span>
-      <input type="password" bind:value={config.password} />
-    </label>
-  {/if}
   <label>
     <span>Repo path</span>
     <input bind:value={config.repo_path} placeholder="/home/<user>/autopipe" />
@@ -89,24 +69,5 @@
     outline: none;
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-light);
-  }
-  .auth-choice {
-    display: flex;
-    gap: 16px;
-    align-items: center;
-  }
-  .radio {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.88rem;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .radio > input {
-    width: auto;
-    padding: 0;
-    margin: 0;
-    accent-color: var(--accent);
   }
 </style>

@@ -124,6 +124,20 @@ pub async fn list_buckets(
 /// marker AutoPipe polls before using the VM.
 const USER_DATA: &str = r#"#!/bin/bash
 set -e
+# Broaden SSH algorithm support so libssh2-based clients — notably AutoPipe on
+# Windows, which uses the WinCNG backend and cannot negotiate the newest
+# key-exchange/host-key algorithms — can complete the handshake to this modern
+# OpenSSH server. The '+' keeps the secure defaults and merely re-adds fallbacks.
+cat >/etc/ssh/sshd_config.d/50-autopipe-compat.conf <<'SSHD'
+HostKeyAlgorithms +ssh-rsa,rsa-sha2-256,rsa-sha2-512
+PubkeyAcceptedAlgorithms +ssh-rsa,rsa-sha2-256,rsa-sha2-512
+KexAlgorithms +diffie-hellman-group14-sha256,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha1
+SSHD
+if sshd -t 2>/dev/null; then
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+else
+  rm -f /etc/ssh/sshd_config.d/50-autopipe-compat.conf
+fi
 command -v curl  >/dev/null || { apt-get update -qq && apt-get install -y -qq curl ca-certificates; }
 curl -fsSL https://download.autopipe.org/setup.sh | bash
 id -nG ubuntu | grep -qw docker || usermod -aG docker ubuntu
