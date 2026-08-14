@@ -43,6 +43,14 @@
   }
 
   // ── AWS account connection (Phase 1: verify credentials + list buckets) ──
+  const AWS_REGIONS: { group: string; items: [string, string][] }[] = [
+    { group: '미국 US', items: [['us-east-1', '버지니아 북부'], ['us-east-2', '오하이오'], ['us-west-1', '캘리포니아 북부'], ['us-west-2', '오레곤']] },
+    { group: '아시아 태평양 Asia Pacific', items: [['ap-south-1', '뭄바이'], ['ap-northeast-3', '오사카'], ['ap-northeast-2', '서울'], ['ap-southeast-1', '싱가포르'], ['ap-southeast-2', '시드니'], ['ap-northeast-1', '도쿄']] },
+    { group: '캐나다 Canada', items: [['ca-central-1', '중부']] },
+    { group: '유럽 Europe', items: [['eu-central-1', '프랑크푸르트'], ['eu-west-1', '아일랜드'], ['eu-west-2', '런던'], ['eu-west-3', '파리'], ['eu-north-1', '스톡홀름']] },
+    { group: '남아메리카 South America', items: [['sa-east-1', '상파울루']] },
+  ];
+
   let awsAccessKey = $state('');
   let awsSecretKey = $state('');
   let awsRegion = $state('us-east-1');
@@ -286,7 +294,18 @@
                 <span>Secret Access Key</span>
                 <input type="password" bind:value={awsSecretKey} placeholder={awsHasCreds ? '•••••• (saved)' : ''} />
               </label>
-              <label><span>Region</span><input bind:value={awsRegion} placeholder="us-east-1" /></label>
+              <label>
+                <span>Region</span>
+                <select class="aws-select" bind:value={awsRegion}>
+                  {#each AWS_REGIONS as g}
+                    <optgroup label={g.group}>
+                      {#each g.items as [code, name]}
+                        <option value={code}>{name} ({code})</option>
+                      {/each}
+                    </optgroup>
+                  {/each}
+                </select>
+              </label>
             </div>
             <div class="aws-row">
               <button class="btn-outline small" disabled={awsBusy} onclick={awsConnect}>
@@ -300,7 +319,7 @@
                 disabled={awsBuckets.length === 0}
               >
                 {#if awsBuckets.length === 0}
-                  <option value={awsBucket}>{awsBucket || '(connect to list buckets)'}</option>
+                  <option value={awsBucket}>{awsBucket || (awsAccount ? '(no buckets — create one in S3, then Refresh)' : '(connect to list buckets)')}</option>
                 {:else}
                   <option value="">— select —</option>
                   {#each awsBuckets as b}
