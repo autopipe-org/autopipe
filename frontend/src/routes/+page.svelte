@@ -61,9 +61,10 @@
   let awsHasCreds = $state(false);
   let awsUserName = $state('');
 
-  // Copy a 1-line setup command to the clipboard and open AWS CloudShell.
-  // The user pastes it there and presses Enter; the script grants this IAM user
-  // the permissions AutoPipe needs (username auto-filled from the connected identity).
+  // Copy a 1-line setup command to the clipboard, then show a blocking prompt so
+  // the instructions are seen BEFORE the browser opens. On OK, open AWS CloudShell;
+  // the user pastes the command there and presses Enter. The script grants this IAM
+  // user the permissions AutoPipe needs (username auto-filled from the connected id).
   async function awsSetupPermissions() {
     if (!awsUserName) {
       showToast('err', 'Connect your AWS account first.');
@@ -74,9 +75,15 @@
     try {
       await navigator.clipboard.writeText(cmd);
     } catch {}
+    const proceed = confirm(
+      'The setup command has been copied to your clipboard.\n\n' +
+        'After you click OK, AWS CloudShell will open in your browser.\n' +
+        'When the shell prompt appears, paste with Ctrl+V (Cmd+V on Mac) and press Enter.\n\n' +
+        'When it finishes, come back and click Provision VM.'
+    );
+    if (!proceed) return;
     const url = `https://console.aws.amazon.com/cloudshell/home?region=${region}`;
     openExternal(url).catch(() => {});
-    showToast('ok', 'Command copied to clipboard. Paste it into the CloudShell window that just opened and press Enter. When it finishes, click Provision VM.');
   }
 
   async function awsConnect() {
