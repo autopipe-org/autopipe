@@ -2813,6 +2813,18 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         Parameters(params): Parameters<MountS3Params>,
     ) -> Result<CallToolResult, ErrorData> {
         let config = self.config();
+        // S3 mounts on an AutoPipe-provisioned AWS VM (it carries the IAM instance
+        // role for keyless access). Without one, ssh_host may still point at an
+        // unrelated server, so fail with a clear instruction instead.
+        if config.aws_instance_id.trim().is_empty() {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "No AutoPipe AWS VM is provisioned yet, so there is nothing to mount S3 on. \
+                 Open AutoPipe → Cloud VM, connect your AWS account, and click 'Provision VM'. \
+                 That VM gets an IAM role for keyless S3 access, and AutoPipe automatically points \
+                 the SSH connection at it. (The current SSH host is a different, non-AWS server.)"
+                    .to_string(),
+            )]));
+        }
         let bucket = params
             .bucket
             .filter(|b| !b.trim().is_empty())

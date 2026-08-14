@@ -61,27 +61,31 @@
   let awsHasCreds = $state(false);
   let awsUserName = $state('');
 
-  // Copy a 1-line setup command to the clipboard, then show a blocking prompt so
-  // the instructions are seen BEFORE the browser opens. On OK, open AWS CloudShell;
-  // the user pastes the command there and presses Enter. The script grants this IAM
-  // user the permissions AutoPipe needs (username auto-filled from the connected id).
+  // In-app modal so the paste instructions are actually seen before CloudShell opens.
+  // A native confirm()/alert() is unreliable in the Tauri webview (no dialog on Linux),
+  // so we render our own overlay and only open the browser when the user clicks OK.
+  let awsSetupModal = $state(false);
+  let awsSetupCmd = $state('');
+
+  // Copy the 1-line setup command to the clipboard, then show the instruction modal.
+  // The command grants this IAM user the permissions AutoPipe needs (username
+  // auto-filled from the connected identity). CloudShell opens on OK, not before.
   async function awsSetupPermissions() {
     if (!awsUserName) {
       showToast('err', 'Connect your AWS account first.');
       return;
     }
-    const region = awsRegion || 'us-east-1';
-    const cmd = `curl -fsSL https://download.autopipe.org/autopipe-aws-setup.sh | bash -s -- ${awsUserName}`;
+    awsSetupCmd = `curl -fsSL https://download.autopipe.org/autopipe-aws-setup.sh | bash -s -- ${awsUserName}`;
     try {
-      await navigator.clipboard.writeText(cmd);
+      await navigator.clipboard.writeText(awsSetupCmd);
     } catch {}
-    const proceed = confirm(
-      'The setup command has been copied to your clipboard.\n\n' +
-        'After you click OK, AWS CloudShell will open in your browser.\n' +
-        'When the shell prompt appears, paste with Ctrl+V (Cmd+V on Mac) and press Enter.\n\n' +
-        'When it finishes, come back and click Provision VM.'
-    );
-    if (!proceed) return;
+    awsSetupModal = true;
+  }
+
+  // OK on the modal: open AWS CloudShell so the user can paste + run the command.
+  function awsSetupOpenCloudShell() {
+    awsSetupModal = false;
+    const region = awsRegion || 'us-east-1';
     const url = `https://console.aws.amazon.com/cloudshell/home?region=${region}`;
     openExternal(url).catch(() => {});
   }
@@ -557,6 +561,25 @@
   {/if}
   {#if showPlugins}
     <PluginsPanel onclose={() => (showPlugins = false)} {showToast} />
+  {/if}
+
+  {#if awsSetupModal}
+    <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="aws-setup-title">
+      <div class="aws-modal">
+        <h2 id="aws-setup-title">Grant AWS access</h2>
+        <p>The setup command has been <strong>copied to your clipboard</strong>.</p>
+        <ol>
+          <li>Click <strong>Open CloudShell</strong> below — AWS CloudShell opens in your browser.</li>
+          <li>When the shell prompt appears, <strong>paste</strong> it (Ctrl+V, or Cmd+V on Mac) and press <strong>Enter</strong>.</li>
+          <li>When it finishes, come back here and click <strong>Provision VM</strong>.</li>
+        </ol>
+        <pre class="aws-cmd">{awsSetupCmd}</pre>
+        <div class="aws-modal-actions">
+          <button class="btn-outline small" onclick={() => (awsSetupModal = false)}>Cancel</button>
+          <button class="btn-primary small" onclick={awsSetupOpenCloudShell}>Open CloudShell</button>
+        </div>
+      </div>
+    </div>
   {/if}
 </div>
 
@@ -1047,4 +1070,50 @@
     cursor: pointer;
   }
   .ghost.small:hover { background: #1e293b; color: #fff; }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+    padding: 24px;
+  }
+  .aws-modal {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    width: 100%;
+    max-width: 520px;
+    padding: 22px 24px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+  }
+  .aws-modal h2 {
+    margin: 0 0 10px;
+    font-size: 1.05rem;
+  }
+  .aws-modal p { margin: 0 0 10px; }
+  .aws-modal ol {
+    margin: 0 0 14px;
+    padding-left: 20px;
+    line-height: 1.6;
+  }
+  .aws-cmd {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 0.78rem;
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow-x: auto;
+    margin: 0 0 16px;
+  }
+  .aws-modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+  }
 </style>
