@@ -110,6 +110,13 @@ struct ConfigureInputParams {
     /// The pipeline's Docker image name (e.g. "autopipe-aptaselect"), used to
     /// locate the pipeline directory whose config.yaml is edited.
     image_name: String,
+    /// OPTIONAL fallback one-line descriptions for config variables, keyed by
+    /// variable name. The page shows the config.yaml comment when present and
+    /// falls back to these only for variables that have NO comment. Fill this by
+    /// reading the pipeline's Snakefile/scripts when the config lacks comments;
+    /// omit it when the config is already well-commented.
+    #[serde(default)]
+    descriptions: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2928,7 +2935,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
-    #[tool(description = "Open a web page in the user's browser where they choose the pipeline's INPUT: they pick input files from a file explorer (the AWS S3 bucket when the analysis machine is an AWS VM, otherwise the SSH server's filesystem) and edit the pipeline's config.yaml values (pre-filled with defaults). On Save, the picked files are symlinked into the input directory (as /input/<name>) and config.yaml is written back on the server. CALL THIS when the user asks to run/execute a pipeline and the input has not been set up yet this session: it lets the user provide inputs visually instead of you guessing paths. After calling it, tell the user to pick their files and values in the opened page and click Save, and WAIT until they confirm they have saved. Then call execute_pipeline with the returned input_dir. Do NOT invent input file paths yourself. Requires the pipeline to already be downloaded to the server (its config.yaml must exist).")]
+    #[tool(description = "Open the AutoPipe Input page in the user's browser so they choose the pipeline's INPUT visually: they pick input files from a file explorer (the AWS S3 bucket when the analysis machine is an AWS VM, otherwise the SSH server's filesystem) and edit the pipeline's config.yaml values (pre-filled with defaults, one-line descriptions and required markers shown). On Save, the picked files are symlinked into the input directory (as /input/<name>) and config.yaml is written back on the server. ALWAYS call this when the user asks to run/execute a pipeline and the input has not been set up yet this session — do NOT ask the user to type input file paths or config values in chat, and do NOT summarize config values in chat (the page already shows every value with its description). After calling it, tell the user to pick files and set values in the opened page and click Save, and WAIT until they confirm they saved. Then call execute_pipeline with the returned input_dir. Requires the pipeline to already be downloaded to the server (its config.yaml must exist). If the config.yaml has variables WITHOUT explanatory comments, read the Snakefile/scripts and pass one-line explanations via the optional descriptions map so the page can show them.")]
     async fn configure_input(
         &self,
         Parameters(params): Parameters<ConfigureInputParams>,
@@ -2943,7 +2950,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                 ))]))
             }
         };
-        match viewer::show_input_config(pipeline_dir, config).await {
+        match viewer::show_input_config(pipeline_dir, config, params.descriptions).await {
             Ok(input_dir) => Ok(CallToolResult::success(vec![Content::text(format!(
                 "Opened the input configuration page in the user's browser. Ask the user to:\n\
                  1) pick input files from the file explorer (Browse), and\n\
@@ -2960,7 +2967,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. BEFORE running, briefly recap the config.yaml values relevant to the step the user is about to run (one short line each: current value plus a few words). If the pipeline runs in stages and the user is running only a later or optional stage, recap ONLY that stage's values, not the ones already used by earlier stages; if the stages are not clearly separable, recap all configurable values. Then check required values: if any required config value is still blank, do NOT run. If you can derive a sensible value from the config or context, propose it, explain where it comes from, and ask whether to fill it in and run; if you cannot derive one, ask the user to provide it. Never fill a required value on your own without the user's confirmation — run only after the user confirms. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first. INPUT SETUP: when the user asks to run/execute a pipeline and its input files and values have NOT been configured yet in this session, FIRST call configure_input — it opens a browser page where the user picks input files (from the S3 bucket for an AWS VM, or the SSH server's filesystem) and edits the config values. Wait until the user confirms they clicked Save there, then call this tool with the input_dir configure_input returned. Do NOT guess input file paths yourself when configure_input can collect them.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. INPUT SETUP: input files and config values are collected on the AutoPipe Input page, NOT in chat. When the user asks to run/execute a pipeline and its input has NOT been set up yet this session, FIRST call configure_input — it opens a browser page where the user picks input files (from the S3 bucket for an AWS VM, or the SSH server's filesystem) and edits every config value (defaults, one-line descriptions and required markers are shown there). Do NOT summarize or recap config values in chat, do NOT ask the user to type input file paths or config values, and do NOT guess input paths. Wait until the user confirms they clicked Save, then call this tool with the input_dir that configure_input returned. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,

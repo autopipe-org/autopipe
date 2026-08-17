@@ -238,9 +238,9 @@ generated, and never rely on a remembered earlier approval.
 
 ## config.yaml Rules
 - ALL configurable parameters go here, not in Snakefile
-- Include comments explaining each parameter
+- REQUIRED: every parameter MUST have a one-line explanatory comment describing what it is — either inline (`key: value  # what it is`) or on the line directly above the key. The AutoPipe Input page shows these comments as each field's description, so a variable with no comment appears with no help text.
+- Mark REQUIRED parameters by including the word `Required` in that parameter's comment (e.g. `# Required: paired-end R1 FASTQ`). The Input page reads this keyword to show a red `*` next to required fields.
 - Fill a default value or leave it blank per the user's choice (see "Config Variables: default value vs blank")
-- Mark required parameters with comments
 - IMPORTANT: Use `/input` and `/output` as paths (Docker mount points)
   - Input data is mounted at `/input` (read-only) at runtime
   - Output directory is mounted at `/output` at runtime

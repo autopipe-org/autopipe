@@ -2080,6 +2080,9 @@ fn parse_range_header(range: &str, total: usize) -> Option<(usize, usize)> {
 struct InputSession {
     pipeline_dir: String,
     config: AppConfig,
+    /// Optional AI-supplied fallback descriptions (key -> text), used only when
+    /// config.yaml has no comment for a variable.
+    ai_descriptions: std::collections::HashMap<String, String>,
 }
 
 static INPUT_SESSION: tokio::sync::OnceCell<Arc<Mutex<Option<InputSession>>>> =
@@ -2097,6 +2100,7 @@ async fn input_session_lock() -> &'static Arc<Mutex<Option<InputSession>>> {
 pub async fn show_input_config(
     pipeline_dir: String,
     config: AppConfig,
+    ai_descriptions: std::collections::HashMap<String, String>,
 ) -> Result<String, String> {
     let plugins_dir = config.full_plugins_dir();
     let input_dir = config.full_input_dir();
@@ -2105,6 +2109,7 @@ pub async fn show_input_config(
         *s = Some(InputSession {
             pipeline_dir,
             config,
+            ai_descriptions,
         });
     }
     let port = ensure_server(&plugins_dir).await?;
@@ -2113,76 +2118,170 @@ pub async fn show_input_config(
     Ok(input_dir)
 }
 
-fn input_is_file_guess(key: &str, value: &str) -> bool {
+/// Whether a config field is a pickable INPUT file. Precise on purpose: a value
+/// that merely ends in a data extension (e.g. an internal output filename such
+/// as top_seq_source: "stage4_sort2_ranked.tsv") must NOT be treated as a file,
+/// or Save would create a broken symlink. Only raw-input keys, or defaults that
+/// already point into the /input mount, qualify.
+fn input_is_file_field(key: &str, value: &str) -> bool {
     let k = key.to_lowercase();
     const FILE_KEYS: &[&str] = &[
-        "r1", "r2", "input", "reads", "fastq", "fq", "bam", "sam", "cram",
-        "reference", "ref", "genome", "fasta", "fa", "vcf", "bed", "gff",
-        "gtf", "index", "annotation", "gtf", "file",
+        "r1", "r2", "reads", "input", "fastq", "fq", "reference", "genome",
+        "fasta", "fa", "bam",
     ];
-    if FILE_KEYS.iter().any(|fk| k == *fk || k.ends_with(&format!("_{}", fk)) || k.starts_with(&format!("{}_", fk))) {
+    if FILE_KEYS
+        .iter()
+        .any(|fk| k == *fk || k.ends_with(&format!("_{}", fk)) || k.starts_with(&format!("{}_", fk)))
+    {
         return true;
     }
-    let v = value.trim();
-    if v.is_empty() || v == "true" || v == "false" || v.parse::<f64>().is_ok() {
-        return false;
-    }
-    // A path, or something.ext (1-6 letter extension).
-    if v.contains('/') {
-        return true;
-    }
-    if let Some(idx) = v.rfind('.') {
-        let ext = &v[idx + 1..];
-        return !ext.is_empty() && ext.len() <= 6 && ext.chars().all(|c| c.is_ascii_alphanumeric());
-    }
-    false
+    value.trim().starts_with("/input/")
 }
 
-fn input_parse_config_fields(yaml: &str) -> Vec<serde_json::Value> {
+/// Detect a YAML scalar's type from its RAW (unstripped) form so it can be
+/// written back with the same type. Quoted values stay strings.
+fn input_detect_type(raw: &str) -> &'static str {
+    let r = raw.trim();
+    if r.starts_with('"') || r.starts_with('\'') || r.is_empty() {
+        return "string";
+    }
+    if r == "true" || r == "false" {
+        return "bool";
+    }
+    if r.parse::<i64>().is_ok() {
+        return "int";
+    }
+    if r.parse::<f64>().is_ok() {
+        return "float";
+    }
+    "string"
+}
+
+/// Split "value  # comment" respecting a leading quoted string.
+fn input_split_inline_comment(s: &str) -> (String, String) {
+    let s = s.trim();
+    if s.starts_with('"') {
+        if let Some(end) = s[1..].find('"') {
+            let val = &s[..end + 2];
+            let rest = s[end + 2..].trim_start();
+            let comment = rest.strip_prefix('#').map(|c| c.trim().to_string()).unwrap_or_default();
+            return (val.to_string(), comment);
+        }
+    }
+    if let Some(hpos) = s.find('#') {
+        return (s[..hpos].trim().to_string(), s[hpos + 1..].trim().to_string());
+    }
+    (s.to_string(), String::new())
+}
+
+/// Parse top-level scalar config fields with type, required flag (comment
+/// contains "required"), and description (preceding comment lines + inline).
+fn input_parse_config_fields(
+    yaml: &str,
+    ai_desc: &std::collections::HashMap<String, String>,
+) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
     for line in yaml.lines() {
-        // Top-level scalar keys only (no leading whitespace, so nested blocks
-        // and list items are skipped).
-        if line.is_empty() || line.starts_with(char::is_whitespace) || line.trim_start().starts_with('#') {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            pending.clear();
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            continue; // nested / indented — not a top-level scalar
+        }
+        if trimmed.starts_with('#') {
+            let c = trimmed.trim_start_matches('#').trim();
+            if !c.is_empty() && !c.chars().all(|ch| ch == '=' || ch == '-') {
+                pending.push(c.to_string());
+            }
             continue;
         }
         let idx = match line.find(':') {
             Some(i) => i,
-            None => continue,
+            None => {
+                pending.clear();
+                continue;
+            }
         };
         let key = line[..idx].trim();
         if key.is_empty() || key.contains(' ') {
+            pending.clear();
             continue;
         }
-        let mut value = line[idx + 1..].trim().to_string();
-        // Strip a trailing " # comment".
-        if let Some(cpos) = value.find(" #") {
-            value = value[..cpos].trim().to_string();
+        let after = line[idx + 1..].trim();
+        let (raw_val, inline_comment) = input_split_inline_comment(after);
+        let ty = input_detect_type(&raw_val);
+        let display = raw_val.trim().trim_matches('"').trim_matches('\'').to_string();
+        let is_file = input_is_file_field(key, &display);
+
+        let mut desc = pending.join(" ");
+        if !inline_comment.is_empty() {
+            if desc.is_empty() {
+                desc = inline_comment.clone();
+            } else {
+                desc = format!("{} {}", desc, inline_comment);
+            }
         }
-        value = value
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
-        // Skip block-scalar / empty container headers.
-        let is_file = input_is_file_guess(key, &value);
-        out.push(serde_json::json!({ "key": key, "value": value, "is_file": is_file }));
+        if desc.is_empty() {
+            if let Some(d) = ai_desc.get(key) {
+                desc = d.clone();
+            }
+        }
+        let required = desc.to_lowercase().contains("required");
+
+        out.push(serde_json::json!({
+            "key": key,
+            "value": display,
+            "is_file": is_file,
+            "type": ty,
+            "required": required,
+            "description": desc,
+        }));
+        pending.clear();
     }
     out
 }
 
-fn input_yaml_quote(v: &str) -> String {
-    if v.is_empty() {
-        return "\"\"".to_string();
-    }
-    if v.contains(' ') || v.contains(':') || v.contains('#') {
-        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        v.to_string()
+/// Double-quote a YAML string value, escaping as needed.
+fn input_dquote(v: &str) -> String {
+    format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Format a value for YAML in the given type, so ints stay ints, bools stay
+/// bools, and strings stay quoted strings.
+fn input_format_value(value: &str, ty: &str) -> String {
+    let v = value.trim();
+    match ty {
+        "bool" => {
+            if v == "true" || v == "false" {
+                v.to_string()
+            } else {
+                input_dquote(v)
+            }
+        }
+        "int" => {
+            if v.parse::<i64>().is_ok() {
+                v.to_string()
+            } else {
+                input_dquote(v)
+            }
+        }
+        "float" => {
+            if v.parse::<f64>().is_ok() {
+                v.to_string()
+            } else {
+                input_dquote(v)
+            }
+        }
+        _ => input_dquote(v),
     }
 }
 
-fn input_set_yaml_value(yaml: &str, key: &str, new_value: &str) -> String {
-    let quoted = input_yaml_quote(new_value);
+/// Replace the value of a top-level key in-place, preserving comments/structure.
+/// `formatted_value` is written verbatim (already YAML-formatted by the caller).
+fn input_set_yaml_value(yaml: &str, key: &str, formatted_value: &str) -> String {
     let mut found = false;
     let lines: Vec<String> = yaml
         .lines()
@@ -2193,7 +2292,7 @@ fn input_set_yaml_value(yaml: &str, key: &str, new_value: &str) -> String {
             if let Some(rest) = line.strip_prefix(key) {
                 if rest.trim_start().starts_with(':') {
                     found = true;
-                    return format!("{}: {}", key, quoted);
+                    return format!("{}: {}", key, formatted_value);
                 }
             }
             line.to_string()
@@ -2225,7 +2324,7 @@ async fn input_config_handler() -> Json<serde_json::Value> {
         }
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
-    let fields = input_parse_config_fields(&raw);
+    let fields = input_parse_config_fields(&raw, &session.ai_descriptions);
     let is_cloud = session.config.connection_type == "cloud" && session.config.cloud_provider == "aws";
     Json(serde_json::json!({
         "ok": true,
@@ -2351,11 +2450,21 @@ struct InputSaveField {
     key: String,
     value: String,
     is_file: bool,
+    #[serde(rename = "type", default)]
+    ty: String,
 }
 
 #[derive(Deserialize)]
 struct InputSaveBody {
     fields: Vec<InputSaveField>,
+}
+
+/// A file field needs symlinking only when the user actually picked an external
+/// source: a non-empty value that is NOT already an /input/ path (an unchanged
+/// default or a previously prepared path stays as-is, avoiding broken symlinks).
+fn input_needs_symlink(f: &InputSaveField) -> bool {
+    let v = f.value.trim();
+    f.is_file && !v.is_empty() && !v.starts_with("/input/")
 }
 
 async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json::Value> {
@@ -2370,8 +2479,8 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
 
     let _ = ssh_run_fast(cfg, &format!("mkdir -p '{}'", input_dir.replace('\'', "'\\''"))).await;
 
-    let any_file = body.fields.iter().any(|f| f.is_file && !f.value.trim().is_empty());
-    if is_cloud && any_file {
+    let any_pick = body.fields.iter().any(input_needs_symlink);
+    if is_cloud && any_pick {
         let region = if cfg.aws_region.trim().is_empty() { "us-east-1" } else { cfg.aws_region.as_str() };
         let mount_cmd = format!(
             "sudo apt-get install -y -qq fuse3 >/dev/null 2>&1 || true; \
@@ -2389,7 +2498,8 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
     let mut new_values: Vec<(String, String)> = Vec::new();
     let mut prepared: Vec<String> = Vec::new();
     for f in &body.fields {
-        if f.is_file && !f.value.trim().is_empty() {
+        if input_needs_symlink(f) {
+            // The user picked a file: value is an S3 key (cloud) or a server path.
             let src = if is_cloud {
                 format!("/home/ubuntu/s3input/{}", f.value.trim())
             } else {
@@ -2403,10 +2513,14 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
                 link.replace('\'', "'\\''")
             );
             let _ = ssh_run_fast(cfg, &cmd).await;
-            new_values.push((f.key.clone(), format!("/input/{}", base)));
+            // File paths are always quoted strings in config.yaml.
+            new_values.push((f.key.clone(), input_dquote(&format!("/input/{}", base))));
             prepared.push(base);
         } else {
-            new_values.push((f.key.clone(), f.value.clone()));
+            // Non-file, or a file left at its /input default: write with the
+            // field's original type so ints stay ints and strings stay strings.
+            let ty = if f.is_file { "string" } else { f.ty.as_str() };
+            new_values.push((f.key.clone(), input_format_value(&f.value, ty)));
         }
     }
 
@@ -2434,18 +2548,25 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
 
 const INPUT_PAGE_HTML: &str = r####"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AutoPipe — Pipeline input</title>
+<title>AutoPipe Input</title>
 <style>
-  :root{--bg:#f8fafc;--card:#fff;--border:#e2e8f0;--strong:#cbd5e1;--text:#0f172a;--muted:#64748b;--accent:#0f4c5c;--accent2:#0d3d4a}
+  :root{--bg:#f8fafc;--card:#fff;--border:#e2e8f0;--strong:#cbd5e1;--text:#0f172a;--muted:#64748b;--accent:#0f4c5c;--accent2:#0d3d4a;--req:#dc2626}
   *{box-sizing:border-box}
   body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
-  .wrap{max-width:760px;margin:0 auto;padding:24px 20px 80px}
-  h1{font-size:1.3rem;margin:0 0 4px}
-  .sub{color:var(--muted);font-size:.9rem;margin:0 0 20px}
-  .field{display:grid;grid-template-columns:150px 1fr auto;gap:10px;align-items:center;margin-bottom:10px}
-  .field label{font-weight:600;font-size:.88rem}
-  .field input{padding:8px 10px;border:1px solid var(--strong);border-radius:6px;font-size:.9rem;width:100%;font-family:inherit}
-  .field input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(15,76,92,.1)}
+  .top{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--card)}
+  .top img{width:26px;height:26px;border-radius:6px}
+  .top .name{font-weight:700;font-size:1.05rem}
+  .wrap{max-width:780px;margin:0 auto;padding:22px 20px 90px}
+  h1{font-size:1.15rem;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 2px}
+  .reqnote{color:var(--muted);font-size:.82rem;margin:0 0 20px}
+  .reqnote b{color:var(--req)}
+  .field{display:grid;grid-template-columns:190px 1fr auto;gap:8px 12px;align-items:start;margin-bottom:14px}
+  .field .lab{font-weight:600;font-size:.88rem;padding-top:8px}
+  .field .lab .star{color:var(--req);margin-right:3px}
+  .field .ctl input,.field .ctl select{padding:8px 10px;border:1px solid var(--strong);border-radius:6px;font-size:.9rem;width:100%;font-family:inherit;background:var(--card);color:var(--text)}
+  .field .ctl input:focus,.field .ctl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(15,76,92,.1)}
+  .field .desc{grid-column:2 / 4;color:var(--muted);font-size:.78rem;margin-top:4px;line-height:1.4}
   .browse{padding:8px 12px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.85rem;white-space:nowrap}
   .browse:hover{border-color:var(--accent);color:var(--accent)}
   .bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--border);padding:12px 20px;display:flex;justify-content:flex-end;gap:12px;align-items:center}
@@ -2454,7 +2575,7 @@ const INPUT_PAGE_HTML: &str = r####"<!doctype html>
   .save:disabled{opacity:.5;cursor:default}
   .msg{font-size:.85rem;color:var(--muted)}
   .msg.ok{color:var(--accent)}
-  .msg.err{color:#dc2626}
+  .msg.err{color:var(--req)}
   .overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:24px}
   .overlay.show{display:flex}
   .modal{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:560px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 12px 32px rgba(0,0,0,.25)}
@@ -2470,14 +2591,17 @@ const INPUT_PAGE_HTML: &str = r####"<!doctype html>
   .up{padding:4px 10px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.8rem}
   .empty{padding:16px;color:var(--muted);font-size:.85rem}
 </style></head>
-<body><div class="wrap">
+<body>
+<div class="top"><img src="/logo.png" alt=""><span class="name">AutoPipe Input</span></div>
+<div class="wrap">
   <h1>Pipeline input</h1>
-  <p class="sub" id="sub">Loading…</p>
+  <p class="sub" id="sub">Edit input values. Defaults are pre-filled.</p>
+  <p class="reqnote"><b>*</b> indicates a required field.</p>
   <div id="fields"></div>
 </div>
 <div class="bar">
   <span class="msg" id="msg"></span>
-  <button class="save" id="save" disabled>Save & prepare input</button>
+  <button class="save" id="save" disabled>Save &amp; prepare input</button>
 </div>
 <div class="overlay" id="ov"><div class="modal">
   <div class="mhead"><button class="up" id="up">↑ Up</button><span class="cwd" id="cwd"></span></div>
@@ -2492,15 +2616,28 @@ async function load(){
   const r=await fetch("/api/input/config");const d=await r.json();
   if(!d.ok){$("sub").textContent="Error: "+d.error;return}
   SOURCE=d.source;FIELDS=d.fields;
-  $("sub").textContent=(SOURCE==="s3"?("Pick input files from S3 bucket \""+d.bucket+"\""):"Pick input files from the analysis server")+", and edit input values. Defaults are pre-filled.";
   const c=$("fields");c.innerHTML="";
   FIELDS.forEach(f=>{
     const row=document.createElement("div");row.className="field";
-    const lab=document.createElement("label");lab.textContent=f.key;
-    const inp=document.createElement("input");inp.value=f.value;inp.dataset.key=f.key;
-    row.appendChild(lab);row.appendChild(inp);
+    const lab=document.createElement("div");lab.className="lab";
+    lab.innerHTML=(f.required?'<span class="star">*</span>':'')+f.key;
+    const ctl=document.createElement("div");ctl.className="ctl";
+    let inp;
+    if(f.type==="bool"){
+      inp=document.createElement("select");
+      ["true","false"].forEach(o=>{const op=document.createElement("option");op.value=o;op.textContent=o;if(String(f.value)===o)op.selected=true;inp.appendChild(op)});
+    } else {
+      inp=document.createElement("input");
+      inp.type=(f.type==="int"||f.type==="float")?"number":"text";
+      if(f.type==="float")inp.step="any";
+      inp.value=f.value;
+    }
+    inp.dataset.key=f.key;
+    ctl.appendChild(inp);
+    row.appendChild(lab);row.appendChild(ctl);
     if(f.is_file){const b=document.createElement("button");b.className="browse";b.textContent="Browse…";b.onclick=()=>openBrowser(f.key);row.appendChild(b);}
     else{const sp=document.createElement("span");row.appendChild(sp);}
+    if(f.description){const d2=document.createElement("div");d2.className="desc";d2.textContent=f.description;row.appendChild(d2);}
     c.appendChild(row);
   });
   $("save").disabled=false;
@@ -2510,7 +2647,7 @@ async function list(path){
   curPath=path;$("mbody").innerHTML='<div class="empty">Loading…</div>';
   const r=await fetch("/api/input/browse?path="+encodeURIComponent(path));const d=await r.json();
   if(!d.ok){$("mbody").innerHTML='<div class="empty">Error: '+d.error+'</div>';return}
-  $("cwd").textContent=(SOURCE==="s3"?("s3://"+ (d.cwd||"")):(d.cwd||""));
+  $("cwd").textContent=(SOURCE==="s3"?("s3://"+(d.cwd||"")):(d.cwd||""));
   $("up").disabled=(d.parent==null);$("up").dataset.p=d.parent==null?"":d.parent;
   const b=$("mbody");b.innerHTML="";
   (d.folders||[]).forEach(f=>{const row=el(f.name,"📁",null);row.onclick=()=>list(f.path);b.appendChild(row)});
@@ -2519,20 +2656,20 @@ async function list(path){
 }
 function el(name,ic,sz){const r=document.createElement("div");r.className="row";r.innerHTML='<span class="ic">'+ic+'</span><span>'+name+'</span>'+(sz!=null?'<span class="sz">'+fmtSize(sz)+'</span>':'');return r}
 function pick(path){
-  document.querySelectorAll('#fields input').forEach(i=>{if(i.dataset.key===activeKey)i.value=path});
+  document.querySelectorAll('#fields .ctl input, #fields .ctl select').forEach(i=>{if(i.dataset.key===activeKey)i.value=path});
   $("ov").classList.remove("show");
 }
 $("up").onclick=()=>{const p=$("up").dataset.p;list(p)};
 $("close").onclick=()=>$("ov").classList.remove("show");
 $("save").onclick=async()=>{
   $("save").disabled=true;setMsg("Preparing input…","");
-  const fields=[...document.querySelectorAll('#fields input')].map(i=>{
+  const fields=[...document.querySelectorAll('#fields .ctl input, #fields .ctl select')].map(i=>{
     const f=FIELDS.find(x=>x.key===i.dataset.key)||{};
-    return{key:i.dataset.key,value:i.value,is_file:!!f.is_file};
+    return{key:i.dataset.key,value:i.value,is_file:!!f.is_file,type:f.type||"string"};
   });
   const r=await fetch("/api/input/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields})});
   const d=await r.json();
-  if(d.ok){setMsg("Saved. Input ready — you can tell Claude to run the pipeline now.","ok");}
+  if(d.ok){setMsg("Saved. You can close this tab.","ok");}
   else{setMsg("Error: "+d.error,"err");$("save").disabled=false;}
 };
 function setMsg(t,c){const m=$("msg");m.textContent=t;m.className="msg"+(c?" "+c:"")}
