@@ -4028,9 +4028,22 @@ are removed via Docker to handle permission issues. relative_path is relative to
     async fn read_run_marker_pipeline(&self, dir: &str) -> Option<String> {
         let mp = format!("{}/.autopipe-run.json", dir.trim_end_matches('/'));
         match self.ssh_run(&format!("cat '{}' 2>/dev/null", shell_escape(&mp))).await {
-            Ok((content, 0)) => serde_json::from_str::<serde_json::Value>(&clean_content(&content))
-                .ok()
-                .and_then(|v| v["pipeline"].as_str().map(|s| s.to_string())),
+            Ok((content, 0)) => {
+                let v = serde_json::from_str::<serde_json::Value>(&clean_content(&content)).ok()?;
+                // Prefer the ro-crate pipeline name; if it is missing (older runs),
+                // fall back to the image name with the "autopipe-" prefix and any
+                // ":tag" stripped, so viewer matching still works.
+                v["pipeline"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        v["image_name"].as_str().map(|img| {
+                            let n = img.strip_prefix("autopipe-").unwrap_or(img);
+                            n.split(':').next().unwrap_or(n).to_string()
+                        })
+                    })
+            }
             _ => None,
         }
     }
@@ -4070,10 +4083,27 @@ are removed via Docker to handle permission issues. relative_path is relative to
             if let Ok(resp) = client.get(&raw).send().await {
                 if let Ok(m) = resp.json::<serde_json::Value>().await {
                     if m["plugin_type"].as_str() == Some("pipeline") {
-                        if let Some(names) = m["pipeline_match"]["names"].as_array() {
-                            if names.iter().any(|n| n.as_str().map(|s| s.eq_ignore_ascii_case(pipeline_name)).unwrap_or(false)) {
-                                return p["name"].as_str().map(|s| s.to_string());
-                            }
+                        let name_matches = |names: &serde_json::Value| -> bool {
+                            names
+                                .as_array()
+                                .map(|a| {
+                                    a.iter().any(|n| {
+                                        n.as_str()
+                                            .map(|s| s.eq_ignore_ascii_case(pipeline_name))
+                                            .unwrap_or(false)
+                                    })
+                                })
+                                .unwrap_or(false)
+                        };
+                        // Legacy: top-level pipeline_match.names.
+                        // New: pipeline_match.rules[].names (what current viewers use).
+                        let legacy_hit = name_matches(&m["pipeline_match"]["names"]);
+                        let rules_hit = m["pipeline_match"]["rules"]
+                            .as_array()
+                            .map(|rules| rules.iter().any(|r| name_matches(&r["names"])))
+                            .unwrap_or(false);
+                        if legacy_hit || rules_hit {
+                            return p["name"].as_str().map(|s| s.to_string());
                         }
                     }
                 }
@@ -4167,7 +4197,7 @@ are removed via Docker to handle permission issues. relative_path is relative to
         None
     }
 
-    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. The viewer includes a sidebar file browser: from the opened file (or directory) the user can navigate the output directory tree — including parent folders, up to the run's output directory — and open other files on demand, each loaded lazily. So passing a single file is enough; the user can explore sibling and nearby files themselves without you calling show_results again. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables. PIPELINE OUTPUT — ALWAYS ASK FIRST: when a folder is a pipeline's result folder (a pipeline viewer claims it — this applies to BOTH the sorting-result run folder AND a meme_out subfolder), this tool does NOT open immediately; it returns a message telling you to ask the user first. You MUST ask the user (dedicated combined viewer vs. opening files one by one), then re-call show_results on the SAME path with pipeline_viewer=\"yes\" or \"no\". Never open a pipeline result silently — this holds for sorting results and MEME results alike. MEME RESULTS — ASK SCOPE: to show motif analysis, ask the user whether they want it together with the sorting results (open the RUN folder → Sequences + Motif tabs) or MEME only (open the meme_out folder → a Motif-only view), then call show_results on the folder they chose.")]
+    #[tool(description = "Open the Results Viewer in a browser for inspecting result files. Call this whenever the user wants a richer view of result files (images, plots, genomic tracks, large tables, binary formats) — there is no required hand-off from list_files; you can also call it proactively after summarising results in chat if it would help the user. Pass a DIRECTORY path to view all files in it, or a single FILE path to view only that file. File formats are handled by viewer plugins (auto-routed by file extension): defaults include images, PDF, text, CSV, FASTA/FASTQ, BAM/BED/GFF/CRAM/VCF/BCF, and HDF5 (h5ad). The viewer matches each file's extension against locally-installed plugins automatically — the user does NOT need to choose a plugin. If the user asks to view a format that no installed plugin handles, tell them to (a) open the AutoPipe desktop app and click the Plugins button to search the registry for a matching plugin, or (b) if no plugin exists, write their own following the Plugin development guide at https://autopipe.org/plugins/guide. Do NOT attempt to install plugins yourself — plugin installation is GUI-only. When the user asks to view a specific file, pass the exact file path — do NOT pass the parent directory. The viewer includes a sidebar file browser: from the opened file (or directory) the user can navigate the output directory tree — including parent folders, up to the run's output directory — and open other files on demand, each loaded lazily. So passing a single file is enough; the user can explore sibling and nearby files themselves without you calling show_results again. IMPORTANT workflow for genomics files that need a reference (BAM/BED/GFF/CRAM): (1) First call show_results WITHOUT the reference parameter. The viewer will NOT open yet — instead you will receive information about FASTA files in the directory. (2) Ask the user about the reference based on the response. (3) Then call show_results AGAIN: with reference=<fasta_filename> if the user confirmed, with reference=<user_provided_path> if they gave a different path, or with reference=\"none\" if the user has no reference. The viewer only opens on this second call. Without reference, only Data tabs are shown. With reference, both Data and IGV tabs appear. CRAM files cannot be displayed without a reference. VCF and BCF files do NOT require the reference workflow — they open directly with data tables. PIPELINE OUTPUT — ALWAYS ASK FIRST: when a folder is a pipeline's result folder (a pipeline viewer claims it — this applies to BOTH the sorting-result run folder AND a meme_out subfolder), this tool does NOT open immediately; it returns a message telling you to ask the user first. You MUST ask the user (dedicated combined viewer vs. opening files one by one), then re-call show_results on the SAME path with pipeline_viewer=\"yes\" or \"no\". Never open a pipeline result silently — this holds for sorting results and MEME results alike. NOT-INSTALLED VIEWER: if the tool instead returns a '[Pipeline viewer available]' message, it means this pipeline has a DEDICATED viewer in the registry that is NOT installed locally. You MUST relay BOTH options to the user and wait for their choice: (a) install the dedicated viewer from the AutoPipe app's Plugins tab to see a combined dashboard, then reopen; or (b) open the files with the default viewer now (re-call show_results with pipeline_viewer=\"no\"). Never silently fall back to the default viewer in this case. MEME RESULTS — ASK SCOPE: to show motif analysis, ask the user whether they want it together with the sorting results (open the RUN folder → Sequences + Motif tabs) or MEME only (open the meme_out folder → a Motif-only view), then call show_results on the folder they chose.")]
     async fn show_results(
         &self,
         Parameters(params): Parameters<ShowResultsParams>,
