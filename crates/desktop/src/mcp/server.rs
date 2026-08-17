@@ -686,6 +686,7 @@ Produce a natural-language PIPELINE SUMMARY REPORT for the user, in THEIR chat l
 5. Tools & versions — from the Dockerfile.\n\
 6. Config values — each key and its current value; mark blank ones the user must fill.\n\
 7. Checks — list EVERY deterministic finding above, plus any logic problems you find yourself in the code. For each item you MUST cite file:line and quote the offending snippet.\n\
+EFFICIENCY (do this in THIS one reading pass, so you do not have to re-read the code later): while the full source is in front of you — the same pass in which you assess safety and write the summary — also draft ONE concise plain-language line describing each config.yaml variable. Keep these; when the user later runs the pipeline and you call configure_input, pass them as the `descriptions` map so the input page shows help text without re-reading the code.\n\
 Rules: describe ONLY what is present in the code above — do not invent rules, tools, or files. If something is unclear, or a file was truncated or omitted, say so explicitly instead of guessing. Every finding in section 7 must point to a real file:line.\n\
 After presenting the report, ask the user to confirm or request changes BEFORE building or executing (e.g. 'Proceed to build, or should I fix anything?'). For a freshly GENERATED pipeline, always show this report and get confirmation before build_image. Re-run this review after any edit — never rely on a remembered earlier approval.";
 

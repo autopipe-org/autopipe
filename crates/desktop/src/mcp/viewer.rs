@@ -2228,20 +2228,20 @@ fn input_parse_config_fields(
         let display = raw_val.trim().trim_matches('"').trim_matches('\'').to_string();
         let is_file = input_is_file_field(key, &display);
 
-        let mut desc = pending.join(" ");
+        // The raw config comment (preceding block + inline) is used to detect the
+        // required flag and as a LAST-RESORT description. The description SHOWN is
+        // the AI's clean one-line summary when available (primary), so we never
+        // dump possibly-messy raw comment text as the help line.
+        let mut config_comment = pending.join(" ");
         if !inline_comment.is_empty() {
-            if desc.is_empty() {
-                desc = inline_comment.clone();
+            if config_comment.is_empty() {
+                config_comment = inline_comment.clone();
             } else {
-                desc = format!("{} {}", desc, inline_comment);
+                config_comment = format!("{} {}", config_comment, inline_comment);
             }
         }
-        if desc.is_empty() {
-            if let Some(d) = ai_desc.get(key) {
-                desc = d.clone();
-            }
-        }
-        let required = desc.to_lowercase().contains("required");
+        let required = config_comment.to_lowercase().contains("required");
+        let desc = ai_desc.get(key).cloned().unwrap_or(config_comment);
 
         out.push(serde_json::json!({
             "key": key,

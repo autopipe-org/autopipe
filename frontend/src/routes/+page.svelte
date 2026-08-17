@@ -54,6 +54,10 @@
 
   let awsAccessKey = $state('');
   let awsSecretKey = $state('');
+  // Shown in the secret field (as masked dots) when a secret is already saved,
+  // so it looks filled. Never sent as-is: on Connect it is treated as "use the
+  // saved secret" (the backend falls back to the stored secret for an empty one).
+  const AWS_SECRET_SAVED = '••••••••••••';
   let awsRegion = $state('us-east-1');
   let awsBucket = $state('');
   let awsAccount = $state<string | null>(null);
@@ -101,19 +105,26 @@
   }
 
   async function awsConnect() {
-    if (!awsAccessKey.trim() || !awsSecretKey.trim()) {
-      showToast('err', 'Enter your AWS access key and secret.');
+    // An unchanged masked value means "use the saved secret" (sent as empty).
+    const secretToSend = awsSecretKey === AWS_SECRET_SAVED ? '' : awsSecretKey.trim();
+    if (!awsAccessKey.trim()) {
+      showToast('err', 'Enter your AWS access key.');
+      return;
+    }
+    if (!secretToSend && !awsHasCreds) {
+      showToast('err', 'Enter your AWS secret access key.');
       return;
     }
     awsBusy = true;
     try {
       const account = await invoke<string>('aws_connect', {
         accessKey: awsAccessKey.trim(),
-        secretKey: awsSecretKey.trim(),
+        secretKey: secretToSend,
         region: awsRegion.trim() || 'us-east-1',
       });
       awsAccount = account;
       awsHasCreds = true;
+      awsSecretKey = AWS_SECRET_SAVED;
       try {
         const c = await invoke<{ user_name: string }>('aws_get_config');
         awsUserName = c.user_name ?? '';
@@ -293,6 +304,8 @@
       awsUserName = a.user_name ?? '';
       awsAccessKey = a.access_key ?? '';
       awsHasCreds = a.has_credentials;
+      // Show the secret as masked-filled when one is already saved.
+      if (a.has_credentials) awsSecretKey = AWS_SECRET_SAVED;
       // Saved credentials: re-verify silently so the account shows as Connected
       // automatically, without the user re-entering keys or clicking Connect.
       if (a.has_credentials) {
@@ -520,7 +533,6 @@
                 <button class="btn-outline small danger" disabled={awsVmBusy} onclick={confirmTerminate}>
                   Terminate VM
                 </button>
-                <button class="icon-btn" title="Refresh status" disabled={awsVmBusy} onclick={refreshVmState} aria-label="Refresh status">↻</button>
               </div>
             {/if}
           {:else}
