@@ -160,6 +160,7 @@ fn run_gui() {
             commands::get_ssh_config,
             commands::save_ssh_config,
             commands::aws_connect,
+            commands::aws_reverify,
             commands::aws_list_buckets,
             commands::aws_set_bucket,
             commands::aws_get_config,

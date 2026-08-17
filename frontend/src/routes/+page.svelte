@@ -287,11 +287,19 @@
   onMount(async () => {
     try { sshConfig = await invoke<SshConfig>('get_ssh_config'); } catch {}
     try {
-      const a = await invoke<{ region: string; bucket: string; user_name: string; has_credentials: boolean }>('aws_get_config');
+      const a = await invoke<{ region: string; bucket: string; user_name: string; access_key: string; has_credentials: boolean }>('aws_get_config');
       if (a.region) awsRegion = a.region;
       awsBucket = a.bucket ?? '';
       awsUserName = a.user_name ?? '';
+      awsAccessKey = a.access_key ?? '';
       awsHasCreds = a.has_credentials;
+      // Saved credentials: re-verify silently so the account shows as Connected
+      // automatically, without the user re-entering keys or clicking Connect.
+      if (a.has_credentials) {
+        try {
+          awsAccount = await invoke<string>('aws_reverify');
+        } catch {}
+      }
     } catch {}
     try {
       awsVm = await invoke<{ provisioned: boolean; instance_id: string; host: string }>('aws_vm_status');
