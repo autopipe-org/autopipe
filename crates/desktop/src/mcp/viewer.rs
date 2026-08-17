@@ -2182,16 +2182,26 @@ fn input_parse_config_fields(
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     let mut pending: Vec<String> = Vec::new();
+    // A comment block placed above a GROUP of keys (e.g. "# Required: Paired-end
+    // FASTQ files" above both r1 and r2) describes every key in that group, so it
+    // persists across consecutive key lines and is cleared only by a blank line
+    // or by the start of a NEW comment block after some keys.
+    let mut last_was_key = false;
     for line in yaml.lines() {
         let trimmed = line.trim_start();
         if trimmed.is_empty() {
             pending.clear();
+            last_was_key = false;
             continue;
         }
         if line.starts_with(char::is_whitespace) {
             continue; // nested / indented — not a top-level scalar
         }
         if trimmed.starts_with('#') {
+            if last_was_key {
+                pending.clear();
+                last_was_key = false;
+            }
             let c = trimmed.trim_start_matches('#').trim();
             if !c.is_empty() && !c.chars().all(|ch| ch == '=' || ch == '-') {
                 pending.push(c.to_string());
@@ -2202,12 +2212,14 @@ fn input_parse_config_fields(
             Some(i) => i,
             None => {
                 pending.clear();
+                last_was_key = false;
                 continue;
             }
         };
         let key = line[..idx].trim();
         if key.is_empty() || key.contains(' ') {
             pending.clear();
+            last_was_key = false;
             continue;
         }
         let after = line[idx + 1..].trim();
@@ -2239,7 +2251,7 @@ fn input_parse_config_fields(
             "required": required,
             "description": desc,
         }));
-        pending.clear();
+        last_was_key = true;
     }
     out
 }
@@ -2279,8 +2291,9 @@ fn input_format_value(value: &str, ty: &str) -> String {
     }
 }
 
-/// Replace the value of a top-level key in-place, preserving comments/structure.
-/// `formatted_value` is written verbatim (already YAML-formatted by the caller).
+/// Replace the value of a top-level key in-place, preserving comments/structure,
+/// INCLUDING any inline `# comment` on that key's line (so descriptions survive
+/// repeated saves). `formatted_value` is written verbatim (already formatted).
 fn input_set_yaml_value(yaml: &str, key: &str, formatted_value: &str) -> String {
     let mut found = false;
     let lines: Vec<String> = yaml
@@ -2292,7 +2305,18 @@ fn input_set_yaml_value(yaml: &str, key: &str, formatted_value: &str) -> String 
             if let Some(rest) = line.strip_prefix(key) {
                 if rest.trim_start().starts_with(':') {
                     found = true;
-                    return format!("{}: {}", key, formatted_value);
+                    // Keep the original inline comment, if any.
+                    let after = match line.find(':') {
+                        Some(c) => &line[c + 1..],
+                        None => "",
+                    };
+                    let (_v, comment) = input_split_inline_comment(after.trim());
+                    let tail = if comment.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  # {}", comment)
+                    };
+                    return format!("{}: {}{}", key, formatted_value, tail);
                 }
             }
             line.to_string()
@@ -2548,7 +2572,7 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
 
 const INPUT_PAGE_HTML: &str = r####"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AutoPipe Input</title>
+<title>AutoPipe - Pipeline input</title>
 <style>
   :root{--bg:#f8fafc;--card:#fff;--border:#e2e8f0;--strong:#cbd5e1;--text:#0f172a;--muted:#64748b;--accent:#0f4c5c;--accent2:#0d3d4a;--req:#dc2626}
   *{box-sizing:border-box}
@@ -2556,8 +2580,8 @@ const INPUT_PAGE_HTML: &str = r####"<!doctype html>
   .top{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--border);background:var(--card)}
   .top img{width:26px;height:26px;border-radius:6px}
   .top .name{font-weight:700;font-size:1.05rem}
+  .top .ptitle{color:var(--muted);font-weight:500;font-size:1.02rem}
   .wrap{max-width:780px;margin:0 auto;padding:22px 20px 90px}
-  h1{font-size:1.15rem;margin:0 0 4px}
   .sub{color:var(--muted);font-size:.9rem;margin:0 0 2px}
   .reqnote{color:var(--muted);font-size:.82rem;margin:0 0 20px}
   .reqnote b{color:var(--req)}
@@ -2592,9 +2616,8 @@ const INPUT_PAGE_HTML: &str = r####"<!doctype html>
   .empty{padding:16px;color:var(--muted);font-size:.85rem}
 </style></head>
 <body>
-<div class="top"><img src="/logo.png" alt=""><span class="name">AutoPipe Input</span></div>
+<div class="top"><img src="/logo.png" alt=""><span class="name">AutoPipe</span><span class="ptitle">- Pipeline input</span></div>
 <div class="wrap">
-  <h1>Pipeline input</h1>
   <p class="sub" id="sub">Edit input values. Defaults are pre-filled.</p>
   <p class="reqnote"><b>*</b> indicates a required field.</p>
   <div id="fields"></div>
