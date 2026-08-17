@@ -2573,6 +2573,7 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
 const INPUT_PAGE_HTML: &str = r####"<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AutoPipe - Pipeline input</title>
+<link rel="icon" href="/logo.png" type="image/png">
 <style>
   :root{--bg:#f8fafc;--card:#fff;--border:#e2e8f0;--strong:#cbd5e1;--text:#0f172a;--muted:#64748b;--accent:#0f4c5c;--accent2:#0d3d4a;--req:#dc2626}
   *{box-sizing:border-box}
