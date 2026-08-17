@@ -5,6 +5,7 @@
 // `--status`) working so existing scripts and MCP client registrations
 // don't break.
 
+mod aws;
 mod claude_config;
 mod config;
 mod mcp;

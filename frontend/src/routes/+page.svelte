@@ -39,7 +39,8 @@
     // Manual SSH is password-only; the AWS VM uses its own key internally
     // (aws_vm_key_path), independent of this field.
     sshConfig.auth_method = 'password';
-    if (kind === 'cloud' && !sshConfig.cloud_provider) sshConfig.cloud_provider = 'aws';
+    // Only AWS is supported for auto-provisioning, so the cloud tab is always AWS.
+    if (kind === 'cloud') sshConfig.cloud_provider = 'aws';
   }
 
   // ── AWS account connection (Phase 1: verify credentials + list buckets) ──
@@ -184,7 +185,7 @@
     } catch (e) {
       const msg = String(e);
       if (msg.includes('UnauthorizedOperation') || msg.includes('not authorized') || msg.includes('AccessDenied') || msg.includes('InstanceProfile')) {
-        showToast('info', 'Missing AWS permissions — copied a setup command and opened CloudShell. Paste it there, press Enter, then click Provision VM again.');
+        showToast('info', 'Missing AWS permissions. Copied a setup command and opened CloudShell; paste it there, press Enter, then click Provision VM again.');
         awsSetupPermissions();
       } else {
         showToast('err', `Provision failed: ${e}`);
@@ -214,10 +215,9 @@
       okLabel: 'Stop VM',
       danger: false,
       lines: [
-        'Stopping pauses the VM. Its disk and everything installed on it are kept,',
-        'so next time you Start it, your setup is exactly as you left it.',
-        'While stopped you are billed only for disk storage (a few $/month), not compute.',
-        'Note: the public IP changes on restart — AutoPipe updates it for you.',
+        'Keeps your disk and installed tools, so you can resume later.',
+        'Storage-only billing while stopped, no compute charge.',
+        'IP changes on restart; AutoPipe updates it automatically.',
       ],
       run: async () => {
         awsVmBusy = true;
@@ -236,14 +236,13 @@
 
   function confirmTerminate() {
     vmConfirm = {
-      title: 'Terminate (delete) the VM?',
+      title: 'Terminate the VM?',
       okLabel: 'Terminate VM',
       danger: true,
       lines: [
-        'Terminating permanently deletes the VM and its disk — all installed tools',
-        'and data on it are gone. Billing stops completely.',
-        'You would have to Provision a fresh VM and set it up again to use cloud runs.',
-        'If you just want to pause billing and keep your setup, choose Stop instead.',
+        'Permanently deletes the VM, its disk, tools, and data.',
+        'Billing stops fully.',
+        'To keep your setup and just pause billing, use Stop instead.',
       ],
       run: async () => {
         awsVmBusy = true;
@@ -418,7 +417,7 @@
       </header>
       <p class="step-desc">
         The machine where AutoPipe runs your analyses. Connect a self-managed
-        Linux server over SSH, or a VM in a cloud provider.
+        Linux server over SSH, or an auto-provisioned AWS VM.
       </p>
 
       <div class="conn-toggle" role="tablist" aria-label="Connection type">
@@ -435,28 +434,17 @@
           class:active={sshConfig.connection_type === 'cloud'}
           aria-selected={sshConfig.connection_type === 'cloud'}
           onclick={() => setConnectionType('cloud')}
-        >Cloud VM</button>
+        >AWS VM</button>
       </div>
 
       {#if sshConfig.connection_type === 'cloud'}
-        <div class="provider-row">
-          <span class="provider-label">Provider</span>
-          <select class="ap-select" bind:value={sshConfig.cloud_provider}>
-            <option value="aws">Amazon Web Services (EC2)</option>
-            <option value="gcp">Google Cloud (Compute Engine)</option>
-            <option value="azure">Microsoft Azure (VM)</option>
-          </select>
-        </div>
-      {/if}
-
-      {#if sshConfig.connection_type === 'cloud' && sshConfig.cloud_provider === 'aws'}
         <div class="aws-card">
           <div class="aws-head">
-            <span class="aws-title">AWS account</span>
+            <span class="aws-title"><span class="step-letter">ⓐ</span> AWS account</span>
             {#if awsAccount}
               <span class="aws-badge ok">Connected · {awsAccount}</span>
             {:else if awsHasCreds}
-              <span class="aws-badge">Saved — click Connect to verify</span>
+              <span class="aws-badge">Saved, click Connect to verify</span>
             {/if}
           </div>
           <div class="aws-form">
@@ -478,7 +466,7 @@
               </select>
             </label>
           </div>
-          <p class="aws-hint">Pick the same region as your S3 bucket — your VM is created there.</p>
+          <p class="aws-hint">Pick the same region as your S3 bucket. Your VM is created there.</p>
           <div class="aws-actions">
             <button class="btn-outline small" disabled={awsBusy} onclick={awsConnect}>
               {awsBusy ? 'Connecting…' : 'Connect'}
@@ -490,35 +478,8 @@
         </div>
 
         <div class="aws-card">
-          <div class="aws-head"><span class="aws-title">S3 bucket</span></div>
-          <div class="aws-form">
-            <label>
-              <span>Bucket</span>
-              <select
-                class="ap-select"
-                bind:value={awsBucket}
-                onchange={(e) => awsSelectBucket((e.currentTarget as HTMLSelectElement).value)}
-                disabled={awsBuckets.length === 0}
-              >
-                {#if awsBuckets.length === 0}
-                  <option value={awsBucket}>{awsBucket || (awsAccount ? '(no buckets — create one in S3, then Refresh)' : '(connect first to list buckets)')}</option>
-                {:else}
-                  <option value="">— select —</option>
-                  {#each awsBuckets as b}
-                    <option value={b}>{b}</option>
-                  {/each}
-                {/if}
-              </select>
-            </label>
-          </div>
-          <div class="aws-actions">
-            <button class="btn-outline small" disabled={awsBusy} onclick={awsLoadBuckets}>Refresh</button>
-          </div>
-        </div>
-
-        <div class="aws-card">
           <div class="aws-head">
-            <span class="aws-title">VM (EC2)</span>
+            <span class="aws-title"><span class="step-letter">ⓑ</span> AWS VM (EC2)</span>
             {#if awsVm.provisioned}
               {#if awsVmState === 'running'}
                 <span class="aws-badge ok">Running · {awsVm.host}</span>
@@ -533,10 +494,7 @@
           </div>
           {#if awsVm.provisioned}
             {#if awsVmState === 'stopped'}
-              <p class="aws-hint">
-                Instance {awsVm.instance_id} is <strong>stopped</strong> — disk and installed tools
-                are kept, and you're billed only for storage. Start it to run pipelines again.
-              </p>
+              <p class="aws-hint">Stopped. Disk and tools kept, storage-only cost. Start to resume.</p>
               <div class="aws-actions">
                 <button class="btn-primary small" disabled={awsVmBusy} onclick={awsStart}>
                   {awsVmBusy ? 'Starting…' : 'Start VM'}
@@ -546,12 +504,7 @@
                 </button>
               </div>
             {:else}
-              <p class="aws-hint">
-                Instance {awsVm.instance_id} at {awsVm.host}. The SSH connection routes here on the
-                Cloud VM tab — click <strong>Save and Register</strong> below, then use it from your AI app.
-                <br />⚠️ Billed per hour while running. <strong>Stop</strong> to pause billing (keeps your
-                setup); <strong>Terminate</strong> to delete it entirely.
-              </p>
+              <p class="aws-hint">Billed hourly. Click Save and Register to use it. Stop = pause (keeps setup); Terminate = delete.</p>
               <div class="aws-actions">
                 <button class="btn-outline small" disabled={awsVmBusy} onclick={confirmStop}>
                   {awsVmBusy ? 'Working…' : 'Stop VM'}
@@ -559,35 +512,50 @@
                 <button class="btn-outline small danger" disabled={awsVmBusy} onclick={confirmTerminate}>
                   Terminate VM
                 </button>
-                <button class="btn-outline small" disabled={awsVmBusy} onclick={refreshVmState}>
-                  Refresh
-                </button>
+                <button class="icon-btn" title="Refresh status" disabled={awsVmBusy} onclick={refreshVmState} aria-label="Refresh status">↻</button>
               </div>
             {/if}
           {:else}
-            <p class="aws-hint">
-              Creates an EC2 VM in your account, auto-installs Docker/Git/rclone, and routes the
-              SSH connection here. Takes ~2–4 min. ⚠️ Incurs AWS charges while running — stop or
-              terminate when done.
-            </p>
+            <p class="aws-hint">Creates an EC2 VM (Docker/Git/rclone auto-installed, ~2-4 min). Charged while running.</p>
             <div class="aws-actions">
               <button
                 class="btn-primary small"
                 disabled={awsVmBusy || (!awsAccount && !awsHasCreds)}
                 onclick={awsProvision}
               >
-                {awsVmBusy ? 'Provisioning… (2–4 min)' : 'Provision VM'}
+                {awsVmBusy ? 'Provisioning… (2-4 min)' : 'Provision VM'}
               </button>
             </div>
           {/if}
         </div>
+
+        <div class="aws-card">
+          <div class="aws-head">
+            <span class="aws-title"><span class="step-letter">ⓒ</span> S3 bucket</span>
+            <button class="icon-btn" title="Refresh buckets" disabled={awsBusy} onclick={awsLoadBuckets} aria-label="Refresh buckets">↻</button>
+          </div>
+          <div class="aws-form">
+            <label>
+              <span>Bucket</span>
+              <select
+                class="ap-select"
+                bind:value={awsBucket}
+                onchange={(e) => awsSelectBucket((e.currentTarget as HTMLSelectElement).value)}
+                disabled={awsBuckets.length === 0}
+              >
+                {#if awsBuckets.length === 0}
+                  <option value={awsBucket}>{awsBucket || (awsAccount ? '(no buckets, create one in S3 then refresh)' : '(connect first to list buckets)')}</option>
+                {:else}
+                  <option value="">select</option>
+                  {#each awsBuckets as b}
+                    <option value={b}>{b}</option>
+                  {/each}
+                {/if}
+              </select>
+            </label>
+          </div>
+        </div>
       {:else}
-        {#if sshConfig.connection_type === 'cloud'}
-          <p class="conn-hint">
-            Create a VM in your cloud, then paste its public IP, login user, and
-            key file (.pem) below. Cloud VMs use key authentication.
-          </p>
-        {/if}
         <button
           class="verify-toggle"
           onclick={() => (showVerify = !showVerify)}
@@ -686,7 +654,7 @@
       <div class="aws-modal">
         <h2 id="aws-setup-title">Grant AWS access</h2>
         <ol>
-          <li>Click <strong>Open CloudShell</strong> below — AWS CloudShell opens in your browser.</li>
+          <li>Click <strong>Open CloudShell</strong> below. AWS CloudShell opens in your browser.</li>
           <li>
             When the shell prompt appears, <strong>paste</strong> this command (Ctrl+V, or
             Cmd+V on Mac) and press <strong>Enter</strong>:
@@ -695,7 +663,7 @@
               <button class="cmd-copy" onclick={copySetupCmd}>{cmdCopied ? 'Copied' : 'Copy'}</button>
             </div>
           </li>
-          <li>When it finishes, come back here and click <strong>Provision VM</strong>.</li>
+          <li>When it finishes, come back and click <strong>Provision VM</strong> in step <strong>ⓑ AWS VM</strong>.</li>
         </ol>
         <div class="aws-modal-actions">
           <button class="btn-outline small" onclick={() => (awsSetupModal = false)}>Cancel</button>
@@ -709,9 +677,11 @@
     <div class="overlay" role="dialog" aria-modal="true" aria-labelledby="vm-confirm-title">
       <div class="aws-modal">
         <h2 id="vm-confirm-title">{vmConfirm.title}</h2>
-        {#each vmConfirm.lines as line}
-          <p>{line}</p>
-        {/each}
+        <ul class="vm-confirm-list">
+          {#each vmConfirm.lines as line}
+            <li>{line}</li>
+          {/each}
+        </ul>
         <div class="aws-modal-actions">
           <button class="btn-outline small" onclick={() => (vmConfirm = null)}>Cancel</button>
           <button
@@ -934,20 +904,6 @@
     color: var(--accent);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
   }
-  .provider-row {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin: 0 0 10px 34px;
-  }
-  .provider-label {
-    width: 100px;
-    font-size: 0.85rem;
-    color: var(--text-muted);
-    font-weight: 500;
-  }
-  .provider-row .ap-select { flex: 1; }
-
   /* App-styled dropdown: custom chevron, matches the text inputs. */
   .ap-select {
     box-sizing: border-box;
@@ -972,12 +928,6 @@
     box-shadow: 0 0 0 3px var(--accent-light);
   }
   .ap-select:disabled { opacity: 0.6; cursor: default; }
-  .conn-hint {
-    margin: 0 0 12px 34px;
-    font-size: 0.82rem;
-    color: var(--text-muted);
-    line-height: 1.5;
-  }
 
   /* ── AWS account card ──────────────────────────────── */
   .aws-card {
@@ -990,6 +940,7 @@
   .aws-head {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: 10px;
     margin-bottom: 10px;
   }
@@ -998,6 +949,31 @@
     font-weight: 600;
     color: var(--text);
   }
+  .step-letter {
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 4px;
+  }
+  .icon-btn {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-muted);
+    font-size: 1rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .icon-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .icon-btn:disabled { opacity: 0.5; cursor: default; }
   .aws-badge {
     font-size: 0.72rem;
     font-weight: 600;
@@ -1065,6 +1041,7 @@
   .aws-actions {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 10px;
     flex-wrap: wrap;
     margin-top: 12px;
@@ -1253,12 +1230,17 @@
     margin: 0 0 10px;
     font-size: 1.05rem;
   }
-  .aws-modal p { margin: 0 0 10px; }
   .aws-modal ol {
     margin: 0 0 14px;
     padding-left: 20px;
     line-height: 1.6;
   }
+  .vm-confirm-list {
+    margin: 0 0 16px;
+    padding-left: 20px;
+    line-height: 1.6;
+  }
+  .vm-confirm-list li { margin: 0 0 4px; }
   .aws-cmd-row {
     display: flex;
     align-items: stretch;

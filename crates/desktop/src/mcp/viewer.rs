@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use tokio::sync::Mutex;
 
 use crate::config::AppConfig;
 use crate::ssh;
+use base64::Engine as _;
 use common::models::clean_content;
 
 /// Shared state: stores files keyed by filename.
@@ -364,6 +365,10 @@ async fn ensure_server(plugins_dir: &str) -> Result<u16, String> {
         .route("/api/reference", get(reference_handler))
         .route("/api/browse", get(browse_handler))
         .route("/api/browse-open", get(browse_open_handler))
+        .route("/input", get(input_page_handler))
+        .route("/api/input/config", get(input_config_handler))
+        .route("/api/input/browse", get(input_browse_handler))
+        .route("/api/input/save", post(input_save_handler))
         // Wildcard ({*filename}, not {filename}) so nested paths like
         // meme_out/meme.xml reach the handler; a single-segment capture 404s on
         // any '/' in the name, which broke pipeline viewers serving subfolders.
@@ -2064,3 +2069,473 @@ fn parse_range_header(range: &str, total: usize) -> Option<(usize, usize)> {
     let end = end.min(total - 1);
     Some((start, end))
 }
+
+// ── Input configuration page (file explorer + config editor) ─────────────
+// Opened via the configure_input MCP tool. Lets the user pick input files from
+// the analysis machine's own store (S3 bucket for AWS, the SSH server's FS
+// otherwise) and edit the pipeline's config.yaml values, then Save — which
+// symlinks the picked files into the input dir and writes config.yaml back.
+
+#[derive(Clone)]
+struct InputSession {
+    pipeline_dir: String,
+    config: AppConfig,
+}
+
+static INPUT_SESSION: tokio::sync::OnceCell<Arc<Mutex<Option<InputSession>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn input_session_lock() -> &'static Arc<Mutex<Option<InputSession>>> {
+    INPUT_SESSION
+        .get_or_init(|| async { Arc::new(Mutex::new(None)) })
+        .await
+}
+
+/// Set up an input-config session and open the page in the browser. Returns the
+/// input directory (where picked files are symlinked) so the caller can pass it
+/// to execute_pipeline once the user saves.
+pub async fn show_input_config(
+    pipeline_dir: String,
+    config: AppConfig,
+) -> Result<String, String> {
+    let plugins_dir = config.full_plugins_dir();
+    let input_dir = config.full_input_dir();
+    {
+        let mut s = input_session_lock().await.lock().await;
+        *s = Some(InputSession {
+            pipeline_dir,
+            config,
+        });
+    }
+    let port = ensure_server(&plugins_dir).await?;
+    let url = format!("http://127.0.0.1:{}/input", port);
+    open::that(&url).map_err(|e| format!("Failed to open browser: {}", e))?;
+    Ok(input_dir)
+}
+
+fn input_is_file_guess(key: &str, value: &str) -> bool {
+    let k = key.to_lowercase();
+    const FILE_KEYS: &[&str] = &[
+        "r1", "r2", "input", "reads", "fastq", "fq", "bam", "sam", "cram",
+        "reference", "ref", "genome", "fasta", "fa", "vcf", "bed", "gff",
+        "gtf", "index", "annotation", "gtf", "file",
+    ];
+    if FILE_KEYS.iter().any(|fk| k == *fk || k.ends_with(&format!("_{}", fk)) || k.starts_with(&format!("{}_", fk))) {
+        return true;
+    }
+    let v = value.trim();
+    if v.is_empty() || v == "true" || v == "false" || v.parse::<f64>().is_ok() {
+        return false;
+    }
+    // A path, or something.ext (1-6 letter extension).
+    if v.contains('/') {
+        return true;
+    }
+    if let Some(idx) = v.rfind('.') {
+        let ext = &v[idx + 1..];
+        return !ext.is_empty() && ext.len() <= 6 && ext.chars().all(|c| c.is_ascii_alphanumeric());
+    }
+    false
+}
+
+fn input_parse_config_fields(yaml: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for line in yaml.lines() {
+        // Top-level scalar keys only (no leading whitespace, so nested blocks
+        // and list items are skipped).
+        if line.is_empty() || line.starts_with(char::is_whitespace) || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let idx = match line.find(':') {
+            Some(i) => i,
+            None => continue,
+        };
+        let key = line[..idx].trim();
+        if key.is_empty() || key.contains(' ') {
+            continue;
+        }
+        let mut value = line[idx + 1..].trim().to_string();
+        // Strip a trailing " # comment".
+        if let Some(cpos) = value.find(" #") {
+            value = value[..cpos].trim().to_string();
+        }
+        value = value
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_string();
+        // Skip block-scalar / empty container headers.
+        let is_file = input_is_file_guess(key, &value);
+        out.push(serde_json::json!({ "key": key, "value": value, "is_file": is_file }));
+    }
+    out
+}
+
+fn input_yaml_quote(v: &str) -> String {
+    if v.is_empty() {
+        return "\"\"".to_string();
+    }
+    if v.contains(' ') || v.contains(':') || v.contains('#') {
+        format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        v.to_string()
+    }
+}
+
+fn input_set_yaml_value(yaml: &str, key: &str, new_value: &str) -> String {
+    let quoted = input_yaml_quote(new_value);
+    let mut found = false;
+    let lines: Vec<String> = yaml
+        .lines()
+        .map(|line| {
+            if found || line.starts_with(char::is_whitespace) {
+                return line.to_string();
+            }
+            if let Some(rest) = line.strip_prefix(key) {
+                if rest.trim_start().starts_with(':') {
+                    found = true;
+                    return format!("{}: {}", key, quoted);
+                }
+            }
+            line.to_string()
+        })
+        .collect();
+    let mut result = lines.join("\n");
+    if yaml.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+async fn input_page_handler() -> Html<String> {
+    Html(INPUT_PAGE_HTML.to_string())
+}
+
+async fn input_config_handler() -> Json<serde_json::Value> {
+    let session = { input_session_lock().await.lock().await.clone() };
+    let session = match session {
+        Some(s) => s,
+        None => return Json(serde_json::json!({ "ok": false, "error": "No input session is active." })),
+    };
+    let cfg_path = format!("{}/config.yaml", session.pipeline_dir.trim_end_matches('/'));
+    let esc = cfg_path.replace('\'', "'\\''");
+    let raw = match ssh_run_fast(&session.config, &format!("cat '{}'", esc)).await {
+        Ok((out, 0)) => clean_content(&out),
+        Ok((out, _)) => {
+            return Json(serde_json::json!({ "ok": false, "error": format!("Cannot read config.yaml: {}", out.trim()) }))
+        }
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let fields = input_parse_config_fields(&raw);
+    let is_cloud = session.config.connection_type == "cloud" && session.config.cloud_provider == "aws";
+    Json(serde_json::json!({
+        "ok": true,
+        "fields": fields,
+        "source": if is_cloud { "s3" } else { "ssh" },
+        "bucket": session.config.aws_bucket,
+        "pipeline_dir": session.pipeline_dir,
+    }))
+}
+
+#[derive(Deserialize)]
+struct InputBrowseQuery {
+    path: Option<String>,
+}
+
+async fn input_browse_handler(Query(q): Query<InputBrowseQuery>) -> Json<serde_json::Value> {
+    let session = { input_session_lock().await.lock().await.clone() };
+    let session = match session {
+        Some(s) => s,
+        None => return Json(serde_json::json!({ "ok": false, "error": "No input session is active." })),
+    };
+    let cfg = &session.config;
+    let is_cloud = cfg.connection_type == "cloud" && cfg.cloud_provider == "aws";
+
+    if is_cloud {
+        if cfg.aws_bucket.trim().is_empty() {
+            return Json(serde_json::json!({ "ok": false, "error": "No S3 bucket is selected in AutoPipe." }));
+        }
+        let prefix = q.path.unwrap_or_default();
+        match crate::aws::list_objects(
+            &cfg.aws_access_key,
+            &cfg.aws_secret_key,
+            &cfg.aws_region,
+            &cfg.aws_bucket,
+            &prefix,
+        )
+        .await
+        {
+            Ok((folders, files)) => {
+                let folder_json: Vec<_> = folders
+                    .iter()
+                    .map(|p| {
+                        let name = p.trim_end_matches('/').rsplit('/').next().unwrap_or(p).to_string();
+                        serde_json::json!({ "name": name, "path": p })
+                    })
+                    .collect();
+                let file_json: Vec<_> = files
+                    .iter()
+                    .map(|(k, sz)| {
+                        let name = k.rsplit('/').next().unwrap_or(k).to_string();
+                        serde_json::json!({ "name": name, "path": k, "size": sz })
+                    })
+                    .collect();
+                let parent = if prefix.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    let p = prefix.trim_end_matches('/');
+                    match p.rfind('/') {
+                        Some(i) => serde_json::Value::String(p[..i + 1].to_string()),
+                        None => serde_json::Value::String(String::new()),
+                    }
+                };
+                Json(serde_json::json!({
+                    "ok": true, "source": "s3", "cwd": prefix, "parent": parent,
+                    "folders": folder_json, "files": file_json,
+                }))
+            }
+            Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+        }
+    } else {
+        let path = q.path.unwrap_or_default();
+        let cd = if path.is_empty() || path == "~" {
+            "cd \"$HOME\"".to_string()
+        } else {
+            format!("cd '{}'", path.replace('\'', "'\\''"))
+        };
+        let cmd = format!(
+            "{} 2>/dev/null && pwd && for f in * ; do [ -e \"$f\" ] || continue; \
+             if [ -d \"$f\" ]; then printf 'd\\t0\\t%s\\n' \"$f\"; \
+             else printf 'f\\t%s\\t%s\\n' \"$(stat -c%s \"$f\" 2>/dev/null || echo 0)\" \"$f\"; fi; done",
+            cd
+        );
+        match ssh_run_fast(cfg, &cmd).await {
+            Ok((out, 0)) => {
+                let out = clean_content(&out);
+                let mut lines = out.lines();
+                let cwd = lines.next().unwrap_or("").trim().to_string();
+                let mut folders = Vec::new();
+                let mut files = Vec::new();
+                for line in lines {
+                    let parts: Vec<&str> = line.splitn(3, '\t').collect();
+                    if parts.len() != 3 {
+                        continue;
+                    }
+                    let name = parts[2].to_string();
+                    let full = format!("{}/{}", cwd.trim_end_matches('/'), name);
+                    if parts[0] == "d" {
+                        folders.push(serde_json::json!({ "name": name, "path": full }));
+                    } else {
+                        let sz: i64 = parts[1].parse().unwrap_or(0);
+                        files.push(serde_json::json!({ "name": name, "path": full, "size": sz }));
+                    }
+                }
+                let c = cwd.trim_end_matches('/');
+                let parent = match c.rfind('/') {
+                    Some(0) => serde_json::Value::String("/".to_string()),
+                    Some(i) => serde_json::Value::String(c[..i].to_string()),
+                    None => serde_json::Value::Null,
+                };
+                Json(serde_json::json!({
+                    "ok": true, "source": "ssh", "cwd": cwd, "parent": parent,
+                    "folders": folders, "files": files,
+                }))
+            }
+            Ok((out, _)) => Json(serde_json::json!({ "ok": false, "error": format!("Cannot list directory: {}", out.trim()) })),
+            Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct InputSaveField {
+    key: String,
+    value: String,
+    is_file: bool,
+}
+
+#[derive(Deserialize)]
+struct InputSaveBody {
+    fields: Vec<InputSaveField>,
+}
+
+async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json::Value> {
+    let session = { input_session_lock().await.lock().await.clone() };
+    let session = match session {
+        Some(s) => s,
+        None => return Json(serde_json::json!({ "ok": false, "error": "No input session is active." })),
+    };
+    let cfg = &session.config;
+    let input_dir = cfg.full_input_dir();
+    let is_cloud = cfg.connection_type == "cloud" && cfg.cloud_provider == "aws";
+
+    let _ = ssh_run_fast(cfg, &format!("mkdir -p '{}'", input_dir.replace('\'', "'\\''"))).await;
+
+    let any_file = body.fields.iter().any(|f| f.is_file && !f.value.trim().is_empty());
+    if is_cloud && any_file {
+        let region = if cfg.aws_region.trim().is_empty() { "us-east-1" } else { cfg.aws_region.as_str() };
+        let mount_cmd = format!(
+            "sudo apt-get install -y -qq fuse3 >/dev/null 2>&1 || true; \
+             grep -qxF 'user_allow_other' /etc/fuse.conf 2>/dev/null || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf >/dev/null; \
+             mkdir -p /home/ubuntu/s3input; \
+             mountpoint -q /home/ubuntu/s3input || rclone mount ':s3,provider=AWS,env_auth=true,region={}:{}' /home/ubuntu/s3input --read-only --allow-other --daemon --dir-cache-time 10s --vfs-cache-mode minimal >/tmp/autopipe-rclone-mount.log 2>&1; \
+             sleep 2",
+            region, cfg.aws_bucket
+        );
+        if let Err(e) = ssh_run_fast(cfg, &mount_cmd).await {
+            return Json(serde_json::json!({ "ok": false, "error": format!("S3 mount failed: {}", e) }));
+        }
+    }
+
+    let mut new_values: Vec<(String, String)> = Vec::new();
+    let mut prepared: Vec<String> = Vec::new();
+    for f in &body.fields {
+        if f.is_file && !f.value.trim().is_empty() {
+            let src = if is_cloud {
+                format!("/home/ubuntu/s3input/{}", f.value.trim())
+            } else {
+                f.value.trim().to_string()
+            };
+            let base = src.rsplit('/').next().unwrap_or(&src).to_string();
+            let link = format!("{}/{}", input_dir.trim_end_matches('/'), base);
+            let cmd = format!(
+                "ln -sf '{}' '{}'",
+                src.replace('\'', "'\\''"),
+                link.replace('\'', "'\\''")
+            );
+            let _ = ssh_run_fast(cfg, &cmd).await;
+            new_values.push((f.key.clone(), format!("/input/{}", base)));
+            prepared.push(base);
+        } else {
+            new_values.push((f.key.clone(), f.value.clone()));
+        }
+    }
+
+    let cfg_path = format!("{}/config.yaml", session.pipeline_dir.trim_end_matches('/'));
+    let esc = cfg_path.replace('\'', "'\\''");
+    let raw = match ssh_run_fast(cfg, &format!("cat '{}'", esc)).await {
+        Ok((out, 0)) => clean_content(&out),
+        Ok((out, _)) => return Json(serde_json::json!({ "ok": false, "error": format!("Cannot read config.yaml: {}", out.trim()) })),
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    };
+    let mut updated = raw;
+    for (k, v) in &new_values {
+        updated = input_set_yaml_value(&updated, k, v);
+    }
+    let b64 = base64::engine::general_purpose::STANDARD.encode(updated.as_bytes());
+    let write_cmd = format!("printf '%s' '{}' | base64 -d > '{}'", b64, esc);
+    match ssh_run_fast(cfg, &write_cmd).await {
+        Ok((_, 0)) => {}
+        Ok((out, _)) => return Json(serde_json::json!({ "ok": false, "error": format!("Cannot write config.yaml: {}", out.trim()) })),
+        Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+
+    Json(serde_json::json!({ "ok": true, "input_dir": input_dir, "prepared": prepared }))
+}
+
+const INPUT_PAGE_HTML: &str = r####"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoPipe — Pipeline input</title>
+<style>
+  :root{--bg:#f8fafc;--card:#fff;--border:#e2e8f0;--strong:#cbd5e1;--text:#0f172a;--muted:#64748b;--accent:#0f4c5c;--accent2:#0d3d4a}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  .wrap{max-width:760px;margin:0 auto;padding:24px 20px 80px}
+  h1{font-size:1.3rem;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:.9rem;margin:0 0 20px}
+  .field{display:grid;grid-template-columns:150px 1fr auto;gap:10px;align-items:center;margin-bottom:10px}
+  .field label{font-weight:600;font-size:.88rem}
+  .field input{padding:8px 10px;border:1px solid var(--strong);border-radius:6px;font-size:.9rem;width:100%;font-family:inherit}
+  .field input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(15,76,92,.1)}
+  .browse{padding:8px 12px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.85rem;white-space:nowrap}
+  .browse:hover{border-color:var(--accent);color:var(--accent)}
+  .bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--border);padding:12px 20px;display:flex;justify-content:flex-end;gap:12px;align-items:center}
+  .save{padding:9px 18px;border:none;border-radius:6px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer;font-size:.9rem}
+  .save:hover{background:var(--accent2)}
+  .save:disabled{opacity:.5;cursor:default}
+  .msg{font-size:.85rem;color:var(--muted)}
+  .msg.ok{color:var(--accent)}
+  .msg.err{color:#dc2626}
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;padding:24px}
+  .overlay.show{display:flex}
+  .modal{background:var(--card);border:1px solid var(--border);border-radius:10px;width:100%;max-width:560px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 12px 32px rgba(0,0,0,.25)}
+  .mhead{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  .mhead .cwd{font-size:.8rem;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mbody{overflow:auto;padding:6px 0}
+  .row{display:flex;align-items:center;gap:8px;padding:8px 16px;cursor:pointer;font-size:.9rem}
+  .row:hover{background:var(--bg)}
+  .row .ic{width:18px;text-align:center}
+  .row .sz{margin-left:auto;color:var(--muted);font-size:.78rem}
+  .mfoot{padding:10px 16px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:10px}
+  .btn{padding:7px 14px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.85rem}
+  .up{padding:4px 10px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.8rem}
+  .empty{padding:16px;color:var(--muted);font-size:.85rem}
+</style></head>
+<body><div class="wrap">
+  <h1>Pipeline input</h1>
+  <p class="sub" id="sub">Loading…</p>
+  <div id="fields"></div>
+</div>
+<div class="bar">
+  <span class="msg" id="msg"></span>
+  <button class="save" id="save" disabled>Save & prepare input</button>
+</div>
+<div class="overlay" id="ov"><div class="modal">
+  <div class="mhead"><button class="up" id="up">↑ Up</button><span class="cwd" id="cwd"></span></div>
+  <div class="mbody" id="mbody"></div>
+  <div class="mfoot"><button class="btn" id="close">Close</button></div>
+</div></div>
+<script>
+let SOURCE="ssh", FIELDS=[], activeKey=null, curPath="";
+const $=id=>document.getElementById(id);
+function fmtSize(n){if(n==null)return"";const u=["B","KB","MB","GB","TB"];let i=0,v=n;while(v>=1024&&i<u.length-1){v/=1024;i++}return v.toFixed(v<10&&i>0?1:0)+u[i]}
+async function load(){
+  const r=await fetch("/api/input/config");const d=await r.json();
+  if(!d.ok){$("sub").textContent="Error: "+d.error;return}
+  SOURCE=d.source;FIELDS=d.fields;
+  $("sub").textContent=(SOURCE==="s3"?("Pick input files from S3 bucket \""+d.bucket+"\""):"Pick input files from the analysis server")+", and edit input values. Defaults are pre-filled.";
+  const c=$("fields");c.innerHTML="";
+  FIELDS.forEach(f=>{
+    const row=document.createElement("div");row.className="field";
+    const lab=document.createElement("label");lab.textContent=f.key;
+    const inp=document.createElement("input");inp.value=f.value;inp.dataset.key=f.key;
+    row.appendChild(lab);row.appendChild(inp);
+    if(f.is_file){const b=document.createElement("button");b.className="browse";b.textContent="Browse…";b.onclick=()=>openBrowser(f.key);row.appendChild(b);}
+    else{const sp=document.createElement("span");row.appendChild(sp);}
+    c.appendChild(row);
+  });
+  $("save").disabled=false;
+}
+function openBrowser(key){activeKey=key;curPath="";$("ov").classList.add("show");list("")}
+async function list(path){
+  curPath=path;$("mbody").innerHTML='<div class="empty">Loading…</div>';
+  const r=await fetch("/api/input/browse?path="+encodeURIComponent(path));const d=await r.json();
+  if(!d.ok){$("mbody").innerHTML='<div class="empty">Error: '+d.error+'</div>';return}
+  $("cwd").textContent=(SOURCE==="s3"?("s3://"+ (d.cwd||"")):(d.cwd||""));
+  $("up").disabled=(d.parent==null);$("up").dataset.p=d.parent==null?"":d.parent;
+  const b=$("mbody");b.innerHTML="";
+  (d.folders||[]).forEach(f=>{const row=el(f.name,"📁",null);row.onclick=()=>list(f.path);b.appendChild(row)});
+  (d.files||[]).forEach(f=>{const row=el(f.name,"📄",f.size);row.onclick=()=>pick(f.path);b.appendChild(row)});
+  if((d.folders||[]).length===0&&(d.files||[]).length===0)b.innerHTML='<div class="empty">Empty.</div>';
+}
+function el(name,ic,sz){const r=document.createElement("div");r.className="row";r.innerHTML='<span class="ic">'+ic+'</span><span>'+name+'</span>'+(sz!=null?'<span class="sz">'+fmtSize(sz)+'</span>':'');return r}
+function pick(path){
+  document.querySelectorAll('#fields input').forEach(i=>{if(i.dataset.key===activeKey)i.value=path});
+  $("ov").classList.remove("show");
+}
+$("up").onclick=()=>{const p=$("up").dataset.p;list(p)};
+$("close").onclick=()=>$("ov").classList.remove("show");
+$("save").onclick=async()=>{
+  $("save").disabled=true;setMsg("Preparing input…","");
+  const fields=[...document.querySelectorAll('#fields input')].map(i=>{
+    const f=FIELDS.find(x=>x.key===i.dataset.key)||{};
+    return{key:i.dataset.key,value:i.value,is_file:!!f.is_file};
+  });
+  const r=await fetch("/api/input/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields})});
+  const d=await r.json();
+  if(d.ok){setMsg("Saved. Input ready — you can tell Claude to run the pipeline now.","ok");}
+  else{setMsg("Error: "+d.error,"err");$("save").disabled=false;}
+};
+function setMsg(t,c){const m=$("msg");m.textContent=t;m.className="msg"+(c?" "+c:"")}
+load();
+</script></body></html>
+"####;

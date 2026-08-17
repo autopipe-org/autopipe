@@ -117,6 +117,70 @@ pub async fn list_buckets(
     Ok(names)
 }
 
+/// List one "folder level" of an S3 bucket for the input file explorer:
+/// subfolders (common prefixes) and files (objects) directly under `prefix`.
+/// Returns (folders, files) where each file is (key, size_bytes).
+pub async fn list_objects(
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    bucket: &str,
+    prefix: &str,
+) -> Result<(Vec<String>, Vec<(String, i64)>), String> {
+    ensure_crypto();
+    let conf = aws_sdk_s3::config::Builder::new()
+        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
+        .region(aws_sdk_s3::config::Region::new(region_or_default(region)))
+        .credentials_provider(aws_sdk_s3::config::Credentials::new(
+            access_key.trim(),
+            secret_key.trim(),
+            None,
+            None,
+            "autopipe",
+        ))
+        .build();
+    let client = aws_sdk_s3::Client::from_conf(conf);
+
+    let mut folders: Vec<String> = Vec::new();
+    let mut files: Vec<(String, i64)> = Vec::new();
+    let mut continuation: Option<String> = None;
+    loop {
+        let mut req = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .delimiter("/")
+            .prefix(prefix);
+        if let Some(tok) = continuation.take() {
+            req = req.continuation_token(tok);
+        }
+        let out = req.send().await.map_err(fmt_err)?;
+        for cp in out.common_prefixes() {
+            if let Some(p) = cp.prefix() {
+                folders.push(p.to_string());
+            }
+        }
+        for obj in out.contents() {
+            if let Some(k) = obj.key() {
+                if k == prefix {
+                    continue; // the folder-marker object itself
+                }
+                files.push((k.to_string(), obj.size().unwrap_or(0)));
+            }
+        }
+        if out.is_truncated().unwrap_or(false) {
+            continuation = out.next_continuation_token().map(|s| s.to_string());
+            if continuation.is_none() {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    folders.sort();
+    files.sort();
+    Ok((folders, files))
+}
+
 // ── EC2 auto-provisioning (Phase 2) ──────────────────────────────────
 
 /// First-boot install script (matches AWS.md §7): curl bootstrap + AutoPipe

@@ -106,6 +106,13 @@ struct MountS3Params {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ConfigureInputParams {
+    /// The pipeline's Docker image name (e.g. "autopipe-aptaselect"), used to
+    /// locate the pipeline directory whose config.yaml is edited.
+    image_name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct StatusParams {
     /// Run name (matches the run_name used in execute_pipeline)
     run_name: String,
@@ -2921,7 +2928,39 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. BEFORE running, briefly recap the config.yaml values relevant to the step the user is about to run (one short line each: current value plus a few words). If the pipeline runs in stages and the user is running only a later or optional stage, recap ONLY that stage's values, not the ones already used by earlier stages; if the stages are not clearly separable, recap all configurable values. Then check required values: if any required config value is still blank, do NOT run. If you can derive a sensible value from the config or context, propose it, explain where it comes from, and ask whether to fill it in and run; if you cannot derive one, ask the user to provide it. Never fill a required value on your own without the user's confirmation — run only after the user confirms. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first.")]
+    #[tool(description = "Open a web page in the user's browser where they choose the pipeline's INPUT: they pick input files from a file explorer (the AWS S3 bucket when the analysis machine is an AWS VM, otherwise the SSH server's filesystem) and edit the pipeline's config.yaml values (pre-filled with defaults). On Save, the picked files are symlinked into the input directory (as /input/<name>) and config.yaml is written back on the server. CALL THIS when the user asks to run/execute a pipeline and the input has not been set up yet this session: it lets the user provide inputs visually instead of you guessing paths. After calling it, tell the user to pick their files and values in the opened page and click Save, and WAIT until they confirm they have saved. Then call execute_pipeline with the returned input_dir. Do NOT invent input file paths yourself. Requires the pipeline to already be downloaded to the server (its config.yaml must exist).")]
+    async fn configure_input(
+        &self,
+        Parameters(params): Parameters<ConfigureInputParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let config = self.config();
+        let pipeline_dir = match self.find_pipeline_dir(&params.image_name).await {
+            Some(d) => d,
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Could not locate the pipeline directory for image '{}'. Download the pipeline first.",
+                    params.image_name
+                ))]))
+            }
+        };
+        match viewer::show_input_config(pipeline_dir, config).await {
+            Ok(input_dir) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Opened the input configuration page in the user's browser. Ask the user to:\n\
+                 1) pick input files from the file explorer (Browse), and\n\
+                 2) edit any input values (defaults are pre-filled),\n\
+                 then click 'Save & prepare input'.\n\n\
+                 WAIT until the user confirms they clicked Save. On Save, the picked files are symlinked \
+                 into the input directory and config.yaml is updated on the server. After they confirm, \
+                 run the pipeline with execute_pipeline using input_dir='{}'.",
+                input_dir
+            ))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to open the input page: {e}"
+            ))])),
+        }
+    }
+
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. BEFORE running, briefly recap the config.yaml values relevant to the step the user is about to run (one short line each: current value plus a few words). If the pipeline runs in stages and the user is running only a later or optional stage, recap ONLY that stage's values, not the ones already used by earlier stages; if the stages are not clearly separable, recap all configurable values. Then check required values: if any required config value is still blank, do NOT run. If you can derive a sensible value from the config or context, propose it, explain where it comes from, and ask whether to fill it in and run; if you cannot derive one, ask the user to provide it. Never fill a required value on your own without the user's confirmation — run only after the user confirms. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first. INPUT SETUP: when the user asks to run/execute a pipeline and its input files and values have NOT been configured yet in this session, FIRST call configure_input — it opens a browser page where the user picks input files (from the S3 bucket for an AWS VM, or the SSH server's filesystem) and edits the config values. Wait until the user confirms they clicked Save there, then call this tool with the input_dir configure_input returned. Do NOT guess input file paths yourself when configure_input can collect them.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
