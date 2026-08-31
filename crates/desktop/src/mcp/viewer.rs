@@ -966,11 +966,6 @@ fn build_data_cmd(
     end: usize,
 ) -> String {
     if ds.source_type == "docker" {
-        let dir = std::path::Path::new(remote_path)
-            .parent()
-            .unwrap_or(std::path::Path::new("/"))
-            .to_string_lossy()
-            .to_string();
         let file = std::path::Path::new(remote_path)
             .file_name()
             .unwrap_or_default()
@@ -980,9 +975,14 @@ fn build_data_cmd(
             .replace("{file}", &format!("/data/{}", file))
             .replace("{start}", &start.to_string())
             .replace("{end}", &end.to_string());
+        // Resolve symlinks on the host and bind-mount the real file directly.
+        // AutoPipe stages inputs as symlinks; mounting the symlink's parent dir
+        // would leave the link dangling inside the container (its target dir is
+        // not mounted), so h5py etc. fail with "no such file". `readlink -f`
+        // gives the real path, which we mount as a single file at /data/{file}.
         format!(
-            "docker run --rm -v \"{}:/data:ro\" {} sh -c \"{}\" 2>/dev/null",
-            dir, ds.image, cmd
+            "RP=\"$(readlink -f '{0}' 2>/dev/null || printf %s '{0}')\"; docker run --rm -v \"$RP:/data/{1}:ro\" {2} sh -c \"{3}\" 2>/dev/null",
+            remote_path, file, ds.image, cmd
         )
     } else {
         // text type: {file} = full remote path
