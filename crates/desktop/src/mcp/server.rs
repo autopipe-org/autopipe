@@ -4354,6 +4354,11 @@ are removed via Docker to handle permission issues. relative_path is relative to
                                      "csv", "tsv", "tab",
                                      "txt", "log", "json", "yaml", "yml", "xml", "md",
                                      "sh", "py", "r", "nf", "smk", "cfg", "ini", "toml",
+                                     // Kept on the server (served via /file/ Range) instead of
+                                     // downloaded into memory: hdf5-viewer reads them with ranged
+                                     // fetches + server-side h5py extraction, so files of any size
+                                     // (incl. > 1 GB) work. pdf is served for range-capable viewers.
+                                     "h5ad", "h5", "hdf5", "pdf",
                                      "bai", "crai", "tbi", "csi", "fai", "idx"];
         // Detect genomics files early (extensions only, no SSH) so we can
         // decide whether to skip eager per-file loading.
@@ -4475,18 +4480,6 @@ are removed via Docker to handle permission issues. relative_path is relative to
                     ));
                 }
                 continue;
-            }
-
-            // h5ad/h5/hdf5: check file size, skip if > 1GB (download only)
-            if matches!(ext.as_str(), "h5ad" | "h5" | "hdf5") {
-                let size_cmd = format!("stat -c%s '{}' 2>/dev/null || stat -f%z '{}' 2>/dev/null", shell_escape(path), shell_escape(path));
-                if let Ok((size_str, 0)) = self.ssh_run(&size_cmd).await {
-                    let size: u64 = clean_content(&size_str).trim().parse().unwrap_or(0);
-                    if size > 1_073_741_824 {
-                        errors.push(format!("{}: file too large ({:.1} GB) — download only", filename, size as f64 / 1_073_741_824.0));
-                        continue;
-                    }
-                }
             }
 
             match self
