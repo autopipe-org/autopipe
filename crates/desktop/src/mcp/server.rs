@@ -1093,6 +1093,47 @@ impl AutoPipeServer {
 
 
 
+    /// Resolve `<base>/<name>` to a real directory, allowing a CASE-INSENSITIVE
+    /// match on the final path component. Docker image names must be lowercase,
+    /// so an image `autopipe-aptaselect` yields the lookup name `aptaselect`, but
+    /// the pipeline directory keeps the ro-crate's original case (e.g.
+    /// `AptaSelect`). A case-sensitive `test -d` would miss it. Tries the exact
+    /// path first (fast path), then falls back to listing `base` and matching the
+    /// basename case-insensitively. Returns the real (correctly-cased) path.
+    async fn resolve_dir_ci(&self, base: &str, name: &str) -> Option<String> {
+        let exact = format!("{}/{}", base, name);
+        if let Ok((output, 0)) = self
+            .ssh_run(&format!("test -d '{}' && echo 'exists'", shell_escape(&exact)))
+            .await
+        {
+            if output.trim().contains("exists") {
+                return Some(exact);
+            }
+        }
+        let want = name.to_lowercase();
+        if let Ok((listing, 0)) = self
+            .ssh_run(&format!("ls -1 '{}'", shell_escape(base)))
+            .await
+        {
+            for entry in listing.lines() {
+                let entry = entry.trim();
+                if entry.is_empty() || entry.to_lowercase() != want {
+                    continue;
+                }
+                let full = format!("{}/{}", base, entry);
+                if let Ok((output, 0)) = self
+                    .ssh_run(&format!("test -d '{}' && echo 'exists'", shell_escape(&full)))
+                    .await
+                {
+                    if output.trim().contains("exists") {
+                        return Some(full);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     async fn find_pipeline_dir(&self, image_name: &str) -> Option<String> {
         // Derive the pipeline (directory) name from the Docker image name by
         // stripping BOTH the "autopipe-" prefix AND any ":tag" suffix. Images are
@@ -1100,37 +1141,22 @@ impl AutoPipeServer {
         // is just "<name>" — without dropping the tag, the lookup (and therefore
         // the ro-crate name written into the run marker that a pipeline viewer
         // matches on) silently fails and no viewer prompt fires.
+        // The match is case-insensitive on the final component because Docker
+        // lowercases image names while the directory keeps mixed case.
         let pipeline_name = image_name.strip_prefix("autopipe-").unwrap_or(image_name);
         let pipeline_name = pipeline_name.split(':').next().unwrap_or(pipeline_name);
 
         let pipelines_base = self.config().full_pipelines_dir();
-        let candidate = format!(
-            "{}/{}",
-            pipelines_base.trim_end_matches('/'),
-            pipeline_name
-        );
-        if let Ok((output, 0)) = self
-            .ssh_run(&format!("test -d '{}' && echo 'exists'", shell_escape(&candidate)))
-            .await
-        {
-            if output.trim().contains("exists") {
-                return Some(candidate);
-            }
+        let pipelines_base = pipelines_base.trim_end_matches('/');
+        if let Some(dir) = self.resolve_dir_ci(pipelines_base, pipeline_name).await {
+            return Some(dir);
         }
 
         let output_base = self.config().full_output_dir();
-        let candidate = format!(
-            "{}/{}/{}",
-            output_base.trim_end_matches('/'),
-            pipeline_name,
-            pipeline_name
-        );
-        if let Ok((output, 0)) = self
-            .ssh_run(&format!("test -d '{}' && echo 'exists'", shell_escape(&candidate)))
-            .await
-        {
-            if output.trim().contains("exists") {
-                return Some(candidate);
+        let output_base = output_base.trim_end_matches('/');
+        if let Some(outer) = self.resolve_dir_ci(output_base, pipeline_name).await {
+            if let Some(inner) = self.resolve_dir_ci(&outer, pipeline_name).await {
+                return Some(inner);
             }
         }
 
@@ -2784,12 +2810,25 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             Err(_) => "Log not found".to_string(),
         };
 
+        // A stale image from a PREVIOUS successful build can leave `docker images
+        // -q` non-empty even when THIS build failed, which would otherwise be
+        // reported as success. The build log is truncated fresh on every build,
+        // so scan it for definitive Docker build failure markers; a failure here
+        // takes precedence over image presence.
+        let build_failed = matches!(
+            self.ssh_run(&format!(
+                "grep -qE 'ERROR: failed to (build|solve)|did not complete successfully|returned a non-zero code' '{}' && echo failed",
+                shell_escape(&actual_log_path)
+            )).await,
+            Ok((ref o, _)) if o.trim() == "failed"
+        );
+
         if is_running {
             Ok(CallToolResult::success(vec![Content::text(format!(
                 "Build in progress...\n\nRecent log:\n{}",
                 recent_log
             ))]))
-        } else if image_exists {
+        } else if image_exists && !build_failed {
             // Clean up build log
             let _ = self.ssh_run(&format!("rm -f '{}'", shell_escape(&actual_log_path))).await;
             Ok(CallToolResult::success(vec![Content::text(format!(
@@ -2797,9 +2836,14 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                 params.image_name, recent_log
             ))]))
         } else {
+            let stale_note = if image_exists {
+                "\n\nNote: an image with this name exists from a PREVIOUS build, but THIS build failed (see the error above) — the image is stale. Use cleanup_failed to remove it before rebuilding."
+            } else {
+                ""
+            };
             Ok(CallToolResult::error(vec![Content::text(format!(
-                "Build failed.\n\nBuild log:\n{}\n\nNext steps: Analyze the error above, fix the pipeline code (Dockerfile or Snakefile), then retry build_image. Only call cleanup_failed if you need to remove the Docker image before rebuilding.",
-                recent_log
+                "Build failed.\n\nBuild log:\n{}{}\n\nNext steps: Analyze the error above, fix the pipeline code (Dockerfile or Snakefile), then retry build_image. Only call cleanup_failed if you need to remove the Docker image before rebuilding.",
+                recent_log, stale_note
             ))]))
         }
     }
