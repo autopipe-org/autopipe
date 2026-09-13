@@ -36,8 +36,13 @@ rule step_2:
 /// Dockerfile template for new pipelines.
 pub const DOCKERFILE_TEMPLATE: &str = r#"FROM condaforge/miniforge3:latest
 
-# Install bioinformatics tools with the fastest available solver
-# (micromamba > mamba > conda; all resolve the same conda packages).
+# Install bioinformatics tools with the fastest available solver (micromamba >
+# mamba > conda; all resolve the same conda packages). This uses the base env,
+# matching most existing pipelines. ALTERNATIVE: if a base-env build hits the
+# "Cannot find a valid extracted directory cache" linking error on an
+# overlayfs/rootless build host, or the env is large, install into a dedicated
+# env instead — `conda create -y -n pipeline ...` + `ENV PATH=/opt/conda/envs/pipeline/bin:$PATH`
+# and symlink /opt/conda/envs/pipeline/bin/bash below.
 RUN INSTALL="conda install -y"; \
     command -v mamba >/dev/null 2>&1 && INSTALL="mamba install -y"; \
     command -v micromamba >/dev/null 2>&1 && INSTALL="micromamba install -y -n base"; \
@@ -49,9 +54,13 @@ RUN INSTALL="conda install -y"; \
     # tool2=version \
     && conda clean -afy
 
-# Replace system bash with conda bash (prevents GLIBC mismatch)
-RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && \
-    ln -sf /opt/conda/bin/bash /bin/sh
+# Replace system bash with conda bash (prevents GLIBC mismatch) — only when a
+# conda bash exists, so a non-conda image is not left with a dangling /bin/sh
+# (which makes every shell command fail).
+RUN if [ -x /opt/conda/bin/bash ]; then \
+        ln -sf /opt/conda/bin/bash /usr/bin/bash && \
+        ln -sf /opt/conda/bin/bash /bin/sh; \
+    fi
 
 # Install uv for fast Python package installation
 RUN pip install uv
@@ -222,8 +231,9 @@ generated, and never rely on a remembered earlier approval.
   that exists at build time, e.g.:
   `RUN INSTALL="conda install -y"; command -v mamba >/dev/null 2>&1 && INSTALL="mamba install -y"; command -v micromamba >/dev/null 2>&1 && INSTALL="micromamba install -y -n base"; $INSTALL -c bioconda -c conda-forge ...`
 - Always install `snakemake-minimal` and `bash` via conda
-- After installing, replace system bash with conda bash to prevent GLIBC mismatch:
-  `RUN ln -sf /opt/conda/bin/bash /usr/bin/bash && ln -sf /opt/conda/bin/bash /bin/sh`
+- After installing, replace system bash with conda bash to prevent GLIBC mismatch, GUARDED so it only runs when that bash exists (otherwise a non-conda image is left with a dangling /bin/sh and every shell command fails):
+  `RUN if [ -x /opt/conda/bin/bash ]; then ln -sf /opt/conda/bin/bash /usr/bin/bash && ln -sf /opt/conda/bin/bash /bin/sh; fi`
+- ALTERNATIVE (dedicated env) — both patterns are valid and already used across the hub. Prefer this when a base-env build fails with "Cannot find a valid extracted directory cache" (an overlayfs/rootless-Docker linking bug that base-env re-links can trigger), or when the environment is large/heavy: install into a fresh env with `conda create -y -n pipeline ...` (same solver preference), add `ENV PATH=/opt/conda/envs/pipeline/bin:$PATH`, and guard-symlink `/opt/conda/envs/pipeline/bin/bash` instead of the base one.
 - Pin tool versions for reproducibility (e.g., `bwa=0.7.18`)
 - For Python (PyPI) packages, use `uv pip install --system` instead of `pip install`
   - Install uv first: `RUN pip install uv`
