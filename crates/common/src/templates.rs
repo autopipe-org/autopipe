@@ -245,6 +245,34 @@ generated, and never rely on a remembered earlier approval.
   - Input data is mounted at `/input` (read-only) at runtime
   - Output directory is mounted at `/output` at runtime
   - Do NOT use absolute host paths like `/home/user/data/...`
+- Input files MUST be TOP-LEVEL scalar keys so the AutoPipe Input page renders
+  them as a file BROWSE field (a native file picker), not a plain text box. The
+  Input page only exposes top-level scalar keys — any nested / indented key is
+  skipped, so it shows no field and no browse button. A key becomes a browsable
+  input file when its name is one of `r1, r2, reads, input, fastq, fq, reference,
+  genome, fasta, fa, bam` (or ends/starts with one, e.g. `tumor_bam`), OR its
+  value starts with `"/input/"`.
+  - CORRECT (each input its own top-level key → browsable):
+    `r1: "/input/sample_R1.fastq.gz"  # Required: paired-end R1 FASTQ`
+    `r2: "/input/sample_R2.fastq.gz"  # Required: paired-end R2 FASTQ`
+  - WRONG (never nest inputs under a `samples`/list mapping — these keys are
+    indented, so the Input page skips them and no browse button appears):
+    `samples:` / `  s1:` / `    r1: "/input/..."` / `    r2: "/input/..."`
+  - If several input files are needed, give each its OWN top-level key
+    (`r1`, `r2`, `reference`, ...). Do not group inputs under `samples`.
+
+## Getting Input From the User: always via the Input page
+- NEVER ask the user to paste file paths in chat, and NEVER hardcode host paths.
+  Every input file and every tunable parameter is supplied by the user through the
+  AutoPipe Input page ("Configure Input"), which reads config.yaml, shows one field
+  per top-level key (a file browse for input-file keys, a text/number/bool box
+  otherwise), and writes the chosen values back into config.yaml. Route ALL
+  user-provided inputs and parameters through this page.
+- The Input page shows exactly what config.yaml contains: a key with a value
+  appears already filled-in (pre-populated), a blank key appears empty and is
+  flagged must-fill. So any value the user asked you to pre-fill (see "Config
+  Variables: default value vs blank") will already be populated when they open the
+  page — keep those values in config.yaml, do not blank them out.
 
 ## Pipeline Naming
 - Before generating ro-crate-metadata.json, ask the user what name they want for their pipeline.

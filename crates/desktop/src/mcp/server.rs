@@ -620,6 +620,34 @@ pub(crate) fn review_checks(files: &[(String, String, bool)]) -> Vec<ReviewFindi
                         });
                     }
                 }
+                // Input-file key nested under a mapping is NOT browsable: the
+                // Input page only exposes top-level scalar keys, so a nested
+                // input file shows no field and no file-browse button.
+                if indent > 0 {
+                    let kl = key.to_lowercase();
+                    const FILE_KEYS: &[&str] = &[
+                        "r1", "r2", "reads", "input", "fastq", "fq",
+                        "reference", "genome", "fasta", "fa", "bam",
+                    ];
+                    let looks_like_input = FILE_KEYS.iter().any(|fk| {
+                        kl == *fk
+                            || kl.ends_with(&format!("_{}", fk))
+                            || kl.starts_with(&format!("{}_", fk))
+                    }) || val
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .starts_with("/input/");
+                    if looks_like_input {
+                        findings.push(ReviewFinding {
+                            severity: "issue",
+                            file: "config.yaml".into(),
+                            line: Some(i + 1),
+                            message: format!(
+                                "Input file `{}` is nested under another key, so it will NOT appear as a file-browse field on the Input page (which only exposes top-level scalar keys). Move it to a top-level key, e.g. `r1: \"/input/...\"`.",
+                                key
+                            ),
+                        });
+                    }
+                }
             }
         }
     }
