@@ -2734,7 +2734,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
 
     // ── Execution tools (via SSH) ───────────────────────────────
 
-    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, automatically call check_build_status every 10 seconds until the build completes. Do NOT ask the user to check — poll automatically. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry. Multi-client note: do not start two builds for the same image_name from different AI clients at once. REVIEW GATE: if this pipeline was just GENERATED, you MUST have already run review_pipeline, presented the summary, and gotten the user's confirmation before building — if you have not, do that first.")]
+    #[tool(description = "Build a Docker image for a pipeline on the remote server via SSH. The build runs in the background and returns immediately. After calling this, call check_build_status to monitor it — each call waits ~20s server-side and then returns a snapshot. You MAY call it a few times in a row to watch progress, but do NOT keep polling until the build finishes: once it has been running a while, tell the user the build is still going in the background and that they can ask you to check again (e.g. say 'check build status'), then STOP and end your turn. Docker builds routinely take several minutes, so a still-running build usually just means it is working rather than stuck. Re-check when the user asks, until it reports success or failure. If the build fails, analyze the log, call cleanup_failed, fix the pipeline, and retry. Multi-client note: do not start two builds for the same image_name from different AI clients at once. REVIEW GATE: if this pipeline was just GENERATED, you MUST have already run review_pipeline, presented the summary, and gotten the user's confirmation before building — if you have not, do that first.")]
     async fn build_image(
         &self,
         Parameters(params): Parameters<BuildParams>,
@@ -2753,7 +2753,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             Ok((output, 0)) => {
                 let pid = output.trim();
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Docker build started in background (PID: {}).\nLog: {}\nNow call check_build_status with image_name='{}' every 10 seconds to monitor progress.",
+                    "Docker build started in background (PID: {}).\nLog: {}\nNow call check_build_status ONCE with image_name='{}'. If it is still building, report that to the user and wait for them to ask you to check again — do NOT poll in a loop.",
                     pid, log_path, params.image_name
                 ))]))
             }
@@ -2762,20 +2762,32 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
-    #[tool(description = "Check the status of a background Docker build started by build_image. Returns building/success/failed status with recent log output. Call this automatically every 10 seconds after build_image — do NOT wait for the user to ask.")]
+    #[tool(description = "Check the status of a background Docker build started by build_image. Each call waits ~20s server-side (returning early if the build finishes) and then returns building/success/failed status with recent log output. You MAY call it a few times in a row to watch progress, but do NOT keep polling until the build finishes: once it has been running a while, present the in-progress status to the user and STOP — end your turn and let the user ask you to check again later. A still-running build usually just means it is working rather than stuck, so don't rush to conclude it hung. Repeat, when the user asks, until it reports success or failure.")]
     async fn check_build_status(
         &self,
         Parameters(params): Parameters<CheckBuildParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        // Check if docker build process is still running
+        // Check if docker build process is still running. Wait server-side for up
+        // to ~20s (polling every 5s) so a single call spans real build time and
+        // paces the client automatically — returning early the moment the build
+        // stops. This gives ~20s-spaced polling without asking the model to sleep,
+        // while still bounding each call so it never blocks until the build ends.
         let check_cmd = format!(
             "ps aux | grep 'docker build.*{}' | grep -v grep | head -1",
             shell_escape(&params.image_name)
         );
-        let is_running = match self.ssh_run(&check_cmd).await {
-            Ok((output, _)) => !output.trim().is_empty(),
-            Err(_) => false,
-        };
+        let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut is_running;
+        loop {
+            is_running = match self.ssh_run(&check_cmd).await {
+                Ok((output, _)) => !output.trim().is_empty(),
+                Err(_) => false,
+            };
+            if !is_running || std::time::Instant::now() >= wait_deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
 
         // Check if image exists (build succeeded)
         let image_check = format!("docker images -q '{}' 2>/dev/null", shell_escape(&params.image_name));
@@ -2825,7 +2837,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
 
         if is_running {
             Ok(CallToolResult::success(vec![Content::text(format!(
-                "Build in progress...\n\nRecent log:\n{}",
+                "Build still in progress (this call already waited ~20s). Docker builds routinely take several minutes (conda/mamba installs especially), so a build that is still running usually just means it is working rather than stuck. You MAY call check_build_status a few more times to keep watching progress — each call waits ~20s. But do NOT keep polling until the build finishes: once it has been running a while, tell the user the build is still going in the background and that they can ask you to check again when they're ready (e.g. 'check build status'), then STOP and end your turn.\n\nRecent log:\n{}",
                 recent_log
             ))]))
         } else if image_exists && !build_failed {
