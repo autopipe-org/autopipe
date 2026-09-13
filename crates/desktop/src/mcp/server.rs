@@ -2865,7 +2865,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         &self,
         Parameters(params): Parameters<DryRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let cores = params.cores.unwrap_or(8);
+        let cores = params.cores.unwrap_or(8).max(1);
         let dry_run_dir = format!("{}/.dry_run_tmp", self.config().full_output_dir().trim_end_matches('/'));
         // Convert any Windows-style paths supplied by the user.
         let input_dir = windows_to_wsl(&params.input_dir);
@@ -2914,8 +2914,8 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         };
 
         let cmd = format!(
-            "docker run --rm --entrypoint snakemake {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
-            pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
+            "docker run --rm --entrypoint snakemake --cpus {} {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml -n -p",
+            cores, pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores
         );
 
         let result = match self.ssh_run(&cmd).await {
@@ -3057,7 +3057,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let cores = params.cores.unwrap_or(8);
+        let cores = params.cores.unwrap_or(8).max(1);
         let output_dir = self.resolve_output_dir(&params.run_name);
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
@@ -3137,8 +3137,8 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
 
         let cmd = format!(
-            "nohup docker run --entrypoint snakemake --name '{}' {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            shell_escape(&container_name), pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
+            "nohup docker run --entrypoint snakemake --name '{}' --cpus {} {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            shell_escape(&container_name), cores, pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
