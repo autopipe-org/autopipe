@@ -620,9 +620,9 @@ pub(crate) fn review_checks(files: &[(String, String, bool)]) -> Vec<ReviewFindi
                         });
                     }
                 }
-                // Input-file key nested under a mapping is NOT browsable: the
-                // Input page only exposes top-level scalar keys, so a nested
-                // input file shows no field and no file-browse button.
+                // A nested input-file key is editable on the Input page (it is
+                // shown as `parent.child`), but only a TOP-LEVEL key gets the
+                // file-browse button, so the path has to be typed by hand.
                 if indent > 0 {
                     let kl = key.to_lowercase();
                     const FILE_KEYS: &[&str] = &[
@@ -638,11 +638,11 @@ pub(crate) fn review_checks(files: &[(String, String, bool)]) -> Vec<ReviewFindi
                         .starts_with("/input/");
                     if looks_like_input {
                         findings.push(ReviewFinding {
-                            severity: "issue",
+                            severity: "suggestion",
                             file: "config.yaml".into(),
                             line: Some(i + 1),
                             message: format!(
-                                "Input file `{}` is nested under another key, so it will NOT appear as a file-browse field on the Input page (which only exposes top-level scalar keys). Move it to a top-level key, e.g. `r1: \"/input/...\"`.",
+                                "Input file `{}` is nested under another key. The Input page can still edit it (shown as `parent.child`), but it gets no file-browse button, so the user must type the path. Prefer a top-level key, e.g. `r1: \"/input/...\"`.",
                                 key
                             ),
                         });
@@ -3020,7 +3020,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
-    #[tool(description = "Open the AutoPipe Input page in the user's browser so they choose the pipeline's INPUT visually: they pick input files from a file explorer (the AWS S3 bucket when the analysis machine is an AWS VM, otherwise the SSH server's filesystem) and edit the pipeline's config.yaml values (pre-filled with defaults, one-line descriptions and required markers shown). On Save, the picked files are symlinked into the input directory (as /input/<name>) and config.yaml is written back on the server. ALWAYS call this when the user asks to run/execute a pipeline and the input has not been set up yet this session — do NOT ask the user to type input file paths or config values in chat, and do NOT summarize config values in chat (the page already shows every value with its description). After calling it, tell the user to pick files and set values in the opened page and click Save, and WAIT until they confirm they saved. Then call execute_pipeline with the returned input_dir. Requires the pipeline to already be downloaded to the server (its config.yaml must exist). ALWAYS provide the descriptions map: before opening the page, read the config.yaml AND the Snakefile/scripts and write a concise one-line description for EVERY config variable, so no field is left without help text. The page shows the config.yaml comment when a variable has one and falls back to your description otherwise.")]
+    #[tool(description = "Open the AutoPipe Input page in the user's browser so they choose the pipeline's INPUT visually: they pick input files from a file explorer (the AWS S3 bucket when the analysis machine is an AWS VM, otherwise the SSH server's filesystem) and edit the pipeline's config.yaml values (pre-filled with defaults, one-line descriptions and required markers shown). On Save, the picked files are symlinked into the input directory (as /input/<name>) and config.yaml is written back on the server. Prefer this when the user asks to run/execute a pipeline and has NOT already said which files or values to use: picking files visually is easier than typing paths. It is not mandatory. When the user states a value or a file path in chat (e.g. 'set threads to 16', 'use /data/sample_R1.fq.gz as r1'), just apply it: read config.yaml, edit the keys they named, write it back with write_file, and tell them what changed — do not send them to the page for something they already told you. The same applies when the page cannot be used: if it fails to open, a value is missing from it, or the user prefers chat, fall back to editing config.yaml directly. When you do open the page, there is no need to also list every value in chat, since the page shows each one with its description. After calling it, tell the user to pick files and set values in the opened page and click Save, and WAIT until they confirm they saved. Then call execute_pipeline with the returned input_dir. Requires the pipeline to already be downloaded to the server (its config.yaml must exist). ALWAYS provide the descriptions map: before opening the page, read the config.yaml AND the Snakefile/scripts and write a concise one-line description for EVERY config variable, so no field is left without help text. The page shows the config.yaml comment when a variable has one and falls back to your description otherwise.")]
     async fn configure_input(
         &self,
         Parameters(params): Parameters<ConfigureInputParams>,

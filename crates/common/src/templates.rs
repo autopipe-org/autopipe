@@ -77,13 +77,13 @@ CMD ["snakemake", "--help"]
 "#;
 
 /// config.yaml template for new pipelines.
-pub const CONFIG_YAML_TEMPLATE: &str = r#"# Required: list of sample names (without extension)
-samples:
-  - sample1
-  - sample2
+pub const CONFIG_YAML_TEMPLATE: &str = r#"# Required: paired-end R1 FASTQ
+r1: "/input/sample_R1.fastq.gz"
+# Required: paired-end R2 FASTQ
+r2: "/input/sample_R2.fastq.gz"
 
 # Required: path to reference genome (mounted at runtime)
-# reference: "/input/reference.fa"
+reference: "/input/reference.fa"
 
 # Optional: number of threads per rule (default: 4)
 threads: 4
@@ -255,29 +255,40 @@ generated, and never rely on a remembered earlier approval.
   - Input data is mounted at `/input` (read-only) at runtime
   - Output directory is mounted at `/output` at runtime
   - Do NOT use absolute host paths like `/home/user/data/...`
-- Input files MUST be TOP-LEVEL scalar keys so the AutoPipe Input page renders
-  them as a file BROWSE field (a native file picker), not a plain text box. The
-  Input page only exposes top-level scalar keys — any nested / indented key is
-  skipped, so it shows no field and no browse button. A key becomes a browsable
-  input file when its name is one of `r1, r2, reads, input, fastq, fq, reference,
-  genome, fasta, fa, bam` (or ends/starts with one, e.g. `tumor_bam`), OR its
-  value starts with `"/input/"`.
-  - CORRECT (each input its own top-level key → browsable):
+- PREFER TOP-LEVEL scalar keys for input files. The Input page renders such a key
+  as a file BROWSE field (a native file picker) rather than a plain text box. A key
+  becomes a browsable input file when its name is one of `r1, r2, reads, input,
+  fastq, fq, reference, genome, fasta, fa, bam` (or ends/starts with one, e.g.
+  `tumor_bam`), OR its value starts with `"/input/"`.
+  - BEST (each input its own top-level key → browsable, and easiest to fill in):
     `r1: "/input/sample_R1.fastq.gz"  # Required: paired-end R1 FASTQ`
     `r2: "/input/sample_R2.fastq.gz"  # Required: paired-end R2 FASTQ`
-  - WRONG (never nest inputs under a `samples`/list mapping — these keys are
-    indented, so the Input page skips them and no browse button appears):
-    `samples:` / `  s1:` / `    r1: "/input/..."` / `    r2: "/input/..."`
-  - If several input files are needed, give each its OWN top-level key
-    (`r1`, `r2`, `reference`, ...). Do not group inputs under `samples`.
+  - Nested mappings and lists ARE supported: the Input page shows a nested leaf as
+    `parent.child` and a list as one editable field (comma-separated on a single
+    line, or one item per line when an item itself contains a comma), and writes
+    both back in place, keeping the YAML structure and type. So a config that
+    groups values under `qc:` or keeps a `samples:` list still works.
+  - Still prefer flat keys for INPUT FILES specifically: only a top-level key whose
+    NAME matches the list above gets the browse button, so a nested
+    `wild_type.h5_file` is editable but must be typed rather than picked. Give each
+    input file its own top-level key (`r1`, `r2`, `reference`, ...) when you can.
+- A key must not be BOTH a value and a parent: write either `key: value` or an
+  indented block under `key:`, never a scalar on a key that also has children.
+- Keep a path relative to `/input` consistent with how the Snakefile reads it. If a
+  rule prefixes the value itself (e.g. `$HOST_INPUT_DIR/{params.fasta}`), accept an
+  absolute `/input/...` value too — the Input page writes that form when a file is
+  picked — by stripping the `/input/` prefix before use.
 
-## Getting Input From the User: always via the Input page
-- NEVER ask the user to paste file paths in chat, and NEVER hardcode host paths.
-  Every input file and every tunable parameter is supplied by the user through the
-  AutoPipe Input page ("Configure Input"), which reads config.yaml, shows one field
-  per top-level key (a file browse for input-file keys, a text/number/bool box
-  otherwise), and writes the chosen values back into config.yaml. Route ALL
-  user-provided inputs and parameters through this page.
+## Getting Input From the User: the Input page first, chat when they ask
+- NEVER hardcode host paths. Every input file and tunable parameter comes from the
+  user, normally through the AutoPipe Input page ("Configure Input"), which reads
+  config.yaml, shows one field per key (a file browse for input-file keys, a
+  text/number/bool box otherwise, an editable field for nested keys and lists), and
+  writes the chosen values back into config.yaml.
+- Prefer that page when the user has NOT already said which files or values to use.
+  When they DO state a value in chat ("set threads to 16"), just apply it: read
+  config.yaml, edit those keys, write it back, and say what changed. Same if the
+  page cannot be used.
 - The Input page shows exactly what config.yaml contains: a key with a value
   appears already filled-in (pre-populated), a blank key appears empty and is
   flagged must-fill. So any value the user asked you to pre-fill (see "Config

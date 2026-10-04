@@ -2256,6 +2256,146 @@ fn input_parse_config_fields(
     out
 }
 
+/// One parsed line of a config block: how deep it is indented and what it holds.
+#[derive(Clone)]
+struct CfgLine {
+    indent: usize,
+    key: Option<String>,
+    value: String,
+    comment: String,
+    is_item: bool, // "- ..." list entry
+}
+
+fn input_scan_lines(yaml: &str) -> Vec<CfgLine> {
+    yaml.lines()
+        .map(|l| {
+            let indent = l.len() - l.trim_start().len();
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') {
+                return CfgLine { indent, key: None, value: String::new(), comment: t.trim_start_matches('#').trim().to_string(), is_item: false };
+            }
+            if let Some(rest) = t.strip_prefix("- ") {
+                let (v, c) = input_split_inline_comment(rest);
+                return CfgLine { indent, key: None, value: v, comment: c, is_item: true };
+            }
+            match t.find(':') {
+                Some(i) if !t[..i].contains(' ') => {
+                    let (v, c) = input_split_inline_comment(t[i + 1..].trim());
+                    CfgLine { indent, key: Some(t[..i].trim().to_string()), value: v, comment: c, is_item: false }
+                }
+                _ => CfgLine { indent, key: None, value: t.to_string(), comment: String::new(), is_item: false },
+            }
+        })
+        .collect()
+}
+
+/// Parse config fields INCLUDING nested mapping leaves (as "parent.child") and
+/// list blocks (as one multi-line field). This lets the input page edit a config
+/// that nests its values, without the pipeline having to flatten them first.
+fn input_parse_config_fields_deep(
+    yaml: &str,
+    ai_desc: &std::collections::HashMap<String, String>,
+) -> Vec<serde_json::Value> {
+    let lines = input_scan_lines(yaml);
+    let raw: Vec<&str> = yaml.lines().collect();
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut path: Vec<(usize, String)> = Vec::new(); // (indent, key)
+    let mut pending: Vec<String> = Vec::new();
+    let mut last_was_key = false;
+
+    let mut i = 0usize;
+    while i < lines.len() {
+        let l = &lines[i];
+        // blank line
+        if raw[i].trim().is_empty() {
+            pending.clear();
+            last_was_key = false;
+            i += 1;
+            continue;
+        }
+        // comment line
+        if raw[i].trim_start().starts_with('#') {
+            if last_was_key { pending.clear(); last_was_key = false; }
+            let c = l.comment.clone();
+            if !c.is_empty() && !c.chars().all(|ch| ch == '=' || ch == '-') { pending.push(c); }
+            i += 1;
+            continue;
+        }
+        let key = match &l.key { Some(k) => k.clone(), None => { i += 1; continue; } };
+        while path.last().map(|(ind, _)| *ind >= l.indent).unwrap_or(false) { path.pop(); }
+
+        // Does an indented block follow?
+        let mut j = i + 1;
+        while j < lines.len() && (raw[j].trim().is_empty() || raw[j].trim_start().starts_with('#')) { j += 1; }
+        let child = j < lines.len() && lines[j].indent > l.indent;
+
+        let full = if path.is_empty() { key.clone() } else {
+            format!("{}.{}", path.iter().map(|(_, k)| k.as_str()).collect::<Vec<_>>().join("."), key)
+        };
+        let mut desc = pending.join(" ");
+        if !l.comment.is_empty() { desc = if desc.is_empty() { l.comment.clone() } else { format!("{} {}", desc, l.comment) }; }
+
+        if child && lines[j].is_item {
+            // a list block: collect every item line
+            let mut items = Vec::new();
+            let mut k = j;
+            let mut last_item = j;
+            while k < lines.len() {
+                if raw[k].trim().is_empty() || raw[k].trim_start().starts_with('#') { k += 1; continue; }
+                if lines[k].indent <= l.indent || !lines[k].is_item { break; }
+                items.push(lines[k].value.clone());
+                last_item = k;
+                k += 1;
+            }
+            // Resume right after the last item so a blank line or a comment that
+            // follows the block still resets the pending description for the
+            // NEXT key, exactly as it does for a plain scalar.
+            let k = last_item + 1;
+            // Show items without their YAML quotes, on one comma-separated line
+            // when no item itself contains a comma (nicer for things like a
+            // chromosome list); otherwise one per line.
+            let shown: Vec<String> = items.iter()
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .collect();
+            let quoted = items.iter().any(|s| s.trim().starts_with('"'));
+            let sep = if shown.iter().any(|s| s.contains(',')) { "\n" } else { ", " };
+            out.push(serde_json::json!({
+                "key": full, "value": shown.join(sep), "is_file": false, "type": "string",
+                "required": desc.to_lowercase().contains("required"),
+                "description": ai_desc.get(&full).cloned().unwrap_or(desc),
+                "kind": "list", "indent": lines[j].indent,
+                "sep": sep, "quoted": quoted,
+            }));
+            i = k;
+            last_was_key = true;
+            continue;
+        }
+        if child {
+            // a nested mapping: descend, do not emit the parent itself
+            path.push((l.indent, key));
+            pending.clear();
+            last_was_key = false;
+            i += 1;
+            continue;
+        }
+        // a plain scalar
+        let display = l.value.trim().trim_matches('"').trim_matches('\'').to_string();
+        out.push(serde_json::json!({
+            "key": full, "value": display,
+            "is_file": input_is_file_field(&key, &display),
+            "type": input_detect_type(&l.value),
+            "required": desc.to_lowercase().contains("required"),
+            "description": ai_desc.get(&full).cloned().unwrap_or(desc),
+            "kind": "scalar", "indent": l.indent,
+        }));
+        // NOTE: pending is deliberately NOT cleared here — a comment block above a
+        // group of keys describes every key in that group, as the flat parser does.
+        last_was_key = true;
+        i += 1;
+    }
+    out
+}
+
 /// Double-quote a YAML string value, escaping as needed.
 fn input_dquote(v: &str) -> String {
     format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""))
@@ -2329,6 +2469,94 @@ fn input_set_yaml_value(yaml: &str, key: &str, formatted_value: &str) -> String 
     result
 }
 
+/// Replace the value of a key addressed by a dotted path ("parent.child"),
+/// keeping its indentation and any inline comment. Top-level paths fall back to
+/// input_set_yaml_value so existing behaviour is untouched.
+fn input_set_deep_value(yaml: &str, path: &str, formatted_value: &str) -> String {
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.len() == 1 {
+        return input_set_yaml_value(yaml, parts[0], formatted_value);
+    }
+    let lines = input_scan_lines(yaml);
+    let mut raw: Vec<String> = yaml.lines().map(|s| s.to_string()).collect();
+    let mut depth = 0usize;
+    let mut parent_indent: Option<usize> = None;
+    for i in 0..lines.len() {
+        let l = &lines[i];
+        let key = match &l.key { Some(k) => k, None => continue };
+        if let Some(pi) = parent_indent {
+            if l.indent <= pi && key != parts[depth] { continue; }
+        }
+        if key != parts[depth] { continue; }
+        if depth + 1 == parts.len() {
+            let indent = " ".repeat(l.indent);
+            let tail = if l.comment.is_empty() { String::new() } else { format!("  # {}", l.comment) };
+            raw[i] = format!("{}{}: {}{}", indent, key, formatted_value, tail);
+            break;
+        }
+        parent_indent = Some(l.indent);
+        depth += 1;
+    }
+    let mut r = raw.join("\n");
+    if yaml.ends_with('\n') { r.push('\n'); }
+    r
+}
+
+
+/// Split the text shown for a list field back into YAML item texts, restoring
+/// the quoting style the file used.
+fn input_list_items_from_text(text: &str, sep: &str, quoted: bool) -> Vec<String> {
+    let parts: Vec<&str> = if sep == "\n" { text.lines().collect() } else { text.split(',').collect() };
+    parts.iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| if quoted && !s.starts_with('"') { input_dquote(s) } else { s.to_string() })
+        .collect()
+}
+
+/// Replace a list block addressed by a dotted path with new items (one per line
+/// of `items_text`). Indentation and the key's own line are preserved, so the
+/// value stays a real YAML list.
+fn input_set_list_block(yaml: &str, path: &str, items: &[String]) -> String {
+    let parts: Vec<&str> = path.split('.').collect();
+    let lines = input_scan_lines(yaml);
+    let raw: Vec<&str> = yaml.lines().collect();
+    let mut depth = 0usize;
+    let mut parent_indent: Option<usize> = None;
+    let mut key_line: Option<usize> = None;
+    for i in 0..lines.len() {
+        let l = &lines[i];
+        let key = match &l.key { Some(k) => k, None => continue };
+        if let Some(pi) = parent_indent {
+            if l.indent <= pi && key != parts[depth] { continue; }
+        }
+        if key != parts[depth] { continue; }
+        if depth + 1 == parts.len() { key_line = Some(i); break; }
+        parent_indent = Some(l.indent);
+        depth += 1;
+    }
+    let ki = match key_line { Some(i) => i, None => return yaml.to_string() };
+    // span of the existing item lines
+    let mut start = ki + 1;
+    while start < lines.len() && (raw[start].trim().is_empty() || raw[start].trim_start().starts_with('#')) { start += 1; }
+    let item_indent = if start < lines.len() && lines[start].is_item { lines[start].indent } else { lines[ki].indent + 2 };
+    let mut end = start;
+    while end < lines.len() {
+        if raw[end].trim().is_empty() || raw[end].trim_start().starts_with('#') { end += 1; continue; }
+        if lines[end].indent <= lines[ki].indent || !lines[end].is_item { break; }
+        end += 1;
+    }
+    let pad = " ".repeat(item_indent);
+    let new_items: Vec<String> = items.iter().map(|s| format!("{}- {}", pad, s)).collect();
+    let mut out: Vec<String> = Vec::new();
+    out.extend(raw[..start].iter().map(|s| s.to_string()));
+    out.extend(new_items);
+    out.extend(raw[end..].iter().map(|s| s.to_string()));
+    let mut r = out.join("\n");
+    if yaml.ends_with('\n') { r.push('\n'); }
+    r
+}
+
 async fn input_page_handler() -> Html<String> {
     Html(INPUT_PAGE_HTML.to_string())
 }
@@ -2348,7 +2576,7 @@ async fn input_config_handler() -> Json<serde_json::Value> {
         }
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
-    let fields = input_parse_config_fields(&raw, &session.ai_descriptions);
+    let fields = input_parse_config_fields_deep(&raw, &session.ai_descriptions);
     let is_cloud = session.config.connection_type == "cloud" && session.config.cloud_provider == "aws";
     Json(serde_json::json!({
         "ok": true,
@@ -2476,6 +2704,20 @@ struct InputSaveField {
     is_file: bool,
     #[serde(rename = "type", default)]
     ty: String,
+    /// "scalar" (default) or "list"
+    #[serde(default)]
+    kind: String,
+    /// For a list field: how its items were joined for display (", " or "\n").
+    #[serde(default)]
+    sep: String,
+    /// For a list field: whether the file quotes its items.
+    #[serde(default)]
+    quoted: bool,
+    /// The value as the page first received it. When present, a field whose
+    /// value still equals it is left alone, so a save that changes nothing
+    /// rewrites nothing. Absent (older page) means "always write".
+    #[serde(default)]
+    original: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2556,8 +2798,20 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
         Err(e) => return Json(serde_json::json!({ "ok": false, "error": e })),
     };
     let mut updated = raw;
-    for (k, v) in &new_values {
-        updated = input_set_yaml_value(&updated, k, v);
+    for f in &body.fields {
+        // An untouched field is never rewritten, so a save that changes nothing
+        // leaves config.yaml byte-for-byte as it was.
+        if f.original.as_deref().map(|o| o.trim() == f.value.trim()).unwrap_or(false) { continue; }
+        if f.kind == "list" {
+            let sep = if f.sep.is_empty() { "\n" } else { f.sep.as_str() };
+            let items = input_list_items_from_text(&f.value, sep, f.quoted);
+            updated = input_set_list_block(&updated, &f.key, &items);
+            continue;
+        }
+        match new_values.iter().find(|(k, _)| k == &f.key) {
+            Some((k, v)) => { updated = input_set_deep_value(&updated, k, v); }
+            None => {}
+        }
     }
     let b64 = base64::engine::general_purpose::STANDARD.encode(updated.as_bytes());
     let write_cmd = format!("printf '%s' '{}' | base64 -d > '{}'", b64, esc);
@@ -2615,7 +2869,7 @@ const INPUT_PAGE_HTML: &str = r####"<!doctype html>
   .btn{padding:7px 14px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.85rem}
   .up{padding:4px 10px;border:1px solid var(--strong);border-radius:6px;background:var(--card);cursor:pointer;font-size:.8rem}
   .empty{padding:16px;color:var(--muted);font-size:.85rem}
-</style></head>
+.ctl textarea{width:100%;font-family:ui-monospace,monospace;font-size:.82rem;padding:7px 10px;border:1px solid var(--strong);border-radius:7px;resize:vertical}</style></head>
 <body>
 <div class="top"><img src="/logo.png" alt=""><span class="name">AutoPipe</span><span class="ptitle">- Pipeline input</span></div>
 <div class="wrap">
@@ -2639,7 +2893,7 @@ function fmtSize(n){if(n==null)return"";const u=["B","KB","MB","GB","TB"];let i=
 async function load(){
   const r=await fetch("/api/input/config");const d=await r.json();
   if(!d.ok){$("sub").textContent="Error: "+d.error;return}
-  SOURCE=d.source;FIELDS=d.fields;
+  SOURCE=d.source;FIELDS=d.fields;FIELDS.forEach(function(f){f.value_original=f.value});
   const c=$("fields");c.innerHTML="";
   FIELDS.forEach(f=>{
     const row=document.createElement("div");row.className="field";
@@ -2650,6 +2904,10 @@ async function load(){
     if(f.type==="bool"){
       inp=document.createElement("select");
       ["true","false"].forEach(o=>{const op=document.createElement("option");op.value=o;op.textContent=o;if(String(f.value)===o)op.selected=true;inp.appendChild(op)});
+    } else if(f.kind==="list" && (f.sep||"")===""+String.fromCharCode(10)){
+      inp=document.createElement("textarea");
+      inp.rows=Math.min(8,(f.value||"").split(String.fromCharCode(10)).length+1);
+      inp.value=f.value;
     } else {
       inp=document.createElement("input");
       inp.type=(f.type==="int"||f.type==="float")?"number":"text";
@@ -2680,16 +2938,17 @@ async function list(path){
 }
 function el(name,ic,sz){const r=document.createElement("div");r.className="row";r.innerHTML='<span class="ic">'+ic+'</span><span>'+name+'</span>'+(sz!=null?'<span class="sz">'+fmtSize(sz)+'</span>':'');return r}
 function pick(path){
-  document.querySelectorAll('#fields .ctl input, #fields .ctl select').forEach(i=>{if(i.dataset.key===activeKey)i.value=path});
+  document.querySelectorAll('#fields .ctl input, #fields .ctl select, #fields .ctl textarea').forEach(i=>{if(i.dataset.key===activeKey)i.value=path});
   $("ov").classList.remove("show");
 }
 $("up").onclick=()=>{const p=$("up").dataset.p;list(p)};
 $("close").onclick=()=>$("ov").classList.remove("show");
 $("save").onclick=async()=>{
   $("save").disabled=true;setMsg("Preparing input…","");
-  const fields=[...document.querySelectorAll('#fields .ctl input, #fields .ctl select')].map(i=>{
+  const fields=[...document.querySelectorAll('#fields .ctl input, #fields .ctl select, #fields .ctl textarea')].map(i=>{
     const f=FIELDS.find(x=>x.key===i.dataset.key)||{};
-    return{key:i.dataset.key,value:i.value,is_file:!!f.is_file,type:f.type||"string"};
+    return{key:i.dataset.key,value:i.value,is_file:!!f.is_file,type:f.type||"string",
+            kind:f.kind||"scalar",sep:f.sep||"",quoted:!!f.quoted,original:f.value_original};
   });
   const r=await fetch("/api/input/save",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({fields})});
   const d=await r.json();

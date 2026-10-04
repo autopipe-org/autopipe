@@ -17,7 +17,7 @@
 <div class="form">
   <label>
     <span>Host</span>
-    <input bind:value={config.host} placeholder="e.g. 127.0.0.1 or a cloud VM public IP" />
+    <input bind:value={config.host} placeholder="e.g. 127.0.0.1" />
   </label>
   <label>
     <span>Port</span>
@@ -30,7 +30,7 @@
   </label>
   <label>
     <span>User</span>
-    <input bind:value={config.user} placeholder="e.g. ubuntu, ec2-user" />
+    <input bind:value={config.user} placeholder="your login name on that server" />
   </label>
   <label>
     <span>Password</span>
