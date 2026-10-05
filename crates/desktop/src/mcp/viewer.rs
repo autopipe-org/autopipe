@@ -2256,6 +2256,40 @@ fn input_parse_config_fields(
     out
 }
 
+/// Explicit file markers an author can put in a config comment. They decide
+/// whether the Input page shows a file picker, and are stripped from the text
+/// shown as the field's description.
+///   `(input file)` → always a file picker
+///   `(not a file)` → never a file picker, even for a name like `genome`
+fn input_take_file_marker(desc: &str) -> (Option<bool>, String) {
+    const YES: &[&str] = &["(input file)", "(input files)"];
+    const NO: &[&str] = &["(not a file)", "(not file)"];
+    let lower = desc.to_lowercase();
+    let mut marker = None;
+    let mut out = desc.to_string();
+    for m in YES.iter().chain(NO.iter()) {
+        if let Some(pos) = lower.find(m) {
+            marker = Some(YES.contains(m));
+            out = format!("{}{}", &desc[..pos], &desc[pos + m.len()..]);
+            break;
+        }
+    }
+    let cleaned = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    (marker, cleaned.trim_matches(|c| c == ' ' || c == '-').to_string())
+}
+
+/// Heuristic used when a comment carries no explicit marker: the key has to be
+/// named like an input file AND the value has to look like a path (or be blank,
+/// i.e. still to be filled in). The value test keeps identifiers such as
+/// `genome: "mm10"` out of the file picker.
+fn input_looks_like_file(key: &str, value: &str) -> bool {
+    if !input_is_file_field(key, value) {
+        return false;
+    }
+    let v = value.trim();
+    v.is_empty() || v.contains('/') || v.contains('.')
+}
+
 /// One parsed line of a config block: how deep it is indented and what it holds.
 #[derive(Clone)]
 struct CfgLine {
@@ -2359,6 +2393,7 @@ fn input_parse_config_fields_deep(
                 .collect();
             let quoted = items.iter().any(|s| s.trim().starts_with('"'));
             let sep = if shown.iter().any(|s| s.contains(',')) { "\n" } else { ", " };
+            let (_, desc) = input_take_file_marker(&desc);
             out.push(serde_json::json!({
                 "key": full, "value": shown.join(sep), "is_file": false, "type": "string",
                 "required": desc.to_lowercase().contains("required"),
@@ -2380,11 +2415,17 @@ fn input_parse_config_fields_deep(
         }
         // a plain scalar
         let display = l.value.trim().trim_matches('"').trim_matches('\'').to_string();
+        let (marker, desc) = input_take_file_marker(&desc);
+        let is_file = marker.unwrap_or_else(|| input_looks_like_file(&key, &display));
+        let low = desc.to_lowercase();
+        // An input file is required unless the comment says it is optional, so a
+        // pipeline whose comments never say "Required" still flags its inputs.
+        let required = (low.contains("required") || is_file) && !low.contains("optional");
         out.push(serde_json::json!({
             "key": full, "value": display,
-            "is_file": input_is_file_field(&key, &display),
+            "is_file": is_file,
             "type": input_detect_type(&l.value),
-            "required": desc.to_lowercase().contains("required"),
+            "required": required,
             "description": ai_desc.get(&full).cloned().unwrap_or(desc),
             "kind": "scalar", "indent": l.indent,
         }));
@@ -2393,6 +2434,9 @@ fn input_parse_config_fields_deep(
         last_was_key = true;
         i += 1;
     }
+    // Input files first — they are what the user has to supply — keeping the
+    // config's own order within each group.
+    out.sort_by_key(|x| !x["is_file"].as_bool().unwrap_or(false));
     out
 }
 

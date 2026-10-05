@@ -77,12 +77,12 @@ CMD ["snakemake", "--help"]
 "#;
 
 /// config.yaml template for new pipelines.
-pub const CONFIG_YAML_TEMPLATE: &str = r#"# Required: paired-end R1 FASTQ
+pub const CONFIG_YAML_TEMPLATE: &str = r#"# Required: paired-end R1 FASTQ (input file)
 r1: "/input/sample_R1.fastq.gz"
-# Required: paired-end R2 FASTQ
+# Required: paired-end R2 FASTQ (input file)
 r2: "/input/sample_R2.fastq.gz"
 
-# Required: path to reference genome (mounted at runtime)
+# Required: reference genome, mounted at runtime (input file)
 reference: "/input/reference.fa"
 
 # Optional: number of threads per rule (default: 4)
@@ -247,6 +247,10 @@ generated, and never rely on a remembered earlier approval.
 - If the user already has a working Dockerfile from their analysis environment, use it as the base instead of writing one from scratch.
 
 ## config.yaml Rules
+- WRITE EVERYTHING IN ENGLISH — config.yaml comments, README.md and
+  ro-crate-metadata.json. These are published to the Hub and read by people who
+  may not share the user's language. Talk to the user in their own language, but
+  keep the pipeline's own files English-only.
 - ALL configurable parameters go here, not in Snakefile
 - REQUIRED: every parameter MUST have a one-line explanatory comment describing what it is — either inline (`key: value  # what it is`) or on the line directly above the key. The AutoPipe Input page shows these comments as each field's description, so a variable with no comment appears with no help text.
 - Mark REQUIRED parameters by including the word `Required` in that parameter's comment (e.g. `# Required: paired-end R1 FASTQ`). The Input page reads this keyword to show a red `*` next to required fields.
@@ -272,6 +276,19 @@ generated, and never rely on a remembered earlier approval.
     NAME matches the list above gets the browse button, so a nested
     `wild_type.h5_file` is editable but must be typed rather than picked. Give each
     input file its own top-level key (`r1`, `r2`, `reference`, ...) when you can.
+- SAY WHICH KEYS ARE FILES. The page decides whether to show a file picker from
+  the comment first, and only guesses when the comment is silent (a file-ish key
+  NAME plus a value that looks like a path). A blank value has nothing to guess
+  from, so be explicit whenever you ship a key blank:
+  - end the comment with `(input file)` for a key the user supplies a file for;
+  - end it with `(not a file)` for a key whose name looks like a file but whose
+    value is not a path (e.g. `genome: "mm10"`, a genome build name).
+  Both markers are stripped from the help text shown on the page, so write the
+  comment as a normal sentence and just append the marker:
+    `r1: ""  # Required: paired-end R1 FASTQ (input file)`
+    `genome: "mm10"  # Genome build, mm10 or hg38 (not a file)`
+- A key that is an input file is treated as REQUIRED unless its comment says
+  `Optional`, so there is no need to also write `Required` on it.
 - A key must not be BOTH a value and a parent: write either `key: value` or an
   indented block under `key:`, never a scalar on a key that also has children.
 - Keep a path relative to `/input` consistent with how the Snakefile reads it. If a
