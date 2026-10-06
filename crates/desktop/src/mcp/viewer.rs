@@ -2241,7 +2241,11 @@ fn input_parse_config_fields(
             }
         }
         let required = config_comment.to_lowercase().contains("required");
-        let desc = ai_desc.get(key).cloned().unwrap_or(config_comment);
+        // The pipeline author's own comment wins; an AI-supplied description
+        // only fills a gap, as configure_input's `descriptions` doc promises.
+        let desc = if config_comment.trim().is_empty() {
+            ai_desc.get(key).cloned().unwrap_or_default()
+        } else { config_comment };
 
         out.push(serde_json::json!({
             "key": key,
@@ -2397,7 +2401,7 @@ fn input_parse_config_fields_deep(
             out.push(serde_json::json!({
                 "key": full, "value": shown.join(sep), "is_file": false, "type": "string",
                 "required": desc.to_lowercase().contains("required"),
-                "description": ai_desc.get(&full).cloned().unwrap_or(desc),
+                "description": if desc.trim().is_empty() { ai_desc.get(&full).cloned().unwrap_or_default() } else { desc },
                 "kind": "list", "indent": lines[j].indent,
                 "sep": sep, "quoted": quoted,
             }));
@@ -2426,7 +2430,7 @@ fn input_parse_config_fields_deep(
             "is_file": is_file,
             "type": input_detect_type(&l.value),
             "required": required,
-            "description": ai_desc.get(&full).cloned().unwrap_or(desc),
+            "description": if desc.trim().is_empty() { ai_desc.get(&full).cloned().unwrap_or_default() } else { desc },
             "kind": "scalar", "indent": l.indent,
         }));
         // NOTE: pending is deliberately NOT cleared here — a comment block above a

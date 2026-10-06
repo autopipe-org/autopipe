@@ -111,7 +111,8 @@ struct ConfigureInputParams {
     /// locate the pipeline directory whose config.yaml is edited.
     image_name: String,
     /// OPTIONAL fallback one-line descriptions for config variables, keyed by
-    /// variable name. The page shows the config.yaml comment when present and
+    /// variable name — use the dotted path for a nested key, e.g.
+    /// "wild_type.h5_file". The page shows the config.yaml comment when present and
     /// falls back to these only for variables that have NO comment. Fill this by
     /// reading the pipeline's Snakefile/scripts when the config lacks comments;
     /// omit it when the config is already well-commented.
