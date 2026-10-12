@@ -1,5 +1,5 @@
 use common::api_client::RegistryClient;
-use common::models::{clean_content, parse_ro_crate_metadata, PipelineMetadata};
+use common::models::{clean_content, parse_ro_crate_metadata, ro_crate_gpu_requirement, PipelineMetadata};
 use common::templates;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -93,6 +93,12 @@ struct ExecuteParams {
     /// Set to true if the pipeline needs Docker access inside the container (e.g., nextflow -profile docker, docker run, singularity exec). Mounts the host Docker socket.
     #[serde(default)]
     needs_docker_socket: Option<bool>,
+    /// GPUs to attach to the pipeline container: "all", or comma-separated GPU indices as shown by
+    /// nvidia-smi on the server (e.g. "0" or "0,1"); "none" forces a CPU-only run. Omit it to follow the
+    /// pipeline's ro-crate `gpu` declaration ("required"/"optional" → "all"; no declaration → no GPU).
+    /// Inside the container the attached GPUs are renumbered from 0, so pipeline code just uses "cuda".
+    #[serde(default)]
+    gpus: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -342,6 +348,78 @@ fn shell_escape(s: &str) -> String {
         .filter(|c| *c != '\0' && *c != '\n' && *c != '\r')
         .collect();
     sanitized.replace('\'', "'\\''")
+}
+
+/// Log line a pipeline prints when it stops at a point that needs a decision (from the user or the AI)
+/// before it can continue. The run then ends "successfully", so the status checks look for this marker
+/// to report it as waiting rather than finished.
+const AWAITING_INPUT_MARKER: &str = "AWAITING_INPUT";
+
+fn awaiting_input_notice(output_dir: &str) -> String {
+    format!(
+        "Pipeline PAUSED — AWAITING_INPUT. It is NOT finished. Read {}/AWAITING_INPUT.json (and the \
+         instructions in the log below), get the decision it asks for (ask the user when it is theirs to make), \
+         write the answer file it names with write_file, then re-run execute_pipeline with the SAME run_name \
+         (and the same gpus) — completed steps are skipped.",
+        output_dir.trim_end_matches('/')
+    )
+}
+
+/// Normalize a GPU selection to "all" or a comma-separated index list ("0,1").
+/// Anything else is rejected, so the value can be placed in a docker command safely.
+fn normalize_gpu_selection(raw: &str) -> Result<String, String> {
+    let s: String = raw.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_lowercase();
+    if s == "all" {
+        return Ok(s);
+    }
+    let ids: Vec<&str> = s.split(',').collect();
+    if !s.is_empty() && ids.iter().all(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())) {
+        return Ok(ids.join(","));
+    }
+    Err(format!(
+        "Invalid gpus value '{}': use \"all\", comma-separated GPU indices such as \"0\" or \"0,1\", or \"none\".",
+        raw
+    ))
+}
+
+/// The two ways to attach GPUs, in the order they are tried:
+/// CDI devices (works with rootless Docker) and the legacy `--gpus` flag.
+fn gpu_flag_candidates(selection: &str) -> [String; 2] {
+    let cdi = selection
+        .split(',')
+        .map(|id| format!("--device nvidia.com/gpu={}", id))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let legacy = if selection == "all" {
+        "--gpus all".to_string()
+    } else {
+        format!("--gpus '\"device={}\"'", selection)
+    };
+    [cdi, legacy]
+}
+
+/// Build the `docker run` command that execute_pipeline starts in the background.
+/// `gpu_flags` is empty for a CPU-only run, which yields the exact command used before GPU support.
+#[allow(clippy::too_many_arguments)]
+fn build_run_command(
+    container_name: &str,
+    cores: u32,
+    gpu_flags: &str,
+    pipeline_mount: &str,
+    docker_socket_mount: &str,
+    host_path_mounts: &str,
+    host_env_vars: &str,
+    input_dir: &str,
+    symlink_mounts: &str,
+    output_dir: &str,
+    image_name: &str,
+    log_path: &str,
+) -> String {
+    let gpu_part = if gpu_flags.is_empty() { String::new() } else { format!(" {}", gpu_flags) };
+    format!(
+        "nohup docker run --entrypoint snakemake --name '{}' --cpus {}{} {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+        shell_escape(container_name), cores, gpu_part, pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(input_dir), symlink_mounts, shell_escape(output_dir), shell_escape(image_name), cores, shell_escape(log_path)
+    )
 }
 
 /// Normalize paths in config.yaml and Snakefile: replace absolute host paths
@@ -930,6 +1008,43 @@ impl AutoPipeServer {
         .map_err(|_| format!("SSH command timed out after {}s", timeout_secs))?
         .map_err(|e| format!("Task error: {}", e))?
         .map(|(output, code)| (clean_content(&output), code))
+    }
+
+    /// True when this run's pipeline.log contains the AWAITING_INPUT marker (the log is rewritten on every run).
+    async fn log_awaiting_input(&self, log_path: &str) -> bool {
+        // Decide on printed output, not the exit status (same idiom as check_build_status).
+        matches!(
+            self.ssh_run(&format!(
+                "grep -q '{}' '{}' 2>/dev/null && echo awaiting",
+                AWAITING_INPUT_MARKER, shell_escape(log_path)
+            )).await,
+            Ok((out, _)) if out.contains("awaiting")
+        )
+    }
+
+    /// Find a way to attach `selection` ("all" or "0,1") that works on this server by starting a
+    /// throwaway container with each candidate flag set. Returns the first flag set that works.
+    async fn resolve_gpu_flags(&self, selection: &str) -> Result<String, String> {
+        let mut attempts = Vec::new();
+        for flags in gpu_flag_candidates(selection) {
+            let probe = format!("docker run --rm {} alpine true 2>&1", flags);
+            match self.ssh_run_timed(&probe, 180).await {
+                Ok((_, 0)) => return Ok(flags),
+                Ok((out, code)) => {
+                    let tail: Vec<&str> = out.trim().lines().rev().take(3).collect();
+                    let tail: Vec<&str> = tail.into_iter().rev().collect();
+                    attempts.push(format!("- `{}` failed (exit {}): {}", flags, code, tail.join(" | ")));
+                }
+                Err(e) => attempts.push(format!("- `{}` failed: {}", flags, e)),
+            }
+        }
+        Err(format!(
+            "No way to attach GPUs worked:\n{}\n\
+             The server needs an NVIDIA driver and the NVIDIA Container Toolkit. For CDI (also rootless Docker) the \
+             admin runs `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (again after driver upgrades); \
+             check the GPU indices with nvidia-smi.",
+            attempts.join("\n")
+        ))
     }
 
     async fn ssh_read_file(&self, path: &str) -> Result<String, String> {
@@ -3053,7 +3168,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         }
     }
 
-    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. INPUT SETUP: input files and config values are collected on the AutoPipe Input page, NOT in chat. When the user asks to run/execute a pipeline and its input has NOT been set up yet this session, FIRST call configure_input — it opens a browser page where the user picks input files (from the S3 bucket for an AWS VM, or the SSH server's filesystem) and edits every config value (defaults, one-line descriptions and required markers are shown there). Do NOT summarize or recap config values in chat, do NOT ask the user to type input file paths or config values, and do NOT guess input paths. Wait until the user confirms they clicked Save, then call this tool with the input_dir that configure_input returned. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first.")]
+    #[tool(description = "Execute a pipeline in the background on the remote server via SSH. Outputs are stored at {configured_output_dir}/{run_name}/. Logs are written to {output_dir}/{run_name}/pipeline.log. This tool monitors the first ~90 seconds for early failures before returning. Snakemake automatically skips completed steps, so if a pipeline fails you can fix the code and re-run with the SAME run_name — only the failed and downstream steps will re-execute. Do NOT call cleanup_failed after execution failures; instead fix the Snakefile and re-run. Tell the user they can check progress later with list_running_pipelines, even from a new conversation session. Multi-client note: this AutoPipe instance may be shared by multiple AI clients (Claude Desktop, Cursor, Codex, etc.); avoid running pipelines with the same run_name simultaneously from different clients — only one execution per run_name at a time. INPUT SETUP: input files and config values are collected on the AutoPipe Input page, NOT in chat. When the user asks to run/execute a pipeline and its input has NOT been set up yet this session, FIRST call configure_input — it opens a browser page where the user picks input files (from the S3 bucket for an AWS VM, or the SSH server's filesystem) and edits every config value (defaults, one-line descriptions and required markers are shown there). Do NOT summarize or recap config values in chat, do NOT ask the user to type input file paths or config values, and do NOT guess input paths. Wait until the user confirms they clicked Save, then call this tool with the input_dir that configure_input returned. If this pipeline was just generated and you have not yet presented a review_pipeline summary and gotten confirmation, do that first. GPU: a pipeline whose ro-crate-metadata.json declares `\"gpu\": \"required\"` or `\"optional\"` gets all GPUs automatically; pass `gpus` (\"all\" or nvidia-smi indices such as \"1\") only to pick specific GPUs or when the user asks for a GPU run of an undeclared pipeline, and \"none\" to force CPU. AutoPipe checks that the GPUs can really be attached before starting and refuses to start a GPU-required run otherwise — then tell the user; never re-run without GPUs, and never tell the user to run docker by hand. PAUSED RUNS: if the result says AWAITING_INPUT, the pipeline stopped at a point that needs a decision — it is NOT finished. Read AWAITING_INPUT.json in the output directory, get the decision (ask the user when it is theirs), write the answer file it names, and re-run with the SAME run_name and gpus.")]
     async fn execute_pipeline(
         &self,
         Parameters(params): Parameters<ExecuteParams>,
@@ -3108,19 +3223,72 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         // Resolve the pipeline's identity from its ro-crate so a pipeline viewer
         // can later recognise this run's output by name (image_name is user-chosen
         // and unreliable; the ro-crate `name` is the real identity).
-        let (pipeline_name, based_on): (Option<String>, Option<String>) =
+        // The same read also yields the pipeline's GPU declaration (ro-crate `gpu`).
+        let (pipeline_name, based_on, gpu_requirement): (Option<String>, Option<String>, Option<String>) =
             if let Some(ref dir) = pipeline_dir {
                 let rc = format!("{}/ro-crate-metadata.json", dir.trim_end_matches('/'));
                 match self.ssh_run(&format!("cat '{}'", shell_escape(&rc))).await {
-                    Ok((content, 0)) => match parse_ro_crate_metadata(&clean_content(&content)) {
-                        Ok(md) => (Some(md.name), md.based_on_url),
-                        Err(_) => (None, None),
-                    },
-                    _ => (None, None),
+                    Ok((content, 0)) => {
+                        let content = clean_content(&content);
+                        let gpu = ro_crate_gpu_requirement(&content);
+                        match parse_ro_crate_metadata(&content) {
+                            Ok(md) => (Some(md.name), md.based_on_url, gpu),
+                            Err(_) => (None, None, gpu),
+                        }
+                    }
+                    _ => (None, None, None),
                 }
             } else {
-                (None, None)
+                (None, None, None)
             };
+
+        // GPU attachment. An explicit `gpus` wins; otherwise a pipeline that declares
+        // `gpu: required|optional` gets all GPUs. Each way of attaching is tried with a
+        // throwaway container first, so a server that cannot expose GPUs is detected
+        // before the pipeline starts instead of the code silently running on CPU.
+        let gpus_param = params.gpus.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let gpu_required = gpu_requirement.as_deref() == Some("required");
+        let gpu_selection: Option<String> = match gpus_param {
+            Some(s) if s.eq_ignore_ascii_case("none") => {
+                if gpu_required {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "This pipeline declares gpu: \"required\" in its ro-crate-metadata.json, so it cannot run with gpus=\"none\". \
+                         Omit gpus (or pass \"all\" / GPU indices) to run it on a GPU."
+                    )]));
+                }
+                None
+            }
+            Some(s) => match normalize_gpu_selection(s) {
+                Ok(sel) => Some(sel),
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(e)])),
+            },
+            None => gpu_requirement.as_ref().map(|_| "all".to_string()),
+        };
+        let mut gpu_flags = String::new();
+        let mut gpu_summary = "GPU: none (CPU-only run)".to_string();
+        if let Some(ref sel) = gpu_selection {
+            match self.resolve_gpu_flags(sel).await {
+                Ok(flags) => {
+                    gpu_summary = format!("GPU: {} attached via `{}`", sel, flags);
+                    gpu_flags = flags;
+                }
+                // Only an optional declaration (with no explicit request) may fall back to CPU.
+                Err(e) if gpus_param.is_none() && !gpu_required => {
+                    gpu_summary = format!(
+                        "GPU: requested by the pipeline (gpu: \"optional\") but not available on this server — running on CPU.\n{}",
+                        e
+                    );
+                }
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Pipeline NOT started: GPU(s) '{}' could not be attached on this server.\n{}\n\n\
+                         Tell the user this server cannot run the pipeline on a GPU. Do NOT re-run it without GPUs \
+                         unless the user explicitly asks for a CPU run.",
+                        sel, e
+                    ))]));
+                }
+            }
+        }
 
         // Write run metadata for list_running_pipelines (use base64 to avoid heredoc injection)
         let run_meta = serde_json::json!({
@@ -3130,6 +3298,8 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             "based_on": based_on,
             "container_name": container_name,
             "input_dir": input_dir,
+            "gpus": gpu_selection,
+            "gpu_flags": (!gpu_flags.is_empty()).then(|| gpu_flags.clone()),
             "started_at": chrono::Utc::now().to_rfc3339()
         }).to_string();
         let meta_path = format!("{}/.autopipe-run.json", output_dir.trim_end_matches('/'));
@@ -3137,9 +3307,9 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             tracing::warn!(path = %meta_path, "failed to write run metadata: {}", e);
         }
 
-        let cmd = format!(
-            "nohup docker run --entrypoint snakemake --name '{}' --cpus {} {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
-            shell_escape(&container_name), cores, pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(&input_dir), symlink_mounts, shell_escape(&output_dir), shell_escape(&params.image_name), cores, shell_escape(&log_path)
+        let cmd = build_run_command(
+            &container_name, cores, &gpu_flags, &pipeline_mount, &docker_socket_mount, &host_path_mounts,
+            &host_env_vars, &input_dir, &symlink_mounts, &output_dir, &params.image_name, &log_path,
         );
 
         match self.ssh_run(&cmd).await {
@@ -3171,12 +3341,18 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                         let completed_ok = log_tail.contains("steps (100%) done")
                             || log_tail.contains("Nothing to be done");
 
-                        if completed_ok {
+                        if completed_ok && log_tail.contains(AWAITING_INPUT_MARKER) {
+                            return Ok(CallToolResult::success(vec![Content::text(format!(
+                                "{}\nOutput directory: {}\n{}\nLog: {}\n\n{}",
+                                awaiting_input_notice(&output_dir), output_dir, gpu_summary, log_path, log_tail
+                            ))]));
+                        } else if completed_ok {
                             return Ok(CallToolResult::success(vec![Content::text(format!(
                                 "Pipeline completed successfully!\n\
                                  Output directory: {}\n\
+                                 {}\n\
                                  Log: {}\n\n{}",
-                                output_dir, log_path, log_tail
+                                output_dir, gpu_summary, log_path, log_tail
                             ))]));
                         } else if has_error {
                             return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3184,8 +3360,9 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                                  Fix the Snakefile and re-run execute_pipeline with the SAME run_name. Snakemake will skip completed steps automatically.\n\
                                  Container: {}\n\
                                  Output directory: {}\n\
+                                 {}\n\
                                  Log: {}\n\n{}",
-                                container_name, output_dir, log_path, log_tail
+                                container_name, output_dir, gpu_summary, log_path, log_tail
                             ))]));
                         }
                     }
@@ -3195,9 +3372,10 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Pipeline is running (no errors in first 90s). PID: {}, container: '{}'.\n\
                      Output directory: {}\n\
+                     {}\n\
                      Log file: {}\n\
                      The user can check progress anytime (even in a new session) with list_running_pipelines.",
-                    pid, container_name, output_dir, log_path
+                    pid, container_name, output_dir, gpu_summary, log_path
                 ))]))
             }
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -3214,7 +3392,8 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
 
         // Find all run metadata files (use glob instead of find -exec to avoid {} escaping issues over SSH)
         let find_cmd = format!(
-            "for f in '{}'/*/.autopipe-run.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null",
+            // `echo` ends each file with a newline: the files have none, and the parser below reads one JSON per line.
+            "for f in '{}'/*/.autopipe-run.json; do [ -f \"$f\" ] && cat \"$f\" && echo; done 2>/dev/null",
             shell_escape(&output_base)
         );
         let meta_output = match self.ssh_run(&find_cmd).await {
@@ -3268,6 +3447,10 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
 
             let status = if is_running {
                 format!("RUNNING ({})", docker_status.split_whitespace().skip(1).collect::<Vec<_>>().join(" "))
+            } else if (last_line.contains("100%) done") || last_line.contains("Nothing to be done"))
+                && self.log_awaiting_input(&log_path).await
+            {
+                "AWAITING_INPUT (paused, not finished — call check_status for what it needs)".to_string()
             } else if last_line.contains("100%) done") || last_line.contains("Nothing to be done") {
                 "COMPLETED".to_string()
             } else if last_line.contains("Error") || last_line.contains("failed") || last_line.contains("FAILED") {
@@ -3289,7 +3472,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         ))]))
     }
 
-    #[tool(description = "Check pipeline execution status. Inspects the Docker container for exit code, OOM kill, and other abnormal terminations. If the container has stopped, saves termination info to .autopipe-run.json and removes the container. Falls back to saved JSON when the container is already gone.")]
+    #[tool(description = "Check pipeline execution status. Inspects the Docker container for exit code, OOM kill, and other abnormal terminations. If the container has stopped, saves termination info to .autopipe-run.json and removes the container. Falls back to saved JSON when the container is already gone. A run that exited 0 after printing AWAITING_INPUT is reported as PAUSED, not completed — follow the instructions in that status.")]
     async fn check_status(
         &self,
         Parameters(params): Parameters<StatusParams>,
@@ -3339,6 +3522,8 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                         format!("SEGFAULT (signal 11) — exit code: {}", exit_code)
                     } else if exit_code == "143" {
                         format!("TERMINATED (signal 15) — exit code: {}", exit_code)
+                    } else if exit_code == "0" && self.log_awaiting_input(&log_path).await {
+                        awaiting_input_notice(&output_dir)
                     } else if exit_code == "0" {
                         "COMPLETED (exit code: 0)".to_string()
                     } else {
@@ -5112,6 +5297,7 @@ impl ServerHandler for AutoPipeServer {
                  All pipelines MUST follow the AutoPipe format: Snakefile + Dockerfile + config.yaml + ro-crate-metadata.json.\n\
                  NEVER use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is nextflow run with -profile docker.\n\
                  If the user has an existing Dockerfile from their analysis environment, use it as the base.\n\
+                 If the user asks for GPU/CUDA or names a GPU tool, follow the guide's \"GPU Pipelines\" section. For steps that need a user decision or AI judgment mid-pipeline, follow its \"Pausing for Input\" section.\n\
                  CRITICAL: NEVER call upload_pipeline or publish_pipeline unless the user EXPLICITLY says 'upload', 'publish', or 'register'. Pipeline creation, building, and execution do NOT require uploading or publishing. These are completely separate actions that require explicit user request.\n\n\
                  UPLOAD & PUBLISH RULES:\n\
                  When the user asks to upload OR publish, ALWAYS do these steps in order:\n\
@@ -5314,4 +5500,64 @@ pub async fn run_mcp_http_server(
 
     tracing::info!("MCP HTTP server stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+
+    /// The command execute_pipeline built before GPU support, kept verbatim as the reference.
+    #[allow(clippy::too_many_arguments)]
+    fn legacy_run_command(
+        container_name: &str, cores: u32, pipeline_mount: &str, docker_socket_mount: &str,
+        host_path_mounts: &str, host_env_vars: &str, input_dir: &str, symlink_mounts: &str,
+        output_dir: &str, image_name: &str, log_path: &str,
+    ) -> String {
+        format!(
+            "nohup docker run --entrypoint snakemake --name '{}' --cpus {} {}{}{}{} -v '{}:/input:ro'{} -v '{}:/output' -w /output '{}' --cores {} --rerun-incomplete --snakefile /pipeline/Snakefile --configfile /pipeline/config.yaml > '{}' 2>&1 &\necho $!",
+            shell_escape(container_name), cores, pipeline_mount, docker_socket_mount, host_path_mounts, host_env_vars, shell_escape(input_dir), symlink_mounts, shell_escape(output_dir), shell_escape(image_name), cores, shell_escape(log_path)
+        )
+    }
+
+    #[test]
+    fn cpu_run_command_is_unchanged() {
+        let cases = [
+            ("r-run", 8, "-v '/p/x:/pipeline'", "", "", "", "/in", "", "/out/r", "autopipe-x:latest", "/out/r/pipeline.log"),
+            ("it's-run", 2, "", " -v '/var/run/docker.sock:/var/run/docker.sock'", " -v '/in:/in:ro'", " -e HOST_INPUT_DIR='/in'", "/in dir", " -v '/t:/t:ro'", "/o", "img", "/o/pipeline.log"),
+        ];
+        for (n, c, pm, ds, hm, he, i, sm, o, img, l) in cases {
+            assert_eq!(
+                build_run_command(n, c, "", pm, ds, hm, he, i, sm, o, img, l),
+                legacy_run_command(n, c, pm, ds, hm, he, i, sm, o, img, l)
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_flags_follow_cpus() {
+        let cmd = build_run_command("r-run", 8, "--device nvidia.com/gpu=all", "-v '/p:/pipeline'", "", "", "", "/in", "", "/out", "img", "/out/pipeline.log");
+        assert!(cmd.contains("--cpus 8 --device nvidia.com/gpu=all -v '/p:/pipeline' -v '/in:/input:ro'"), "{}", cmd);
+    }
+
+    #[test]
+    fn gpu_selection_is_normalized_or_rejected() {
+        assert_eq!(normalize_gpu_selection(" ALL ").unwrap(), "all");
+        assert_eq!(normalize_gpu_selection("1").unwrap(), "1");
+        assert_eq!(normalize_gpu_selection("0, 1").unwrap(), "0,1");
+        for bad in ["", "gpu0", "0,", ",1", "0;rm -rf /", "all,0", "-1", "'"] {
+            assert!(normalize_gpu_selection(bad).is_err(), "accepted {:?}", bad);
+        }
+    }
+
+    #[test]
+    fn gpu_flag_candidates_try_cdi_then_legacy() {
+        assert_eq!(gpu_flag_candidates("all"), ["--device nvidia.com/gpu=all".to_string(), "--gpus all".to_string()]);
+        assert_eq!(
+            gpu_flag_candidates("0,1"),
+            [
+                "--device nvidia.com/gpu=0 --device nvidia.com/gpu=1".to_string(),
+                "--gpus '\"device=0,1\"'".to_string()
+            ]
+        );
+    }
 }

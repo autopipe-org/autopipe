@@ -198,6 +198,8 @@ anything that changes correctness:
 - Tool choice: when several tools fit the same step (e.g. bwa vs bowtie2)
 - Key parameters: values that materially change results (cutoffs, k-mer size, etc.)
 - Final outputs and scope: how far the workflow goes (QC only? alignment? variant calling?)
+- Compute: when the user asks for GPU/CUDA or a step has a GPU implementation, whether a GPU is
+  REQUIRED or a CPU fallback is acceptable (see "GPU Pipelines")
 For trivial or conventional details, pick a sensible default and STATE that
 assumption in the review summary instead of asking.
 
@@ -245,6 +247,7 @@ generated, and never rely on a remembered earlier approval.
 - Do NOT use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is `nextflow run` with `-profile docker`, which manages its own containers through the mounted Docker socket.
 - If converting from Nextflow or other container-based workflows, install all required tools from every container into the single Dockerfile.
 - If the user already has a working Dockerfile from their analysis environment, use it as the base instead of writing one from scratch.
+- GPU pipelines keep this base image: install CUDA-enabled wheels (see "GPU Pipelines"). Never install an NVIDIA driver in the image.
 
 ## config.yaml Rules
 - WRITE EVERYTHING IN ENGLISH — config.yaml comments, README.md and
@@ -373,12 +376,14 @@ Examples:
 - `input` / `output`: FormalParameter objects with `name` and `encodingFormat`
 - `keywords`: array of search tags
 - `programmingLanguage`: always reference Snakemake
+- `gpu` (GPU pipelines only): `"required"` or `"optional"` on the Dataset node — see "GPU Pipelines"
 
 ## README.md Content
 - What the pipeline does (1-2 sentences)
 - Required inputs with format description
 - Expected outputs
-- How to run (docker build + docker run commands)
+- How to run (docker build + docker run commands). For a GPU pipeline say instead that it is run
+  through AutoPipe, which attaches the GPUs — do not give a hand-written `docker run --gpus` command
 - Configuration options from config.yaml
 
 ## Path Convention
@@ -413,6 +418,86 @@ When the pipeline uses nextflow, nf-core, or any command that runs Docker inside
   ```
   For non-nextflow rules in the same Snakefile, keep using /input, /output, /pipeline as usual.
 - Keep everything in a single Snakefile + single Dockerfile as usual.
+
+## GPU Pipelines
+Use this section when the user asks for GPU / CUDA acceleration, or the analysis uses a GPU
+implementation (rapids-singlecell, cuML/cuGraph, CuPy, PyTorch/TensorFlow/JAX on CUDA, Parabricks, ...).
+How it works: the code is ordinary CUDA code. At run time execute_pipeline attaches the server's GPUs
+to the container (the host's NVIDIA driver is injected then), so the same image runs on any GPU server.
+- Ask with the clarifying questions: is a GPU REQUIRED, or may the pipeline fall back to CPU when the
+  server has none? If the user explicitly asked for GPU, default to REQUIRED. Note that GPU and CPU
+  implementations usually give slightly different results (e.g. Leiden clusters), so a fallback run is
+  not a reproduction of a GPU run.
+- Declare it in ro-crate-metadata.json on the Dataset (`@id: "./"`) node: `"gpu": "required"` or
+  `"gpu": "optional"`. execute_pipeline reads this and attaches all GPUs automatically; "required"
+  refuses to start on a server that cannot attach a GPU. Say the same in README.md.
+- config.yaml: `device: "cuda"  # Compute device: cuda (GPU) or cpu (not a file)` for a required GPU, or
+  `device: "auto"  # Compute device: auto (GPU when available, else CPU), cuda or cpu (not a file)`
+  for optional. Pass the resolved device to every GPU-capable step.
+- First rule `check_gpu` (every other rule depends on its output): write `nvidia-smi` output (or
+  "no GPU") to `gpu_info.txt`, resolve `auto`, and FAIL with a clear message when the device is `cuda`
+  but no GPU is visible. Never fall back to CPU silently: with `auto`, write the device actually used
+  into the outputs. Detecting a GPU: `nvidia-smi -L` succeeds only when a GPU was attached (the tool is
+  injected with the driver), or ask the framework (`torch.cuda.is_available()`,
+  `cupy.cuda.runtime.getDeviceCount()`).
+- Code always uses the first visible device (`cuda` / `cuda:0`): the attached GPUs are renumbered from
+  0 inside the container. Never hardcode server GPU indices; the user picks them with execute_pipeline's
+  `gpus` ("1", "0,1").
+- Dockerfile: keep the miniforge base and install CUDA-enabled builds with uv, pinned to one CUDA major
+  version (e.g. `rapids-singlecell[rapids12]` / `cupy-cuda12x` / `cuml-cu12` with
+  `--extra-index-url https://pypi.nvidia.com`; PyTorch from `https://download.pytorch.org/whl/cu128`).
+  The CUDA runtime libraries come with these wheels; the server's driver must support that CUDA version.
+  Also install the CPU implementation when the pipeline is "optional".
+- Run it ONLY through execute_pipeline. Never put `docker run --gpus` in the Snakefile or tell the user to
+  run docker by hand — AutoPipe picks the attach method that works on the server (CDI devices for
+  rootless Docker, `--gpus` otherwise).
+
+## Pausing for Input (user decisions and AI judgment mid-pipeline)
+Some workflows need a decision in the middle: the user must confirm something (e.g. which reference or
+module to use), or an AI assistant must judge intermediate results (e.g. an agentic annotation step)
+before later steps can run. Snakemake cannot wait for a person, so the pipeline STOPS at that point and
+is re-run after the answer is written. Keep everything in ONE Snakefile:
+- The decision is a FILE in the run's output directory (e.g. `decisions/round1.json`), never a
+  config.yaml edit: config.yaml is shared by every run of the pipeline, and a changed parameter makes
+  Snakemake re-run the upstream steps. Snakemake runs with `/output` (the run's output directory) as
+  its working directory, so relative paths like `decisions/round1.json` land there.
+- Choose `rule all` targets from what exists: when the answer file is missing, target the outputs up to
+  the decision point plus the pause rule's output; when it exists, target the final outputs. Do NOT list a
+  missing answer file as a rule input — Snakemake then refuses to run anything.
+  ```python
+  import os
+  ANSWER = "decisions/round1.json"
+  if os.path.exists(ANSWER):
+      FINAL = ["results/final.tsv"]
+  else:
+      FINAL = ["results/profiles.json", "awaiting/round1.done"]
+  rule all:
+      input: FINAL
+
+  rule await_round1:
+      input: "results/profiles.json"
+      output: touch("awaiting/round1.done")
+      run:
+          import json
+          json.dump({"decided_by": "user", "question": "...", "answer_file": ANSWER,
+                     "format": "..."}, open("AWAITING_INPUT.json", "w"), indent=1)
+          print("AWAITING_INPUT: write " + ANSWER + " (see AWAITING_INPUT.json), then re-run", flush=True)
+  ```
+- Each pause is its own rule with a per-round output (`awaiting/round{k}.done`) that (re)writes
+  `AWAITING_INPUT.json` as a side effect, so a file left over from an earlier round can never stop a
+  later pause from firing. `AWAITING_INPUT.json` describes, in plain English, what is needed: the
+  question (or the judgment task and the files to read for it), who decides (user or AI), the exact
+  path of the answer file and its format.
+- The pause rule PRINTS a line starting with `AWAITING_INPUT:` to its standard output — do not give it
+  a `log:` directive or redirect that line to a file: AutoPipe reads `pipeline.log` (Snakemake's own
+  output) to show the run as paused rather than completed.
+- Steps after the decision take the answer file as an input, so re-running with the SAME run_name skips
+  everything already done and continues from the decision point. The step that consumes the answer
+  deletes `AWAITING_INPUT.json`, so a finished run does not look paused to someone reading the folder.
+- Repeated rounds (decide → recompute → decide again) use one answer file per round
+  (`decisions/round{k}.json`), so every round is a new target.
+- Validate the answer file before using it and fail with a clear message if it is malformed, so a wrong
+  answer is caught at the decision point, not three steps later.
 
 ## Upload Rules
 - When uploading a pipeline, ONLY include files that are part of the pipeline: Snakefile, Dockerfile, config.yaml, ro-crate-metadata.json, README.md, and any scripts/ or other files YOU created for this pipeline.

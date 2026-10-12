@@ -95,6 +95,17 @@ pub struct PipelineMetadata {
     pub based_on_url: Option<String>,
 }
 
+/// Read the pipeline's GPU declaration from ro-crate-metadata.json: the Dataset (`@id: "./"`)
+/// node's `gpu` property, "required" or "optional". Anything else (missing, unknown value,
+/// unparseable file) means the pipeline does not ask for a GPU.
+pub fn ro_crate_gpu_requirement(json_str: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let dataset = v.get("@graph")?.as_array()?.iter()
+        .find(|node| node.get("@id").and_then(|id| id.as_str()) == Some("./"))?;
+    let gpu = dataset.get("gpu")?.as_str()?.trim().to_lowercase();
+    matches!(gpu.as_str(), "required" | "optional").then_some(gpu)
+}
+
 /// Parse pipeline metadata from RO-Crate format (ro-crate-metadata.json).
 /// Extracts fields from the @graph Dataset node and converts to PipelineMetadata.
 pub fn parse_ro_crate_metadata(json_str: &str) -> Result<PipelineMetadata, String> {
@@ -301,6 +312,17 @@ pub struct SearchQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ro_crate_gpu_requirement_reads_dataset_node() {
+        let rc = |gpu: &str| format!(r#"{{"@context":"x","@graph":[{{"@id":"ro-crate-metadata.json"}},{{"@id":"./","name":"p"{}}}]}}"#, gpu);
+        assert_eq!(ro_crate_gpu_requirement(&rc(r#","gpu":"required""#)).as_deref(), Some("required"));
+        assert_eq!(ro_crate_gpu_requirement(&rc(r#","gpu":" Optional ""#)).as_deref(), Some("optional"));
+        assert_eq!(ro_crate_gpu_requirement(&rc("")), None);
+        assert_eq!(ro_crate_gpu_requirement(&rc(r#","gpu":"yes""#)), None);
+        assert_eq!(ro_crate_gpu_requirement(&rc(r#","gpu":true"#)), None);
+        assert_eq!(ro_crate_gpu_requirement("not json"), None);
+    }
 
     #[test]
     fn clean_content_strips_success_true_no_space() {
