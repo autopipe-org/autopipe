@@ -106,6 +106,39 @@ pub fn ro_crate_gpu_requirement(json_str: &str) -> Option<String> {
     matches!(gpu.as_str(), "required" | "optional").then_some(gpu)
 }
 
+/// AI CLIs whose server login a pipeline uses (ro-crate Dataset `llmCli`: "claude", "codex", or a list of them).
+/// Unknown names are dropped; the order is kept and duplicates removed.
+pub fn ro_crate_llm_clis(json_str: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) else { return Vec::new() };
+    let Some(dataset) = v.get("@graph").and_then(|g| g.as_array()).and_then(|g| {
+        g.iter().find(|node| node.get("@id").and_then(|id| id.as_str()) == Some("./"))
+    }) else { return Vec::new() };
+    let names: Vec<&str> = match dataset.get("llmCli") {
+        Some(serde_json::Value::String(s)) => vec![s.as_str()],
+        Some(serde_json::Value::Array(a)) => a.iter().filter_map(|x| x.as_str()).collect(),
+        _ => Vec::new(),
+    };
+    let mut out: Vec<String> = Vec::new();
+    for n in names {
+        let n = n.trim().to_lowercase();
+        if matches!(n.as_str(), "claude" | "codex") && !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// How a pipeline's input and config values are set (ro-crate Dataset `inputSetup`): `"chat"` when the
+/// pipeline says they are decided in conversation (guided by its SETUP.md), otherwise `"form"` (the Input page).
+pub fn ro_crate_input_setup(json_str: &str) -> &'static str {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) else { return "form" };
+    let chat = v.get("@graph").and_then(|g| g.as_array()).and_then(|g| {
+        g.iter().find(|node| node.get("@id").and_then(|id| id.as_str()) == Some("./"))
+    }).and_then(|d| d.get("inputSetup")).and_then(|s| s.as_str())
+        .is_some_and(|s| s.trim().eq_ignore_ascii_case("chat"));
+    if chat { "chat" } else { "form" }
+}
+
 /// Parse pipeline metadata from RO-Crate format (ro-crate-metadata.json).
 /// Extracts fields from the @graph Dataset node and converts to PipelineMetadata.
 pub fn parse_ro_crate_metadata(json_str: &str) -> Result<PipelineMetadata, String> {
@@ -322,6 +355,28 @@ mod tests {
         assert_eq!(ro_crate_gpu_requirement(&rc(r#","gpu":"yes""#)), None);
         assert_eq!(ro_crate_gpu_requirement(&rc(r#","gpu":true"#)), None);
         assert_eq!(ro_crate_gpu_requirement("not json"), None);
+    }
+
+    #[test]
+    fn ro_crate_llm_clis_reads_dataset_node() {
+        let rc = |v: &str| format!(r#"{{"@context":"x","@graph":[{{"@id":"ro-crate-metadata.json"}},{{"@id":"./","name":"p"{}}}]}}"#, v);
+        assert_eq!(ro_crate_llm_clis(&rc(r#","llmCli":"claude""#)), vec!["claude"]);
+        assert_eq!(ro_crate_llm_clis(&rc(r#","llmCli":[" Codex ","claude","codex","gpt"]"#)), vec!["codex", "claude"]);
+        assert!(ro_crate_llm_clis(&rc("")).is_empty());
+        assert!(ro_crate_llm_clis(&rc(r#","llmCli":true"#)).is_empty());
+        assert!(ro_crate_llm_clis("not json").is_empty());
+    }
+
+    #[test]
+    fn ro_crate_input_setup_defaults_to_form() {
+        let rc = |v: &str| format!(r#"{{"@context":"x","@graph":[{{"@id":"ro-crate-metadata.json","inputSetup":"chat"}},{{"@id":"./","name":"p"{}}}]}}"#, v);
+        assert_eq!(ro_crate_input_setup(&rc(r#","inputSetup":"chat""#)), "chat");
+        assert_eq!(ro_crate_input_setup(&rc(r#","inputSetup":" Chat ""#)), "chat");
+        assert_eq!(ro_crate_input_setup(&rc(r#","inputSetup":"form""#)), "form");
+        assert_eq!(ro_crate_input_setup(&rc(r#","inputSetup":"wizard""#)), "form");
+        assert_eq!(ro_crate_input_setup(&rc(r#","inputSetup":true"#)), "form");
+        assert_eq!(ro_crate_input_setup(&rc("")), "form"); // only the Dataset node counts
+        assert_eq!(ro_crate_input_setup("not json"), "form");
     }
 
     #[test]
