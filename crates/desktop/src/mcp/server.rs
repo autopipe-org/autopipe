@@ -124,6 +124,8 @@ struct ExecuteParams {
     /// nvidia-smi on the server (e.g. "0" or "0,1"); "none" forces a CPU-only run. Omit it to follow the
     /// pipeline's ro-crate `gpu` declaration ("required"/"optional" → "all"; no declaration → no GPU).
     /// Inside the container the attached GPUs are renumbered from 0, so pipeline code just uses "cuda".
+    /// To choose, use the GPU list from get_workspace_info: offer each GPU by index and model with its memory and
+    /// current use, recommend the least used, and pass the chosen index.
     #[serde(default)]
     gpus: Option<String>,
 }
@@ -541,6 +543,56 @@ fn gpu_usage_lines(csv: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// The background `docker build` that build_image starts (prints the PID). With the containerd image store the
+/// image is exported with zstd; if that export itself is refused (a BuildKit error line about the exporter,
+/// compression or --output, not a failed RUN step), it builds once more the plain way, reusing the cached layers.
+fn build_image_cmd(pipeline_dir: &str, owner_dir: &str, image: &str, log_path: &str, containerd_store: bool) -> String {
+    let label = format!("--label '{}={}'", IMAGE_OWNER_LABEL, shell_escape(owner_dir));
+    let plain = format!("docker build {} -t '{}' .", label, shell_escape(image));
+    let log = shell_escape(log_path);
+    if !containerd_store {
+        return format!("cd '{}' && nohup {} > '{}' 2>&1 &\necho $!", shell_escape(pipeline_dir), plain, log);
+    }
+    let zstd = format!(
+        "docker build {} --provenance=false --sbom=false --output 'type=image,name={},compression=zstd,compression-level=1,force-compression=true' .",
+        label, shell_escape(image)
+    );
+    let script = format!(
+        "{zstd} > '{log}' 2>&1 || {{ grep -E '^(#[0-9]+ )?ERROR:|^error:|unknown flag' '{log}' | grep -v 'process \"' \
+         | grep -qiE 'export|compression|output' \
+         && echo '[autopipe] the zstd image export failed; building again without zstd' >> '{log}' \
+         && {plain} >> '{log}' 2>&1; }}"
+    );
+    format!("cd '{}' && nohup bash -c '{}' > /dev/null 2>&1 &\necho $!", shell_escape(pipeline_dir), shell_escape(&script))
+}
+
+/// One `nvidia-smi` call on the server: the GPU query CSV, then a `driver,cuda` line (cuda from the table header:
+/// `CUDA Version: 12.8`, or `CUDA UMD Version: 13.4` in newer drivers).
+const GPU_INVENTORY_CMD: &str = "nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
+     --format=csv,noheader,nounits 2>/dev/null && printf 'driver,%s\\n' \"$(nvidia-smi --query-gpu=driver_version \
+     --format=csv,noheader 2>/dev/null | head -1),$(nvidia-smi 2>/dev/null | grep -oE 'CUDA (UMD )?Version: [0-9.]+' | head -1 | grep -oE '[0-9.]+$')\"";
+
+/// The server's GPUs for the AI, from GPU_INVENTORY_CMD's output: a header with the driver and the highest CUDA
+/// version it supports, then one line per GPU with its memory and current use.
+fn gpu_inventory_text(out: &str) -> Option<String> {
+    let (driver_line, gpu_csv): (Vec<&str>, Vec<&str>) = out.lines().partition(|l| l.starts_with("driver,"));
+    let lines = gpu_usage_lines(&gpu_csv.join("\n"));
+    if lines.is_empty() {
+        return None;
+    }
+    let mut parts = driver_line.first().map(|l| l.trim_start_matches("driver,").split(',').map(str::trim)).into_iter().flatten();
+    let num = |v: &str| if v.starts_with(|c: char| c.is_ascii_digit()) { v.to_string() } else { String::new() };
+    let (driver, cuda) = (num(parts.next().unwrap_or("")), num(parts.next().unwrap_or("")));
+    let header = match (driver.is_empty(), cuda.is_empty()) {
+        (false, false) => format!("NVIDIA driver {}, CUDA up to {}\n", driver, cuda),
+        (false, true) => format!("NVIDIA driver {}\n", driver),
+        _ => String::new(),
+    };
+    Some(format!("{}{}", header, lines))
+}
+
+const NO_GPU_TEXT: &str = "none found (nvidia-smi is not available or lists no GPU)";
 
 /// What `docker inspect` (run with `2>&1`) said about a container: found (with the formatted output), certainly
 /// absent, or unknown — the query itself failed (daemon overloaded, timeout, SSH), which says nothing about the run.
@@ -2069,6 +2121,14 @@ impl AutoPipeServer {
         Ok((flags, summary))
     }
 
+    /// The server's GPUs (see gpu_inventory_text), or NO_GPU_TEXT.
+    async fn gpu_inventory(&self) -> String {
+        match self.ssh_run(GPU_INVENTORY_CMD).await {
+            Ok((s, 0)) => gpu_inventory_text(&clean_content(&s)).unwrap_or_else(|| NO_GPU_TEXT.to_string()),
+            _ => NO_GPU_TEXT.to_string(),
+        }
+    }
+
     async fn resolve_gpu_flags(&self, selection: &str) -> Result<String, String> {
         let mut attempts = Vec::new();
         for flags in gpu_flag_candidates(selection) {
@@ -2436,6 +2496,12 @@ impl AutoPipeServer {
             .await
             .unwrap_or_else(|| "(not connected)".to_string());
 
+        let cores = match self.ssh_run("nproc 2>/dev/null").await {
+            Ok((s, 0)) if !clean_content(&s).trim().is_empty() => clean_content(&s).trim().to_string(),
+            _ => "unknown".to_string(),
+        };
+        let gpus = self.gpu_inventory().await;
+
         let info = format!(
             "Workspace Configuration:\n\
              - Base path (repo_path): {}\n\
@@ -2444,7 +2510,12 @@ impl AutoPipeServer {
              - Output directory: {}\n\
              - SSH: {}@{}:{}\n\
              - GitHub: {}\n\
-             - Upload mode: {}\n\n\
+             - Upload mode: {}\n\
+             - Server CPU cores: {}\n\
+             - Server GPUs: {}\n\n\
+             GPUs: name a GPU by its index and model as listed above (never invent labels). When a run needs a GPU, offer each \
+             GPU with its memory and current use, the least used first as the recommendation, and pass the chosen index as \
+             execute_pipeline's gpus. When writing a GPU pipeline, install CUDA builds no newer than the CUDA version above.\n\
              When creating pipelines, save files under the Pipelines directory.\n\
              When preparing input data, use prepare_input to download from a URL or symlink a server path into the Input directory. Pass the returned path as input_dir to dry_run or execute_pipeline.\n\
              When executing pipelines, outputs are automatically stored under the Output directory.\n\
@@ -2464,6 +2535,8 @@ impl AutoPipeServer {
             config.ssh_port,
             github_login,
             upload_mode,
+            cores,
+            gpus.replace('\n', "\n  "),
         );
         Ok(CallToolResult::success(vec![Content::text(info)]))
     }
@@ -4264,18 +4337,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
             self.ssh_run("docker info --format '{{json .DriverStatus}}' 2>/dev/null").await,
             Ok((ref o, 0)) if o.contains("io.containerd.snapshotter")
         );
-        let output_flags = if containerd_store {
-            format!(
-                "--provenance=false --sbom=false --output 'type=image,name={},compression=zstd,compression-level=1,force-compression=true'",
-                shell_escape(&params.image_name)
-            )
-        } else {
-            format!("-t '{}'", shell_escape(&params.image_name))
-        };
-        let cmd = format!(
-            "cd '{}' && nohup docker build --label '{}={}' {} . > '{}' 2>&1 &\necho $!",
-            shell_escape(&pipeline_dir), IMAGE_OWNER_LABEL, shell_escape(&owner_dir), output_flags, shell_escape(&log_path)
-        );
+        let cmd = build_image_cmd(&pipeline_dir, &owner_dir, &params.image_name, &log_path, containerd_store);
 
         match self.ssh_run(&cmd).await {
             Ok((output, 0)) => {
@@ -4571,13 +4633,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                     Ok((s, 0)) if !s.trim().is_empty() => Some(s),
                     _ => None,
                 };
-                let gpus = match self.ssh_run(
-                    "nvidia-smi --query-gpu=index,name,memory.total,memory.used,utilization.gpu \
-                     --format=csv,noheader,nounits 2>/dev/null",
-                ).await {
-                    Ok((s, 0)) if !s.trim().is_empty() => gpu_usage_lines(&s),
-                    _ => "none found (nvidia-smi is not available or lists no GPU)".to_string(),
-                };
+                let gpus = self.gpu_inventory().await;
                 let cores = match self.ssh_run("nproc 2>/dev/null").await {
                     Ok((s, 0)) if !s.trim().is_empty() => s.trim().to_string(),
                     _ => "unknown".to_string(),
@@ -7284,6 +7340,70 @@ mod gpu_tests {
         for bad in ["", "gpu0", "0,", ",1", "0;rm -rf /", "all,0", "-1", "'"] {
             assert!(normalize_gpu_selection(bad).is_err(), "accepted {:?}", bad);
         }
+    }
+
+    /// Runs build_image_cmd against a stand-in `docker` that refuses `--output` with `export_error` (or fails a
+    /// RUN step) and builds `-t`; returns the log and the docker calls made.
+    #[cfg(unix)]
+    fn run_build_cmd(first_failure: &str) -> (String, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ap-build-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("docker");
+        std::fs::write(&fake, format!(
+            "#!/bin/sh\necho \"$*\" >> '{}/calls'\ncase \"$*\" in *--output*) printf '%s\\n' \"{}\"; exit 1;; esac\necho 'naming to done'\n",
+            dir.display(), first_failure
+        )).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = dir.join("build.log");
+        let cmd = build_image_cmd(dir.to_str().unwrap(), "/ws/p", "img:1", log.to_str().unwrap(), true);
+        let st = std::process::Command::new("bash").arg("-c")
+            .arg(format!("export PATH='{}':$PATH; {}; wait", dir.display(), cmd.replace("&\necho $!", "& wait")))
+            .status().unwrap();
+        assert!(st.success());
+        let out = (std::fs::read_to_string(&log).unwrap_or_default(), std::fs::read_to_string(dir.join("calls")).unwrap_or_default());
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zstd_export_refusal_falls_back_to_a_plain_build() {
+        let (log, calls) = run_build_cmd("#12 ERROR: failed to export image: compression zstd is not supported");
+        assert!(log.contains("building again without zstd"), "{}", log);
+        assert!(log.contains("naming to done"), "{}", log);
+        assert_eq!(calls.lines().count(), 2, "{}", calls);
+        assert!(calls.lines().nth(1).unwrap().contains("-t img:1"), "{}", calls);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_run_step_is_not_rebuilt() {
+        let (log, calls) = run_build_cmd("ERROR: failed to solve: process \\\"/bin/sh -c pip install --output x\\\" did not complete successfully");
+        assert!(!log.contains("building again"), "{}", log);
+        assert_eq!(calls.lines().count(), 1, "{}", calls);
+    }
+
+    #[test]
+    fn plain_build_without_the_containerd_store() {
+        let c = build_image_cmd("/p", "/ws/p", "img:1", "/o/build.log", false);
+        assert!(c.contains("nohup docker build --label") && c.contains("-t 'img:1' . > '/o/build.log'"), "{}", c);
+        assert!(!c.contains("zstd"), "{}", c);
+    }
+
+    #[test]
+    fn gpu_inventory_lists_driver_and_each_gpu() {
+        let out = "0, NVIDIA GeForce RTX 4090, 24564, 8100, 33\n1, NVIDIA GeForce RTX 4090, 24564, 506, 0\ndriver,615.71.09,13.0";
+        assert_eq!(
+            gpu_inventory_text(out).unwrap(),
+            "NVIDIA driver 615.71.09, CUDA up to 13.0\n\
+             GPU 0: NVIDIA GeForce RTX 4090, 24564 MiB total, 8100 MiB used, 33% busy\n\
+             GPU 1: NVIDIA GeForce RTX 4090, 24564 MiB total, 506 MiB used, 0% busy"
+        );
+        assert_eq!(gpu_inventory_text("0, A100, 40960, 0, 0").unwrap(), "GPU 0: A100, 40960 MiB total, 0 MiB used, 0% busy");
+        assert_eq!(gpu_inventory_text(""), None);
+        assert_eq!(gpu_inventory_text("driver,,"), None);
+        assert!(gpu_inventory_text("0, A100, 40960, 0, 0\ndriver,Deprecated,").unwrap().starts_with("GPU 0:"));
     }
 
     #[test]
