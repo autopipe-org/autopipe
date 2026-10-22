@@ -96,7 +96,8 @@ struct DryRunParams {
     input_dir: String,
     /// Remote output directory (optional, defaults to configured output directory)
     output_dir: Option<String>,
-    /// Number of CPU cores (default: 8)
+    /// Number of CPU cores. Omit it: the run then uses the pipeline's `cores:` from config.yaml when it is above 0,
+    /// else every core of the server (nproc). Pass it only when the user names a core count in chat.
     cores: Option<u32>,
     /// Set to true if the pipeline needs Docker access inside the container (e.g., nextflow -profile docker, docker run, singularity exec). Mounts the host Docker socket.
     #[serde(default)]
@@ -113,7 +114,8 @@ struct ExecuteParams {
     /// Windows-style paths like `C:\Users\me\data` are accepted and auto-translated to WSL form;
     /// pass through whatever the user gave you.
     input_dir: String,
-    /// Number of CPU cores (default: 8)
+    /// Number of CPU cores. Omit it: the run then uses the pipeline's `cores:` from config.yaml when it is above 0,
+    /// else every core of the server (nproc). Pass it only when the user names a core count in chat.
     cores: Option<u32>,
     /// Set to true if the pipeline needs Docker access inside the container (e.g., nextflow -profile docker, docker run, singularity exec). Mounts the host Docker socket.
     #[serde(default)]
@@ -245,8 +247,13 @@ struct RemoveInputParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ListFilesParams {
-    /// Remote directory path to list
+    /// Remote directory path to list (with image_name: a directory inside that Docker image)
     path: String,
+    /// Optional: list a directory INSIDE this Docker image (e.g. "autopipe-ssaf-t") instead of on the server,
+    /// to find installed code. Read-only, no network, no mounts; only code locations of the image (/opt,
+    /// /usr/lib, /usr/local/lib, /usr/share, /usr/local/share, /app, /src, /pipeline).
+    #[serde(default)]
+    image_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -254,11 +261,17 @@ struct ReadFileParams {
     /// Remote file path to read
     path: String,
     /// Set to true ONLY after the user has explicitly agreed to let you read a
-    /// file located in the input directory (user-provided data, which may be
-    /// sensitive). Leave unset otherwise — if a read is gated the tool returns
+    /// file outside the AutoPipe workspace (its real path is not under the workspace,
+    /// pipelines or outputs folder — e.g. data linked into the input folder, or any other
+    /// server path). Leave unset otherwise — if a read is gated the tool returns
     /// instructions to ask the user first, and you re-call with this set to true.
     #[serde(default)]
     confirm_read: Option<bool>,
+    /// Optional: read a file INSIDE this Docker image (e.g. "autopipe-ssaf-t") instead of on the server,
+    /// e.g. installed package code (spatialdata_io's readers). Read-only, no network, no mounts; only code
+    /// locations of the image; paths that look like secrets are refused. No consent needed.
+    #[serde(default)]
+    image_name: Option<String>,
     /// First line to return (1-based). A file longer than one result (~45 KB) comes in parts: the result says
     /// which lines it holds and the offset of the next part.
     #[serde(default)]
@@ -741,6 +754,13 @@ fn mount_pairs(listing: &str, dir: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The run's core count from a config.yaml `cores:` line, when it is a number above 0
+/// (`cores: 0`, blank or not a number = not set).
+fn config_cores(line: &str) -> Option<u32> {
+    let value = line.trim().strip_prefix("cores:")?.split('#').next()?;
+    value.trim().trim_matches(|c| c == '"' || c == '\'').parse::<u32>().ok().filter(|n| *n > 0)
+}
+
 /// Docker label AutoPipe puts on the images it builds: the pipeline folder they were built from. Image names are
 /// per server, not per workspace, so two pipelines of the same name in different workspaces share a name; the label
 /// tells whose image it is before one is replaced or removed.
@@ -979,8 +999,8 @@ fn chat_setup_message(pipeline_dir: &str, setup: Option<&str>, gpus: &str, cores
          5) Call dry_run with that input_dir; if it reports an invalid value, show the user what it lists and ask again.\n\
          6) Ask which GPU to use: offer each GPU below with its memory and current use, the least used first as the \
          recommendation, and CPU only when the pipeline allows it (gpus=\"none\"); skip the question when there \
-         is no GPU. Ask how many CPU cores to use. Then call execute_pipeline with that input_dir, gpus (the chosen \
-         index, e.g. \"1\") and cores.\n\n\
+         is no GPU. Use all the CPU cores listed below unless the user asks for fewer. Then call execute_pipeline \
+         with that input_dir and gpus (the chosen index, e.g. \"1\"), passing cores only when the user chose fewer.\n\n\
          Server resources:\n- GPUs: {gpus}\n- CPU cores: {cores}\n\n{guide}",
         dir = pipeline_dir,
         gpus = gpus.replace('\n', "\n  "),
@@ -1643,6 +1663,57 @@ async fn fetch_github_file(client: &reqwest::Client, owner: &str, repo: &str, pa
     }
 }
 
+// ── Reading inside a Docker image (read_file / list_files with image_name) ──
+
+/// Where code lives in an image: the only places read_file / list_files may look into with image_name.
+const IMAGE_CODE_ROOTS: &[&str] = &["/opt", "/usr/lib", "/usr/local/lib", "/usr/share", "/usr/local/share", "/app", "/src", "/pipeline"];
+
+/// Path parts that may hold secrets an image was built with: never read, even under a code root.
+const IMAGE_SECRET_PARTS: &[&str] = &[".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".netrc", ".pypirc", ".npmrc",
+    ".git-credentials", ".env", "id_rsa", "id_ed25519", "token", "secret", "credential", "password", "passwd", "auth.json",
+    ".credentials.json", "private", ".pem", ".key"];
+
+/// Why a path inside an image may not be read, or None when it may. Absolute, no `..`, under a code root,
+/// no part that looks like a secret.
+fn image_path_refusal(path: &str) -> Option<String> {
+    if !path.starts_with('/') || path.chars().any(|c| c.is_control()) {
+        return Some("give an absolute path inside the image".into());
+    }
+    if path.split('/').any(|s| s == "..") {
+        return Some("'..' is not allowed".into());
+    }
+    let p = path.trim_end_matches('/');
+    if !IMAGE_CODE_ROOTS.iter().any(|r| p == *r || p.starts_with(&format!("{}/", r))) {
+        return Some(format!("only code locations of the image can be read: {}", IMAGE_CODE_ROOTS.join(", ")));
+    }
+    let low = p.to_lowercase();
+    if let Some(s) = IMAGE_SECRET_PARTS.iter().find(|s| low.split('/').any(|part| part.contains(**s))) {
+        return Some(format!("the path looks like it may hold a secret ('{}')", s));
+    }
+    None
+}
+
+/// A throwaway container of a LOCAL image (never pulled) that runs one read-only command: no network, no mounts, a read-only
+/// root, no capabilities, no new privileges, small process / memory limits. The image's own entrypoint is
+/// not run.
+fn image_read_cmd(image: &str, entrypoint: &str, args: &[&str]) -> String {
+    let mut cmd = format!(
+        "docker run --rm --pull never --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
+         --pids-limit 32 --memory 512m --entrypoint '{}' '{}'",
+        shell_escape(entrypoint), shell_escape(image)
+    );
+    for a in args {
+        cmd.push_str(&format!(" '{}'", shell_escape(a)));
+    }
+    cmd
+}
+
+/// True when `path` (a realpath) is inside one of the `roots` (realpaths, without a trailing slash).
+fn path_within(path: &str, roots: &[String]) -> bool {
+    let p = path.trim_end_matches('/');
+    roots.iter().filter(|r| !r.is_empty()).any(|r| p == r.as_str() || p.starts_with(&format!("{}/", r)))
+}
+
 // ── Upload / publish verification helpers ───────────────────────────
 
 /// Git blob id of `bytes` (what GitHub reports for a file with this content).
@@ -2165,6 +2236,27 @@ impl AutoPipeServer {
                 Some(if o.is_empty() || o == "<no value>" { None } else { Some(o) })
             }
             _ => None,
+        }
+    }
+
+    /// CPU cores for a run: what the caller asked for, else the pipeline's top-level `cores:` in
+    /// config.yaml when it is above 0 (the user can set it on the Input page), else every core of
+    /// the server (nproc), else 8. Snakemake gets it as --cores, so `workflow.cores` follows it.
+    async fn run_cores(&self, asked: Option<u32>, pipeline_dir: Option<&str>) -> u32 {
+        if let Some(c) = asked {
+            return c.max(1);
+        }
+        if let Some(dir) = pipeline_dir {
+            let cmd = format!("grep -m1 -E '^cores:' '{}/config.yaml' 2>/dev/null", shell_escape(dir.trim_end_matches('/')));
+            if let Ok((out, 0)) = self.ssh_run(&cmd).await {
+                if let Some(n) = config_cores(&clean_content(&out)) {
+                    return n;
+                }
+            }
+        }
+        match self.ssh_run("nproc 2>/dev/null").await {
+            Ok((out, 0)) => clean_content(&out).trim().parse::<u32>().ok().filter(|n| *n > 0).unwrap_or(8),
+            _ => 8,
         }
     }
 
@@ -4162,9 +4254,27 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
                 ))]));
             }
         }
+        // With the containerd image store, every build compresses the new layers
+        // (gzip, single-threaded) and unpacks them again; for a multi-GB conda
+        // environment that export takes longer than the install itself. zstd at
+        // level 1 is several times faster to write and is read natively by
+        // containerd. Without the containerd store the classic exporter does not
+        // compress at build time, so the plain command is kept there.
+        let containerd_store = matches!(
+            self.ssh_run("docker info --format '{{json .DriverStatus}}' 2>/dev/null").await,
+            Ok((ref o, 0)) if o.contains("io.containerd.snapshotter")
+        );
+        let output_flags = if containerd_store {
+            format!(
+                "--provenance=false --sbom=false --output 'type=image,name={},compression=zstd,compression-level=1,force-compression=true'",
+                shell_escape(&params.image_name)
+            )
+        } else {
+            format!("-t '{}'", shell_escape(&params.image_name))
+        };
         let cmd = format!(
-            "cd '{}' && nohup docker build --label '{}={}' -t '{}' . > '{}' 2>&1 &\necho $!",
-            shell_escape(&pipeline_dir), IMAGE_OWNER_LABEL, shell_escape(&owner_dir), shell_escape(&params.image_name), shell_escape(&log_path)
+            "cd '{}' && nohup docker build --label '{}={}' {} . > '{}' 2>&1 &\necho $!",
+            shell_escape(&pipeline_dir), IMAGE_OWNER_LABEL, shell_escape(&owner_dir), output_flags, shell_escape(&log_path)
         );
 
         match self.ssh_run(&cmd).await {
@@ -4283,7 +4393,6 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         &self,
         Parameters(params): Parameters<DryRunParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let cores = params.cores.unwrap_or(8).max(1);
         let dry_run_dir = format!("{}/.dry_run_tmp", self.config().full_output_dir().trim_end_matches('/'));
         // Convert any Windows-style paths supplied by the user.
         let input_dir = windows_to_wsl(&params.input_dir);
@@ -4296,6 +4405,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         let _ = self.ssh_run(&format!("mkdir -p '{}'", shell_escape(&output_dir))).await;
 
         let pipeline_dir = self.find_pipeline_dir(&params.image_name).await;
+        let cores = self.run_cores(params.cores, pipeline_dir.as_deref()).await;
         let pipeline_mount = match &pipeline_dir {
             Some(dir) => format!("-v '{}:/pipeline'", shell_escape(dir)),
             None => String::new(),
@@ -4499,7 +4609,6 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let cores = params.cores.unwrap_or(8).max(1);
         let output_dir = self.resolve_output_dir(&params.run_name);
         let container_name = format!("{}-run", params.run_name);
         let log_path = format!("{}/pipeline.log", output_dir.trim_end_matches('/'));
@@ -4509,6 +4618,7 @@ If other users have forked this pipeline, their forks remain on the Hub but thei
         let input_dir = windows_to_wsl(&params.input_dir);
 
         let pipeline_dir = self.find_pipeline_dir(&params.image_name).await;
+        let cores = self.run_cores(params.cores, pipeline_dir.as_deref()).await;
         let pipeline_mount = match &pipeline_dir {
             Some(dir) => format!("-v '{}:/pipeline'", shell_escape(dir)),
             None => String::new(),
@@ -5394,12 +5504,24 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         }
     }
 
-    #[tool(description = "List files and directories at a remote path on the SSH server. RESULTS-VIEWING WORKFLOW: when the user asks to view, check, or see results/output files: (1) call list_files to see what's there, (2) give the user a brief one-paragraph summary in chat (file count, names, sizes, optionally a 5-10 line excerpt from a single small text/log/summary file when it adds context), (3) tell them the visual viewer (show_results) is available for detailed inspection — especially needed for images, plots, genomic tracks, large tables, or any binary file. Do NOT ask 'viewer or chat?' and do NOT dump entire file contents into chat. If they explicitly ask for a specific file's full contents in chat, then use read_file for that one file.")]
+    #[tool(description = "List files and directories at a remote path on the SSH server. RESULTS-VIEWING WORKFLOW: when the user asks to view, check, or see results/output files: (1) call list_files to see what's there, (2) give the user a brief one-paragraph summary in chat (file count, names, sizes, optionally a 5-10 line excerpt from a single small text/log/summary file when it adds context), (3) tell them the visual viewer (show_results) is available for detailed inspection — especially needed for images, plots, genomic tracks, large tables, or any binary file. Do NOT ask 'viewer or chat?' and do NOT dump entire file contents into chat. If they explicitly ask for a specific file's full contents in chat, then use read_file for that one file. INSIDE A DOCKER IMAGE: with image_name, list a directory of that image (code locations only: /opt, /usr/lib, /usr/local/lib, /usr/share, /usr/local/share, /app, /src, /pipeline; read-only, no network, no mounts) to find installed code, then read it with read_file and the same image_name.")]
     async fn list_files(
         &self,
         Parameters(params): Parameters<ListFilesParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let path = windows_to_wsl(&params.path);
+        if let Some(image) = params.image_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some(why) = image_path_refusal(&path) {
+                return Ok(CallToolResult::error(vec![Content::text(format!("Cannot list '{}' in image {}: {}", path, image, why))]));
+            }
+            return match self.ssh_run_timed(&format!("{} 2>&1", image_read_cmd(image, "ls", &["-la", &path])), 120).await {
+                Ok((out, 0)) => Ok(CallToolResult::success(vec![Content::text(format!("[inside image {}]\n{}", image, out))])),
+                Ok((out, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Cannot list '{}' in image {}: {}", path, image, out.trim().chars().take(400).collect::<String>()
+                ))])),
+                Err(e) => Ok(CallToolResult::error(vec![Content::text(e)])),
+            };
+        }
         match self.ssh_run(&format!("ls -la '{}'", shell_escape(&path))).await {
             Ok((output, 0)) => Ok(CallToolResult::success(vec![Content::text(output)])),
             Ok((output, _)) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -5414,7 +5536,7 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
     #[tool(description = "Read a file's contents on the remote SSH server. Two valid uses:\n\
                           (1) INTERNAL ANALYSIS — you (the AI) need to inspect a code or config file for your own work, e.g. the pre-download security review required by download_pipeline, or sanity-checking a Snakefile before a build. In this mode read silently: do NOT echo the full contents to the user, surface only specific findings (file path, line number, snippet, plain-English concern). No prior user permission is required because nothing is shown to the user yet.\n\
                           (2) USER ASKED FOR ONE FILE'S CONTENTS — the user explicitly said something like 'show me X' for a specific text/log/summary file. Read it and display the contents. For binary/image/large/genomic files (BAM, VCF, BCF, BED, GFF, CRAM, PNG, PDF, HDF5, etc.) do NOT use read_file — direct the user to show_results instead.\n\
-                          INPUT DATA — SENSITIVE: Files under the input directory (user-provided data, possibly patient/PHI) must NOT be read without the user's consent. If you call read_file on one, the tool returns a consent request instead of the content — relay it to the user and only re-call with confirm_read=true after they explicitly agree; if they decline, ask them for the specific values you need (column names, group labels, sample IDs) instead of reading the file. Do NOT read raw user data at external paths directly either — stage user data with prepare_input (into the input directory) first, then read with consent. Binary files and files over 2 MB are refused by this tool — use show_results to view them. A text file longer than one result (~45 KB, e.g. a large script) comes in parts: the result names the line range and the offset of the next part; read on with offset (and limit) instead of working around it.\n\
+                          OUTSIDE THE WORKSPACE — CONSENT: a file whose real path is outside the AutoPipe workspace (the workspace, pipelines and outputs folders) is not read without the user's consent: that includes user data linked into the input folder (its real path is the user's own folder; possibly patient/PHI data) and any other server path, e.g. a script the user wants turned into a pipeline. The tool then returns a consent request instead of the content — relay it to the user and only re-call with confirm_read=true after they explicitly agree; if they decline, ask them for the specific values you need (column names, group labels, sample IDs) instead of reading the file. Files inside the workspace (pipelines, outputs, files copied into it) need no consent. INSIDE A DOCKER IMAGE: with image_name, read a file of the image (e.g. installed package code, to see what a library actually does) — read-only, no network, no mounts, code locations only (/opt, /usr/lib, /usr/local/lib, /usr/share, /usr/local/share, /app, /src, /pipeline), secret-looking paths refused, no consent needed; use list_files with image_name to find the file. Prefer this to adding temporary code to a pipeline to print what is installed. Binary files and files over 2 MB are refused by this tool — use show_results to view them. A text file longer than one result (~45 KB, e.g. a large script) comes in parts: the result names the line range and the offset of the next part; read on with offset (and limit) instead of working around it.\n\
                           Do NOT proactively ask 'do you want to save this locally?' after displaying — only mention download_results if the user themselves expresses interest in keeping a copy.")]
     async fn read_file(
         &self,
@@ -5423,43 +5545,66 @@ Uses Docker to handle root-owned files so permissions are never an issue.")]
         let path = windows_to_wsl(&params.path);
         let config = self.config();
 
-        // ── Privacy gate: input-directory files need explicit user consent ──
-        // Files under the configured input directory are user-provided data
-        // (often symlinked in via prepare_input) and may be sensitive (e.g.
-        // patient/PHI data). Do not load them into the conversation without the
-        // user agreeing. This gate lives in the read_file TOOL only — the shared
-        // ssh_read_file helper is untouched, so upload/validate/download-review
-        // reads of pipeline files are unaffected.
-        let input_trimmed = config.full_input_dir().trim_end_matches('/').to_string();
-        let under_input = !input_trimmed.is_empty()
-            && (path == input_trimmed || path.starts_with(&format!("{}/", input_trimmed)));
-        if under_input && params.confirm_read != Some(true) {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "NOT READ — consent required. '{}' is in the input directory and may be user-provided data, which can be sensitive (e.g. patient/PHI data). Do NOT load it into the conversation without the user's permission.\n\n\
-                 Ask the user, in their language, whether you may read this input file:\n\
-                 - If they agree: call read_file again with confirm_read=true.\n\
-                 - If they decline: do NOT read it — instead ask them to tell you the specific information you need (e.g. column names, group labels, sample IDs) so you can proceed without exposing the data.",
-                path
-            ))]));
-        }
-
-        // ── Read at most MAX+1 bytes so huge/raw data is never loaded into the
-        //    conversation (raw data belongs in the viewer, not the chat). This
-        //    applies regardless of location, covering sensitive data the user
-        //    may point at outside the input directory. ──
         const MAX: usize = 2 * 1024 * 1024; // 2 MB
-        let read_cmd = format!("head -c {} '{}'", MAX + 1, shell_escape(&path));
-        let content = match self.ssh_run(&read_cmd).await {
-            Ok((out, 0)) => out,
-            Ok((out, _)) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot read '{}': {}", path, out.trim()
+        let image = params.image_name.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        let content = if let Some(image) = image.as_deref() {
+            // ── Inside a Docker image: code locations only, read-only, no network, no mounts ──
+            if let Some(why) = image_path_refusal(&path) {
+                return Ok(CallToolResult::error(vec![Content::text(format!("NOT READ — '{}' in image {}: {}", path, image, why))]));
+            }
+            let cmd = format!("set -o pipefail; {} 2>&1 | head -c {}", image_read_cmd(image, "cat", &[&path]), MAX + 1);
+            match self.ssh_run_timed(&format!("bash -c '{}'", shell_escape(&cmd)), 120).await {
+                Ok((out, 0)) => out,
+                Ok((out, _)) if out.len() > MAX => out,       // head closed the pipe: too large, refused below
+                Ok((out, _)) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot read '{}' in image {}: {}", path, image, out.trim().chars().take(400).collect::<String>()
+                    ))]));
+                }
+                Err(e) => return Ok(CallToolResult::error(vec![Content::text(format!("Cannot read '{}' in image {}: {}", path, image, e))])),
+            }
+        } else {
+            // ── Consent gate: a file whose real path is outside the AutoPipe workspace (the workspace,
+            //    pipelines and outputs folders) needs the user's consent. That covers user data linked into
+            //    the input folder (its real path is the user's own folder) and any other server path. This
+            //    gate lives in the read_file TOOL only — the shared ssh_read_file helper is untouched, so
+            //    upload/validate/download-review reads of pipeline files are unaffected. ──
+            let real = self.canonical_dir(&path).await;
+            let mut roots = Vec::new();
+            for r in [config.repo_path.clone(), config.full_pipelines_dir(), config.full_output_dir()] {
+                if !r.trim().is_empty() {
+                    roots.push(self.canonical_dir(r.trim()).await);
+                }
+            }
+            if !path_within(&real, &roots) && params.confirm_read != Some(true) {
+                return Ok(CallToolResult::success(vec![Content::text(format!(
+                    "NOT READ — consent required. '{}'{} is outside the AutoPipe workspace ({}), so it may be the user's own data \
+                     (possibly sensitive, e.g. patient/PHI data) or another project's files. Do NOT load it into the conversation \
+                     without the user's permission.\n\n\
+                     Ask the user, in their language, whether you may read this file:\n\
+                     - If they agree: call read_file again with confirm_read=true.\n\
+                     - If they decline: do NOT read it — instead ask them to tell you the specific information you need \
+                     (e.g. column names, group labels, sample IDs) so you can proceed without exposing the data.",
+                    path,
+                    if real != path.trim_end_matches('/') { format!(" (real path {})", real) } else { String::new() },
+                    roots.join(", ")
                 ))]));
             }
-            Err(e) => {
-                return Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Cannot read '{}': {}", path, e
-                ))]));
+            // ── Read at most MAX+1 bytes so huge/raw data is never loaded into the
+            //    conversation (raw data belongs in the viewer, not the chat). ──
+            let read_cmd = format!("head -c {} '{}'", MAX + 1, shell_escape(&path));
+            match self.ssh_run(&read_cmd).await {
+                Ok((out, 0)) => out,
+                Ok((out, _)) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot read '{}': {}", path, out.trim()
+                    ))]));
+                }
+                Err(e) => {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "Cannot read '{}': {}", path, e
+                    ))]));
+                }
             }
         };
 
@@ -5656,7 +5801,7 @@ After calling this for a URL, automatically call check_download_status with the 
 Otherwise, a symlink is created pointing to the given absolute path. \
 Returns the destination directory path — pass this as input_dir to dry_run or execute_pipeline. \
 If this tool fails, fall back to create_symlink using the dest_dir shown in the error message as the target directory. \
-Always stage user-provided data here before inspecting it: read_file applies a consent gate to files in this input directory, so do not read raw user data at its original external path — bring it in with prepare_input first.")]
+Always stage user-provided data here before running on it. read_file asks the user's consent before reading a file whose real path is outside the AutoPipe workspace, which includes data linked here by prepare_input.")]
     async fn prepare_input(
         &self,
         Parameters(params): Parameters<PrepareInputParams>,
@@ -6868,7 +7013,7 @@ impl ServerHandler for AutoPipeServer {
                  Pipeline outputs are stored under the configured output directory.\n\
                  Use list_files and read_file to view results from the output path.\n\n\
                  DATA PRIVACY (IMPORTANT):\n\
-                 NEVER load the user's raw input data into the conversation. To let the user view input or output data, use show_results — it streams to a local viewer in the browser, not into the chat. Files under the input directory are gated: read_file will not return their contents until the user explicitly consents (then re-call read_file with confirm_read=true); if the user declines, ask them for the specific values you need (column names, group labels, etc.) instead of reading the file. Stage user-provided data with prepare_input first — do not read raw data at its original external path directly. Large or binary files are never returned by read_file; view them with show_results.\n\n\
+                 NEVER load the user's raw input data into the conversation. To let the user view input or output data, use show_results — it streams to a local viewer in the browser, not into the chat. Files outside the AutoPipe workspace are gated, including data linked into the input folder: read_file will not return their contents until the user explicitly consents (then re-call read_file with confirm_read=true); if the user declines, ask them for the specific values you need (column names, group labels, etc.) instead of reading the file. Stage user-provided data with prepare_input first. To see code installed in a pipeline's Docker image, use read_file / list_files with image_name instead of adding temporary code to the pipeline. Large or binary files are never returned by read_file; view them with show_results.\n\n\
                  PATH HANDLING (IMPORTANT for Windows users):\n\
                  If the user provides a Windows-style path (e.g. C:\\Users\\me\\data\\input.fastq \
                  or C:/Users/me/data), pass it through to AutoPipe AS-IS. Do NOT ask the user to \
@@ -7170,6 +7315,16 @@ mod llm_login_tests {
             &llm_login_flags("/home/u/.claude", "/autopipe/llm/claude", "CLAUDE_CONFIG_DIR"),
             "/in", "", "/out", "img:latest", "/out/pipeline.log");
         assert!(cmd.contains("-e CLAUDE_CONFIG_DIR=/autopipe/llm/claude -v '/in:/input:ro'"), "{}", cmd);
+    }
+
+    #[test]
+    fn config_cores_reads_the_run_core_count() {
+        assert_eq!(config_cores("cores: 16  # Number of CPU cores for this run; 0 = all cores of the server"), Some(16));
+        assert_eq!(config_cores("cores: \"8\""), Some(8));
+        assert_eq!(config_cores("cores: 0  # 0 = all cores of the server"), None);
+        assert_eq!(config_cores("cores:"), None);
+        assert_eq!(config_cores("cores: all"), None);
+        assert_eq!(config_cores("cores_extra: 4"), None);
     }
 
     #[test]
@@ -7580,5 +7735,48 @@ mod upload_verify_tests {
         let c = blobs(&[("p/ro-crate-metadata.json", "m2", "100644")]);
         assert_eq!(tree_diff(&a, &c), vec!["p/Snakefile", "p/ro-crate-metadata.json"]);
         assert!(tree_diff(&a, &a).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod image_read_tests {
+    use super::*;
+
+    #[test]
+    fn image_paths_are_code_locations_only() {
+        assert!(image_path_refusal("/opt/conda/envs/ssaft/lib/python3.11/site-packages/spatialdata_io/readers/xenium.py").is_none());
+        assert!(image_path_refusal("/usr/local/lib/python3.11/site-packages/pkg/__init__.py").is_none());
+        assert!(image_path_refusal("/opt").is_none());
+        assert!(image_path_refusal("/etc/passwd").is_some());
+        assert!(image_path_refusal("/root/.bashrc").is_some());
+        assert!(image_path_refusal("/home/u/x.py").is_some());
+        assert!(image_path_refusal("relative/path").is_some());
+        assert!(image_path_refusal("/opt/../etc/shadow").is_some());
+        assert!(image_path_refusal("/opt/app/.env").is_some());
+        assert!(image_path_refusal("/opt/app/config/secrets.yaml").is_some());
+        assert!(image_path_refusal("/usr/lib/ssl/private/server.key").is_some());
+        assert!(image_path_refusal("/opt/x/.ssh/id_rsa").is_some());
+        assert!(image_path_refusal("/opt/claude/.credentials.json").is_some());
+    }
+
+    #[test]
+    fn image_read_command_is_isolated() {
+        let c = image_read_cmd("autopipe-ssaf-t", "cat", &["/opt/a b.py"]);
+        for flag in ["--rm", "--pull never", "--network none", "--read-only", "--cap-drop ALL", "no-new-privileges", "--entrypoint 'cat'"] {
+            assert!(c.contains(flag), "{} missing in {}", flag, c);
+        }
+        assert!(!c.contains(" -v "), "no mounts: {}", c);
+        assert!(c.ends_with("'autopipe-ssaf-t' '/opt/a b.py'"), "{}", c);
+    }
+
+    #[test]
+    fn workspace_roots_by_real_path() {
+        let roots = vec!["/home/u/ws".to_string(), "/data/out".to_string()];
+        assert!(path_within("/home/u/ws/pipelines/p/Snakefile", &roots));
+        assert!(path_within("/home/u/ws", &roots));
+        assert!(path_within("/data/out/run1/report.md", &roots));
+        assert!(!path_within("/home/u/wsx/file", &roots));
+        assert!(!path_within("/bce/data/sample/experiment.xenium", &roots));
+        assert!(!path_within("/x", &[String::new()]));
     }
 }

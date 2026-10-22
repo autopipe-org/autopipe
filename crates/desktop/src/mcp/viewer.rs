@@ -2809,16 +2809,57 @@ async fn input_save_handler(Json(body): Json<InputSaveBody>) -> Json<serde_json:
         }
     }
 
+    // Link a file value only when it names a file that really exists on the server (or in the
+    // bucket). An untouched default that is not a file, e.g. an "Optional" key shipped as "none",
+    // is left alone instead of leaving a dangling input/none link; a path the user picked or typed
+    // that does not exist is reported before anything is linked or written.
+    let link_source = |f: &InputSaveField| {
+        if is_cloud {
+            format!("/home/ubuntu/s3input/{}", f.value.trim())
+        } else {
+            f.value.trim().to_string()
+        }
+    };
+    let candidates: Vec<&InputSaveField> = body.fields.iter().filter(|f| input_needs_symlink(f)).collect();
+    let mut not_linked: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if !candidates.is_empty() {
+        let tests = candidates
+            .iter()
+            .map(|f| format!("[ -e '{}' ] && echo 1 || echo 0", link_source(f).replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join("; ");
+        // If the check itself cannot run, keep the old behaviour and link everything.
+        if let Ok((out, 0)) = ssh_run_fast(cfg, &tests).await {
+            let found: Vec<bool> = clean_content(&out).lines().map(|l| l.trim() == "1").collect();
+            if found.len() == candidates.len() {
+                let mut missing = Vec::new();
+                for (f, ok) in candidates.iter().zip(found) {
+                    if ok {
+                        continue;
+                    }
+                    let untouched = f.original.as_deref().map(|o| o.trim() == f.value.trim()).unwrap_or(false);
+                    if untouched {
+                        not_linked.insert(f.key.clone());
+                    } else {
+                        missing.push(format!("{}: {}", f.key, f.value.trim()));
+                    }
+                }
+                if !missing.is_empty() {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("File not found on the server — pick an existing file: {}", missing.join("; ")),
+                    }));
+                }
+            }
+        }
+    }
+
     let mut new_values: Vec<(String, String)> = Vec::new();
     let mut prepared: Vec<String> = Vec::new();
     for f in &body.fields {
-        if input_needs_symlink(f) {
+        if input_needs_symlink(f) && !not_linked.contains(&f.key) {
             // The user picked a file: value is an S3 key (cloud) or a server path.
-            let src = if is_cloud {
-                format!("/home/ubuntu/s3input/{}", f.value.trim())
-            } else {
-                f.value.trim().to_string()
-            };
+            let src = link_source(f);
             let base = src.rsplit('/').next().unwrap_or(&src).to_string();
             let link = format!("{}/{}", input_dir.trim_end_matches('/'), base);
             let cmd = format!(

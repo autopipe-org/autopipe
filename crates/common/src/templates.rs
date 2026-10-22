@@ -70,8 +70,9 @@ RUN pip install uv
 
 # Setup pipeline
 WORKDIR /pipeline
-COPY Snakefile .
-COPY config.yaml .
+# Copy the pipeline folder last. Runs mount the folder over /pipeline, so the image
+# can be built before the Snakefile is final and editing it later needs no rebuild.
+COPY . /pipeline/
 
 CMD ["snakemake", "--help"]
 "#;
@@ -84,6 +85,8 @@ r2: "/input/sample_R2.fastq.gz"
 
 # Required: reference genome, mounted at runtime (input file)
 reference: "/input/reference.fa"
+
+cores: 0  # Number of CPU cores for this run; 0 = all cores of the server
 
 # Optional: number of threads per rule (default: 4)
 threads: 4
@@ -216,15 +219,27 @@ items by review_pipeline and are enforced again at run time.
 ## Review After Generating (MANDATORY)
 After writing all files and running validate_pipeline, ALWAYS call review_pipeline
 on the pipeline directory, present its natural-language summary report to the user,
-and get their confirmation (or apply requested fixes) BEFORE calling build_image.
+and get their confirmation (or apply requested fixes) BEFORE running it (dry_run /
+execute_pipeline), and before building it unless you are building early (see "Build Early").
 Re-run review_pipeline after any edit. Never skip this for a pipeline you just
 generated, and never rely on a remembered earlier approval.
+
+## Build Early (a pipeline you are writing now)
+The image build installs the tools and takes minutes; writing the other files takes about as long.
+Overlap them: once the inputs are understood, write the Dockerfile FIRST and call build_image right
+away, then write the Snakefile, config.yaml, scripts, README.md and ro-crate-metadata.json while it
+builds, and call check_build_status when those files are written. Validate and review as usual
+before dry_run / execute_pipeline; the review gates running the pipeline, and its code can still be
+fixed then without a rebuild (see "Copy the pipeline folder" under Dockerfile Rules). Rebuild only if
+the Dockerfile changes. Do not build early when the Dockerfile installs files that are not written
+yet (e.g. vendored code), or for a pipeline you did not write in this session (downloaded from the
+hub or given by someone else): review those before building them.
 
 ## Snakefile Rules
 - Use `configfile: "config.yaml"` for all parameters
 - Define `rule all` with final expected outputs
 - Each rule = one logical analysis step
-- Use `threads` directive for parallelizable steps
+- Use `threads` directive for parallelizable steps (see "CPU Use")
 - Use `log` directive for capturing tool output
 - Use `expand()` for sample-level parallelism
 
@@ -243,7 +258,9 @@ generated, and never rely on a remembered earlier approval.
   - Install uv first: `RUN pip install uv`
   - The `--system` flag is required to install into the conda environment
   - uv resolves dependencies much faster than pip
-- Copy Snakefile and config.yaml into `/pipeline`
+- Copy the pipeline folder as the LAST instruction with `COPY . /pipeline/` (not file by file), so the
+  image can be built before the Snakefile is final. Runs mount the pipeline folder over /pipeline, so
+  editing the Snakefile, config.yaml or scripts later needs no rebuild; rebuild only when the Dockerfile changes.
 - Clean up: `conda clean -afy`
 - Set `WORKDIR /pipeline`
 - Do NOT use Docker commands (docker run, docker pull) directly inside Snakefile rules. The only exception is `nextflow run` with `-profile docker`, which manages its own containers through the mounted Docker socket.
@@ -259,6 +276,13 @@ generated, and never rely on a remembered earlier approval.
 - ALL configurable parameters go here, not in Snakefile
 - REQUIRED: every parameter MUST have a one-line explanatory comment describing what it is — either inline (`key: value  # what it is`) or on the line directly above the key. The AutoPipe Input page shows these comments as each field's description, so a variable with no comment appears with no help text.
 - Mark REQUIRED parameters by including the word `Required` in that parameter's comment (e.g. `# Required: paired-end R1 FASTQ`). The Input page reads this keyword to show a red `*` next to required fields.
+- The words `required` and `optional` are MARKERS, not prose: the Input page looks for them
+  anywhere in the comment, even inside another word. Use them only to label the key, at the
+  start of the comment (`# Required: ...`, `# Optional: ...`), and never in the rest of a
+  comment, otherwise a field gets the wrong flag. Rephrase instead:
+  - "FASTQ, optionally gzipped" → "FASTQ, plain or gzipped"
+  - "Minimum depth required after filtering" → "Minimum depth after filtering"
+  - "Non-required tuning value" → just describe the value
 - Fill a default value or leave it blank per the user's choice (see "Config Variables: default value vs blank")
 - IMPORTANT: Use `/input` and `/output` as paths (Docker mount points)
   - Input data is mounted at `/input` (read-only) at runtime
@@ -294,6 +318,9 @@ generated, and never rely on a remembered earlier approval.
     `genome: "mm10"  # Genome build, mm10 or hg38 (not a file)`
 - A key that is an input file is treated as REQUIRED unless its comment says
   `Optional`, so there is no need to also write `Required` on it.
+- An OPTIONAL input file ships blank: `primer_bed: ""  # Optional: primer scheme BED (input file)`,
+  and the Snakefile treats a blank value as "not given". Do not put a placeholder such as
+  `"none"` or an example path in a file key.
 - A key must not be BOTH a value and a parent: write either `key: value` or an
   indented block under `key:`, never a scalar on a key that also has children.
 - Keep a path relative to `/input` consistent with how the Snakefile reads it. If a
@@ -444,6 +471,13 @@ Examples:
 - How to run (docker build + docker run commands). For a GPU pipeline say instead that it is run
   through AutoPipe, which attaches the GPUs — do not give a hand-written `docker run --gpus` command
 - Configuration options from config.yaml
+
+## CPU Use
+AutoPipe passes the run's core count to Snakemake (`--cores`):
+- config.yaml always has this top-level key, exactly:
+  `cores: 0  # Number of CPU cores for this run; 0 = all cores of the server`
+  AutoPipe reads it when it starts the run (0 or missing = every core of the server), so the
+  user can lower it on the Input page. The Snakefile does not read it.
 
 ## Path Convention
 - Pipelines always use Docker mount points for data paths:
