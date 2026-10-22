@@ -8,7 +8,7 @@ name: Test build (Windows)
 # tagName so it only builds, and both products are published as run artifacts.
 on:
   push:
-    branches: ["test"]
+    branches: ["test", "key_test"]
 
 jobs:
   # The console binary AI clients spawn as `autopipe --mcp-server`. This is what
@@ -24,6 +24,9 @@ jobs:
           key: test-windows-cli
 
       - name: Build CLI binary
+        env:
+          # libssh2's vendored OpenSSL is configured with Strawberry Perl.
+          OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
         run: cargo build --release -p autopipe --bin autopipe
 
       - uses: actions/upload-artifact@v4
@@ -58,6 +61,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
         with:
           projectPath: frontend
           # No tagName/releaseName: build only, do not publish a Release.

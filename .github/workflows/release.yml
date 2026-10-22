@@ -68,12 +68,17 @@ jobs:
         with:
           workspaces: ". -> target"
           key: ${{ matrix.artifact }}
+      # libssh2's vendored OpenSSL is configured with Strawberry Perl on Windows,
+      # because Git Bash's MSYS perl lacks the modules OpenSSL's Configure needs.
+      - name: Use Strawberry Perl for OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_ENV 'OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe'
       - name: Build CLI binary
         shell: bash
-        # Vendored OpenSSL (`--features portable`) is only needed for the
-        # Intel Mac cross-compile, where the ARM runner's brew openssl is
-        # the wrong architecture. Native builds use the system libssl on
-        # Linux/Mac or the runner-provided OpenSSL on Windows.
+        # `--features portable` adds the openssl crate's vendored OpenSSL for
+        # the Intel Mac cross-compile. libssh2's own OpenSSL is vendored on
+        # every platform (see crates/desktop/Cargo.toml).
         run: |
           FLAGS=""
           if [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
@@ -167,6 +172,12 @@ jobs:
         working-directory: frontend
         run: npm install
 
+      # libssh2's vendored OpenSSL is configured with Strawberry Perl on Windows,
+      # because Git Bash's MSYS perl lacks the modules OpenSSL's Configure needs.
+      - name: Use Strawberry Perl for OpenSSL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_ENV 'OPENSSL_SRC_PERL=C:\Strawberry\perl\bin\perl.exe'
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
