@@ -593,6 +593,34 @@ fn gpu_inventory_text(out: &str) -> Option<String> {
 }
 
 const NO_GPU_TEXT: &str = "none found (nvidia-smi is not available or lists no GPU)";
+/// The GPU line for the AutoPipe-managed AWS VM, which is created as a CPU-only instance.
+const AWS_VM_NO_GPU_TEXT: &str = "none: this is the AutoPipe-managed AWS VM, which is CPU-only (no GPU). GPU pipelines \
+     cannot run on it; tell the user so, and do not suggest installing NVIDIA drivers on it";
+
+fn no_gpu_text(aws_vm: bool) -> String {
+    if aws_vm { AWS_VM_NO_GPU_TEXT } else { NO_GPU_TEXT }.to_string()
+}
+
+/// Why no GPU could be attached. On the AutoPipe-managed AWS VM the instance has no GPU, so driver/toolkit
+/// advice would not help.
+fn gpu_attach_failure(attempts: &[String], aws_vm: bool) -> String {
+    if aws_vm {
+        format!(
+            "No way to attach GPUs worked:\n{}\n\
+             This is the AutoPipe-managed AWS VM, which is CPU-only (no GPU), so GPU pipelines cannot run on it. \
+             Do not suggest installing NVIDIA drivers on this VM.",
+            attempts.join("\n")
+        )
+    } else {
+        format!(
+            "No way to attach GPUs worked:\n{}\n\
+             The server needs an NVIDIA driver and the NVIDIA Container Toolkit. For CDI (also rootless Docker) the \
+             admin runs `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (again after driver upgrades); \
+             check the GPU indices with nvidia-smi.",
+            attempts.join("\n")
+        )
+    }
+}
 
 /// What `docker inspect` (run with `2>&1`) said about a container: found (with the formatted output), certainly
 /// absent, or unknown — the query itself failed (daemon overloaded, timeout, SSH), which says nothing about the run.
@@ -2121,12 +2149,19 @@ impl AutoPipeServer {
         Ok((flags, summary))
     }
 
-    /// The server's GPUs (see gpu_inventory_text), or NO_GPU_TEXT.
+    /// The server's GPUs (see gpu_inventory_text), or the no-GPU line (see no_gpu_text).
     async fn gpu_inventory(&self) -> String {
+        let none = || no_gpu_text(self.on_aws_vm());
         match self.ssh_run(GPU_INVENTORY_CMD).await {
-            Ok((s, 0)) => gpu_inventory_text(&clean_content(&s)).unwrap_or_else(|| NO_GPU_TEXT.to_string()),
-            _ => NO_GPU_TEXT.to_string(),
+            Ok((s, 0)) => gpu_inventory_text(&clean_content(&s)).unwrap_or_else(none),
+            _ => none(),
         }
+    }
+
+    /// Whether SSH goes to the AutoPipe-managed AWS VM (the routing in `config`).
+    fn on_aws_vm(&self) -> bool {
+        let c = AppConfig::load();
+        c.connection_type == "cloud" && c.cloud_provider == "aws" && !c.aws_vm_host.trim().is_empty()
     }
 
     async fn resolve_gpu_flags(&self, selection: &str) -> Result<String, String> {
@@ -2143,13 +2178,7 @@ impl AutoPipeServer {
                 Err(e) => attempts.push(format!("- `{}` failed: {}", flags, e)),
             }
         }
-        Err(format!(
-            "No way to attach GPUs worked:\n{}\n\
-             The server needs an NVIDIA driver and the NVIDIA Container Toolkit. For CDI (also rootless Docker) the \
-             admin runs `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml` (again after driver upgrades); \
-             check the GPU indices with nvidia-smi.",
-            attempts.join("\n")
-        ))
+        Err(gpu_attach_failure(&attempts, self.on_aws_vm()))
     }
 
     async fn ssh_read_file(&self, path: &str) -> Result<String, String> {
@@ -7389,6 +7418,18 @@ mod gpu_tests {
         let c = build_image_cmd("/p", "/ws/p", "img:1", "/o/build.log", false);
         assert!(c.contains("nohup docker build --label") && c.contains("-t 'img:1' . > '/o/build.log'"), "{}", c);
         assert!(!c.contains("zstd"), "{}", c);
+    }
+
+    #[test]
+    fn the_aws_vm_is_reported_as_cpu_only() {
+        assert_eq!(no_gpu_text(false), NO_GPU_TEXT);
+        assert!(no_gpu_text(true).contains("CPU-only"));
+        let attempts = vec!["- `--gpus all` failed (exit 125): could not select device driver".to_string()];
+        let aws = gpu_attach_failure(&attempts, true);
+        assert!(aws.contains("could not select device driver") && aws.contains("CPU-only"));
+        assert!(!aws.contains("nvidia-ctk cdi generate"));
+        let ssh = gpu_attach_failure(&attempts, false);
+        assert!(ssh.contains("nvidia-ctk cdi generate") && !ssh.contains("AWS"));
     }
 
     #[test]
